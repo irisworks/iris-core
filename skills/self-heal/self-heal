@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# self-heal — sub-agent self-diagnosis and escalation to Iris via internal API
+# Primary path: POST to IRIS_API_URL/escalate (HTTP API on Iris's runtime)
+# Fallback: write event file to IRIS_EVENTS_DIR (shared filesystem)
+set -euo pipefail
+
+REASON=""
+AGENT="${AGENT_NAME:-unknown}"
+EMAIL=""
+RESTART=false
+CONTEXT=""
+SEVERITY="error"
+IRIS_EVENTS_DIR="${IRIS_EVENTS_DIR:-/iris/data/events}"
+IRIS_API_URL="${IRIS_API_URL:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reason)   REASON="$2";   shift 2 ;;
+    --agent)    AGENT="$2";    shift 2 ;;
+    --email)    EMAIL="$2";    shift 2 ;;
+    --restart)  RESTART=true;  shift ;;
+    --context)  CONTEXT="$2";  shift 2 ;;
+    --severity) SEVERITY="$2"; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -z "$REASON" ]] && { echo "self-heal: --reason is required" >&2; exit 1; }
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+ESCALATED=false
+
+# ── Primary path: POST to Iris internal API ─────────────────────────────────
+if [[ -n "$IRIS_API_URL" ]]; then
+  PAYLOAD=$(jq -n \
+    --arg agent "$AGENT" \
+    --arg issue "$REASON" \
+    --arg context "$CONTEXT" \
+    --arg severity "$SEVERITY" \
+    --arg environment "${IRIS_ENV:-prod}" \
+    '{"agent":$agent,"issue":$issue,"context":$context,"severity":$severity,"environment":$environment}')
+
+  RESPONSE=$(curl -s -w "\n%{http_code}" \
+    -X POST "${IRIS_API_URL}/escalate" \
+    -H "Content-Type: application/json" \
+    --connect-timeout 5 \
+    -d "$PAYLOAD" 2>/dev/null || true)
+
+  HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+  BODY=$(echo "$RESPONSE" | head -1)
+
+  if [[ "$HTTP_CODE" == "200" ]]; then
+    EVENT_ID=$(echo "$BODY" | jq -r '.eventId // "unknown"' 2>/dev/null || echo "unknown")
+    echo "[self-heal] Escalated to Iris via API (eventId: $EVENT_ID)"
+    ESCALATED=true
+  else
+    echo "[self-heal] API escalation failed (HTTP $HTTP_CODE) — falling back to file queue" >&2
+  fi
+fi
+
+# ── Fallback: write event file directly to Iris's events dir ────────────────
+if [[ "$ESCALATED" != "true" ]]; then
+  EVENT_ID="selfheal-$(date +%s)-$(head -c4 /dev/urandom | xxd -p)"
+
+  TEXT="🚨 Self-heal escalation from @${AGENT} [${SEVERITY}]: ${REASON}"
+  if [[ -n "$CONTEXT" ]]; then
+    TEXT="${TEXT}
+
+Context: ${CONTEXT}"
+  fi
+
+  EVENT_FILE="${IRIS_EVENTS_DIR}/${EVENT_ID}.json"
+  jq -n \
+    --arg type "immediate" \
+    --arg channelId "ESCALATE-${AGENT}" \
+    --arg user "$AGENT" \
+    --arg text "$TEXT" \
+    --arg severity "$SEVERITY" \
+    --arg agent "$AGENT" \
+    --arg reason "$REASON" \
+    --arg context "$CONTEXT" \
+    --arg timestamp "$TIMESTAMP" \
+    '{
+      type: $type,
+      channelId: $channelId,
+      user: $user,
+      text: $text,
+      meta: {
+        severity: $severity,
+        agent: $agent,
+        reason: $reason,
+        context: $context,
+        timestamp: $timestamp
+      }
+    }' > "$EVENT_FILE"
+
+  echo "[self-heal] Escalation event written to file queue: $EVENT_FILE"
+fi
+
+# ── Optional: send email ─────────────────────────────────────────────────────
+if [[ -n "$EMAIL" ]]; then
+  SUBJECT="[Iris] Sub-agent ${AGENT} escalation: ${SEVERITY}"
+  BODY="Agent: ${AGENT}
+Severity: ${SEVERITY}
+Time: ${TIMESTAMP}
+Reason: ${REASON}"
+  if [[ -n "$CONTEXT" ]]; then
+    BODY="${BODY}
+
+Context:
+${CONTEXT}"
+  fi
+  send-email --to "$EMAIL" --subject "$SUBJECT" --body "$BODY" \
+    && echo "[self-heal] Alert email sent to $EMAIL" \
+    || echo "[self-heal] Warning: email send failed" >&2
+fi
+
+# ── Optional: restart own service ────────────────────────────────────────────
+if [[ "$RESTART" == "true" ]]; then
+  SERVICE="${AGENT}.service"
+  echo "[self-heal] Attempting to restart ${SERVICE}..."
+  systemctl restart "$SERVICE" 2>&1 \
+    && echo "[self-heal] Service ${SERVICE} restarted" \
+    || echo "[self-heal] Warning: could not restart ${SERVICE}" >&2
+fi
+
+echo "[self-heal] Done. Iris will receive the escalation."

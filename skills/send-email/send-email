@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# send-email — send email via Resend API
+set -euo pipefail
+
+TO=""
+SUBJECT=""
+BODY=""
+HTML=""
+FROM="${IRIS_EMAIL_FROM:-Iris <iris@example.com>}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --to)      TO="$2";      shift 2 ;;
+    --subject) SUBJECT="$2"; shift 2 ;;
+    --body)    BODY="$2";    shift 2 ;;
+    --html)    HTML="$2";    shift 2 ;;
+    --from)    FROM="$2";    shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -z "$TO" ]]      && { echo "send-email: --to is required" >&2; exit 1; }
+[[ -z "$SUBJECT" ]] && { echo "send-email: --subject is required" >&2; exit 1; }
+
+# Read body from stdin if not provided via --body
+if [[ -z "$BODY" ]]; then
+  BODY=$(cat)
+fi
+
+RESEND_API_KEY=$(get-secret RESEND-API-KEY)
+[[ -z "$RESEND_API_KEY" ]] && { echo "send-email: RESEND-API-KEY not found in Key Vault" >&2; exit 1; }
+
+# Build JSON payload
+if [[ -n "$HTML" ]]; then
+  PAYLOAD=$(jq -n \
+    --arg from "$FROM" \
+    --arg to "$TO" \
+    --arg subject "$SUBJECT" \
+    --arg html "$HTML" \
+    --arg text "$BODY" \
+    '{"from":$from,"to":[$to],"subject":$subject,"html":$html,"text":$text}')
+else
+  PAYLOAD=$(jq -n \
+    --arg from "$FROM" \
+    --arg to "$TO" \
+    --arg subject "$SUBJECT" \
+    --arg text "$BODY" \
+    '{"from":$from,"to":[$to],"subject":$subject,"text":$text}')
+fi
+
+RESPONSE=$(curl -s -w "\n%{http_code}" \
+  -X POST "https://api.resend.com/emails" \
+  -H "Authorization: Bearer $RESEND_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD")
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY_RESP=$(echo "$RESPONSE" | head -1)
+
+if [[ "$HTTP_CODE" -ge 200 && "$HTTP_CODE" -lt 300 ]]; then
+  EMAIL_ID=$(echo "$BODY_RESP" | jq -r '.id // "unknown"')
+  echo "Email sent successfully (id: $EMAIL_ID)"
+else
+  echo "send-email: API error $HTTP_CODE: $BODY_RESP" >&2
+  exit 1
+fi

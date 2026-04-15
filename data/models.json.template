@@ -1,0 +1,102 @@
+{
+  "providers": {
+    "foundry-e2": {
+      "baseUrl": "https://<your-account>.cognitiveservices.azure.com/openai/v1",
+      "api": "openai-completions",
+      "apiKey": "FOUNDRY_E2_KEY",
+      "authHeader": true,
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsStore": false
+      },
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o (Foundry E2)",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o mini (Foundry E2)",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4 (Foundry E2)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 272000,
+          "maxTokens": 128000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "compat": {
+            "maxTokensField": "max_completion_tokens"
+          }
+        },
+        {
+          "id": "gpt-5.4-nano",
+          "name": "GPT-5.4 nano (Foundry E2)",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 400000,
+          "maxTokens": 128000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "compat": {
+            "maxTokensField": "max_completion_tokens"
+          }
+        },
+        {
+          "id": "Kimi-K2.5",
+          "name": "Kimi K2.5 (Foundry E2)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 131072,
+          "maxTokens": 16384,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "grok-4-1-fast-non-reasoning",
+          "name": "Grok-4.1 Fast (Foundry E2)",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 256000,
+          "maxTokens": 32768,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    },
+    "foundry-e2-responses": {
+      "baseUrl": "https://<your-account>.cognitiveservices.azure.com/openai/v1",
+      "api": "azure-openai-responses",
+      "apiKey": "FOUNDRY_E2_KEY",
+      "models": [
+        {
+          "id": "gpt-5.3-codex",
+          "name": "GPT-5.3 Codex (Foundry E2 Responses)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 400000,
+          "maxTokens": 128000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "gpt-5.4-pro",
+          "name": "GPT-5.4 Pro (Foundry E2 Responses)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 1050000,
+          "maxTokens": 128000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}

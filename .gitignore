@@ -1,0 +1,47 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Secrets — never commit
+*.env
+.env*
+secrets.json
+**/secrets/
+
+# Local infra state (resource IDs, endpoints — not secrets but local only)
+.infra.local.json
+
+# Python venv
+.venv/
+__pycache__/
+*.pyc
+
+# Claude Code local config
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+terraform/terraform.tfstate.*.backup
+
+# pi-mom runtime data — not committed (symlinks to repo assets are committed)
+# data/models.json IS committed (no secrets — keys come from env vars)
+data/sessions/
+data/events/
+data/**/log.jsonl
+data/**/log.jsonl.*
+
+# Agent runtime data
+agents/*/preview/
+agents/*/prod/
