@@ -333,7 +333,7 @@ if [[ "$SETUP_MODE" == true ]]; then
   # Derive a default KV name (max 24 chars, alphanumeric + dashes)
   if [[ -z "$KV_NAME" ]]; then
     # Try to derive from repo directory name or hostname
-    suggested="iris-kv-$(hostname -s | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-12)"
+    suggested="iris-kv-$(hostname -s | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-12 | sed 's/-*$//')"
     KV_NAME=$(prompt "Key Vault name (must be globally unique)" "$suggested")
   fi
 
