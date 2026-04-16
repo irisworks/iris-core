@@ -210,7 +210,7 @@ if [[ "$SETUP_MODE" == true ]]; then
       anthropic)      default_model="claude-sonnet-4-5" ;;
       openai)         default_model="gpt-4o" ;;
       foundry-e2)     default_model="gpt-4o" ;;
-      amazon-bedrock) default_model="anthropic.claude-sonnet-4-5" ;;
+      amazon-bedrock) default_model="anthropic.claude-sonnet-4-6" ;;
       *)              default_model="gpt-4o" ;;
     esac
     IRIS_MODEL=$(prompt "Model" "$default_model")
@@ -547,7 +547,25 @@ MODELJSON
       "apiKey": "AWS_PROFILE",
       "models": [
         {
-          "id": "anthropic.claude-sonnet-4-5",
+          "id": "anthropic.claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (Bedrock)",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 16000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "anthropic.claude-opus-4-6-v1",
+          "name": "Claude Opus 4.6 (Bedrock)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 32000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "anthropic.claude-sonnet-4-5-20250929-v1:0",
           "name": "Claude Sonnet 4.5 (Bedrock)",
           "reasoning": false,
           "input": ["text", "image"],
@@ -556,8 +574,17 @@ MODELJSON
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
-          "id": "anthropic.claude-opus-4",
-          "name": "Claude Opus 4 (Bedrock)",
+          "id": "anthropic.claude-haiku-4-5-20251001-v1:0",
+          "name": "Claude Haiku 4.5 (Bedrock)",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 8096,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "anthropic.claude-opus-4-1-20250805-v1:0",
+          "name": "Claude Opus 4.1 (Bedrock)",
           "reasoning": true,
           "input": ["text", "image"],
           "contextWindow": 200000,
@@ -571,15 +598,6 @@ MODELJSON
           "input": ["text", "image"],
           "contextWindow": 300000,
           "maxTokens": 5120,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "meta.llama3-3-70b-instruct-v1:0",
-          "name": "Llama 3.3 70B (Bedrock)",
-          "reasoning": false,
-          "input": ["text"],
-          "contextWindow": 128000,
-          "maxTokens": 8192,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]
