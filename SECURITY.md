@@ -22,7 +22,7 @@ Instead, please report them via one of the following methods:
 
 ### Alternative: Email
 
-Send an email to: security@iris-core.org (if established)
+Send an email to: security@thirtysignals.com
 
 Please include:
 - Type of vulnerability

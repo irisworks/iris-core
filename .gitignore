@@ -22,6 +22,10 @@ secrets.json
 # Local infra state (resource IDs, endpoints — not secrets but local only)
 .infra.local.json
 
+# Node
+node_modules/
+npm-debug.log*
+
 # Python venv
 .venv/
 __pycache__/

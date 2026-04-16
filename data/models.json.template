@@ -30,30 +30,6 @@
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
-          "id": "gpt-5.4",
-          "name": "GPT-5.4 (Foundry E2)",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "contextWindow": 272000,
-          "maxTokens": 128000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-          "compat": {
-            "maxTokensField": "max_completion_tokens"
-          }
-        },
-        {
-          "id": "gpt-5.4-nano",
-          "name": "GPT-5.4 nano (Foundry E2)",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 400000,
-          "maxTokens": 128000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-          "compat": {
-            "maxTokensField": "max_completion_tokens"
-          }
-        },
-        {
           "id": "Kimi-K2.5",
           "name": "Kimi K2.5 (Foundry E2)",
           "reasoning": true,
@@ -61,39 +37,48 @@
           "contextWindow": 131072,
           "maxTokens": 16384,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "grok-4-1-fast-non-reasoning",
-          "name": "Grok-4.1 Fast (Foundry E2)",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 256000,
-          "maxTokens": 32768,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]
     },
-    "foundry-e2-responses": {
-      "baseUrl": "https://<your-account>.cognitiveservices.azure.com/openai/v1",
-      "api": "azure-openai-responses",
-      "apiKey": "FOUNDRY_E2_KEY",
+    "amazon-bedrock": {
+      "baseUrl": "bedrock://<your-region>",
+      "api": "bedrock-converse-stream",
+      "apiKey": "AWS_PROFILE",
       "models": [
         {
-          "id": "gpt-5.3-codex",
-          "name": "GPT-5.3 Codex (Foundry E2 Responses)",
-          "reasoning": true,
+          "id": "anthropic.claude-sonnet-4-5",
+          "name": "Claude Sonnet 4.5 (Bedrock)",
+          "reasoning": false,
           "input": ["text", "image"],
-          "contextWindow": 400000,
-          "maxTokens": 128000,
+          "contextWindow": 200000,
+          "maxTokens": 16000,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },
         {
-          "id": "gpt-5.4-pro",
-          "name": "GPT-5.4 Pro (Foundry E2 Responses)",
+          "id": "anthropic.claude-opus-4",
+          "name": "Claude Opus 4 (Bedrock)",
           "reasoning": true,
           "input": ["text", "image"],
-          "contextWindow": 1050000,
-          "maxTokens": 128000,
+          "contextWindow": 200000,
+          "maxTokens": 32000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "amazon.nova-pro-v1:0",
+          "name": "Amazon Nova Pro",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 300000,
+          "maxTokens": 5120,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "meta.llama3-3-70b-instruct-v1:0",
+          "name": "Llama 3.3 70B (Bedrock)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 8192,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]

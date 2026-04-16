@@ -12,7 +12,7 @@ variable "iris_dir" {
 variable "iris_repo_dir" {
   description = "Path to the iris-core repo checkout on the VM"
   type        = string
-  default     = "/home/azureuser/dev/iris-core"
+  default     = "/iris/repo"
 }
 
 variable "iris_home" {

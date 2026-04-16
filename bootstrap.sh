@@ -189,14 +189,16 @@ if [[ "$SETUP_MODE" == true ]]; then
   # ── LLM Provider ──
   if [[ -z "$IRIS_PROVIDER" ]]; then
     echo "[iris-bootstrap] Choose LLM provider:"
-    echo "  1) anthropic   — Claude Sonnet / Opus (recommended)"
-    echo "  2) openai      — GPT-4o / GPT-4"
-    echo "  3) foundry-e2  — Azure AI Foundry (Azure OpenAI)"
+    echo "  1) anthropic       — Claude Sonnet / Opus (recommended)"
+    echo "  2) openai          — GPT-4o / GPT-4"
+    echo "  3) foundry-e2      — Azure AI Foundry (Azure OpenAI / third-party models)"
+    echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Nova, Llama via AWS)"
     read -r -p "[iris-bootstrap] Choice [1]: " provider_choice
     case "${provider_choice:-1}" in
       1) IRIS_PROVIDER="anthropic" ;;
       2) IRIS_PROVIDER="openai" ;;
       3) IRIS_PROVIDER="foundry-e2" ;;
+      4) IRIS_PROVIDER="amazon-bedrock" ;;
       *) IRIS_PROVIDER="anthropic" ;;
     esac
   fi
@@ -204,18 +206,22 @@ if [[ "$SETUP_MODE" == true ]]; then
   # ── Model ──
   if [[ -z "$IRIS_MODEL" ]]; then
     case "$IRIS_PROVIDER" in
-      anthropic)  default_model="claude-sonnet-4" ;;
-      openai)     default_model="gpt-4o" ;;
-      foundry-e2) default_model="gpt-4o" ;;
-      *)          default_model="gpt-4o" ;;
+      anthropic)      default_model="claude-sonnet-4-5" ;;
+      openai)         default_model="gpt-4o" ;;
+      foundry-e2)     default_model="gpt-4o" ;;
+      amazon-bedrock) default_model="anthropic.claude-sonnet-4-5" ;;
+      *)              default_model="gpt-4o" ;;
     esac
     IRIS_MODEL=$(prompt "Model" "$default_model")
   fi
   log "Provider: $IRIS_PROVIDER / $IRIS_MODEL"
 
-  # ── API Key ──
+  # ── API Key / Credentials ──
   LLM_API_KEY=""
   FOUNDRY_ACCOUNT=""
+  AWS_REGION_INPUT=""
+  AWS_ACCESS_KEY_INPUT=""
+  AWS_SECRET_KEY_INPUT=""
   case "$IRIS_PROVIDER" in
     anthropic)
       LLM_API_KEY=$(prompt_secret "Anthropic API key (sk-ant-...)")
@@ -230,6 +236,41 @@ if [[ "$SETUP_MODE" == true ]]; then
       [[ -z "$LLM_API_KEY" ]] && die "Foundry API key is required."
       FOUNDRY_ACCOUNT=$(prompt "Azure AI Foundry account name (e.g. my-account-eastus2)" "")
       [[ -z "$FOUNDRY_ACCOUNT" ]] && die "Foundry account name is required."
+      ;;
+    amazon-bedrock)
+      echo ""
+      echo "  ┌─ AWS Bedrock Credentials ─────────────────────────────────────┐"
+      echo "  │                                                                │"
+      echo "  │  Option A — IAM Role (recommended for EC2/AWS VMs):           │"
+      echo "  │    No credentials needed — Iris will use the instance role.   │"
+      echo "  │    Ensure the role has: bedrock:InvokeModel permission        │"
+      echo "  │                                                                │"
+      echo "  │  Option B — Access Key (for non-AWS VMs):                     │"
+      echo "  │    AWS Console → IAM → Users → Security credentials           │"
+      echo "  │    → Create access key → Application running outside AWS      │"
+      echo "  │    Policy needed: AmazonBedrockFullAccess (or custom)         │"
+      echo "  │                                                                │"
+      echo "  │  Option C — AWS Profile (if ~/.aws/config already set up)     │"
+      echo "  └────────────────────────────────────────────────────────────────┘"
+      echo ""
+      echo "[iris-bootstrap] Credential method:"
+      echo "  1) IAM Role (instance profile — no keys needed)"
+      echo "  2) Access key + secret"
+      echo "  3) Named AWS profile"
+      read -r -p "[iris-bootstrap] Choice [1]: " bedrock_cred_choice
+      case "${bedrock_cred_choice:-1}" in
+        2)
+          AWS_ACCESS_KEY_INPUT=$(prompt_secret "AWS Access Key ID (AKIA...)")
+          AWS_SECRET_KEY_INPUT=$(prompt_secret "AWS Secret Access Key")
+          [[ -z "$AWS_ACCESS_KEY_INPUT" ]] && die "AWS Access Key ID is required."
+          [[ -z "$AWS_SECRET_KEY_INPUT" ]] && die "AWS Secret Access Key is required."
+          ;;
+        3)
+          AWS_PROFILE_INPUT=$(prompt "AWS profile name" "default")
+          ;;
+        *) log "Using IAM instance role — no credentials needed." ;;
+      esac
+      AWS_REGION_INPUT=$(prompt "AWS region for Bedrock" "us-east-1")
       ;;
   esac
 
@@ -394,9 +435,13 @@ if [[ "$SETUP_MODE" == true ]]; then
   }
 
   case "$IRIS_PROVIDER" in
-    anthropic)  seed_secret "ANTHROPIC-API-KEY" "$LLM_API_KEY" ;;
-    openai)     seed_secret "OPENAI-API-KEY"    "$LLM_API_KEY" ;;
-    foundry-e2) seed_secret "FOUNDRY-E2-KEY"    "$LLM_API_KEY" ;;
+    anthropic)      seed_secret "ANTHROPIC-API-KEY"    "$LLM_API_KEY" ;;
+    openai)         seed_secret "OPENAI-API-KEY"       "$LLM_API_KEY" ;;
+    foundry-e2)     seed_secret "FOUNDRY-E2-KEY"       "$LLM_API_KEY" ;;
+    amazon-bedrock) seed_secret "AWS-ACCESS-KEY-ID"    "${AWS_ACCESS_KEY_INPUT:-}"
+                    seed_secret "AWS-SECRET-ACCESS-KEY" "${AWS_SECRET_KEY_INPUT:-}"
+                    seed_secret "AWS-REGION"            "${AWS_REGION_INPUT:-us-east-1}"
+                    seed_secret "AWS-PROFILE"           "${AWS_PROFILE_INPUT:-}" ;;
   esac
 
   seed_secret "SLACK-APP-TOKEN" "$SLACK_APP_TOKEN"
@@ -490,6 +535,58 @@ MODELJSON
 }
 MODELJSON
     log "✓ models.json generated for OpenAI"
+  elif [[ "$IRIS_PROVIDER" == "amazon-bedrock" ]]; then
+    BEDROCK_REGION="${AWS_REGION_INPUT:-us-east-1}"
+    cat > /tmp/iris-models.json << MODELJSON
+{
+  "providers": {
+    "amazon-bedrock": {
+      "baseUrl": "bedrock://${BEDROCK_REGION}",
+      "api": "bedrock-converse-stream",
+      "apiKey": "AWS_PROFILE",
+      "models": [
+        {
+          "id": "anthropic.claude-sonnet-4-5",
+          "name": "Claude Sonnet 4.5 (Bedrock)",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 16000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "anthropic.claude-opus-4",
+          "name": "Claude Opus 4 (Bedrock)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 32000,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "amazon.nova-pro-v1:0",
+          "name": "Amazon Nova Pro",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 300000,
+          "maxTokens": 5120,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "meta.llama3-3-70b-instruct-v1:0",
+          "name": "Llama 3.3 70B (Bedrock)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 8192,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}
+MODELJSON
+    log "✓ models.json generated for Amazon Bedrock (region: $BEDROCK_REGION)"
   else
     # Fallback: use template as-is
     cp "$TEMPLATE" /tmp/iris-models.json
@@ -616,10 +713,14 @@ GITHUB_TOKEN=$(fetch_secret "GITHUB-TOKEN")
 SLACK_APP_TOKEN=$(fetch_secret "SLACK-APP-TOKEN")
 SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
 RESEND_API_KEY=$(fetch_secret "RESEND-API-KEY")
+AWS_ACCESS_KEY_ID=$(fetch_secret "AWS-ACCESS-KEY-ID")
+AWS_SECRET_ACCESS_KEY=$(fetch_secret "AWS-SECRET-ACCESS-KEY")
+AWS_REGION=$(fetch_secret "AWS-REGION")
+AWS_PROFILE=$(fetch_secret "AWS-PROFILE")
 
 # Validate at least one LLM key
-if [[ -z "$ANTHROPIC_API_KEY" && -z "$OPENAI_API_KEY" && -z "$FOUNDRY_E2_KEY" ]]; then
-  die "No LLM API key found in Key Vault '$KV_NAME'. Run --setup or seed ANTHROPIC-API-KEY / OPENAI-API-KEY / FOUNDRY-E2-KEY manually."
+if [[ -z "$ANTHROPIC_API_KEY" && -z "$OPENAI_API_KEY" && -z "$FOUNDRY_E2_KEY" && -z "$AWS_ACCESS_KEY_ID" && -z "$AWS_PROFILE" && "$IRIS_PROVIDER" != "amazon-bedrock" ]]; then
+  die "No LLM API key found in Key Vault '$KV_NAME'. Run --setup or seed the appropriate key manually."
 fi
 
 # Warn (not die) if Slack is missing — lets people test without Slack first
@@ -679,6 +780,10 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "FOUNDRY_E2_KEY=$(e "${FOUNDRY_E2_KEY:-}")"
   echo "ANTHROPIC_API_KEY=$(e "${ANTHROPIC_API_KEY:-}")"
   echo "OPENAI_API_KEY=$(e "${OPENAI_API_KEY:-}")"
+  echo "AWS_ACCESS_KEY_ID=$(e "${AWS_ACCESS_KEY_ID:-}")"
+  echo "AWS_SECRET_ACCESS_KEY=$(e "${AWS_SECRET_ACCESS_KEY:-}")"
+  echo "AWS_REGION=$(e "${AWS_REGION:-}")"
+  echo "AWS_PROFILE=$(e "${AWS_PROFILE:-}")"
   echo ""
   echo "IRIS_SLACK_APP_TOKEN=$(e "${SLACK_APP_TOKEN:-}")"
   echo "IRIS_SLACK_BOT_TOKEN=$(e "${SLACK_BOT_TOKEN:-}")"

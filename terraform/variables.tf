@@ -1,10 +1,10 @@
 variable "subscription_id" {
-  validation {
-    condition = length(var.subscription_id) > 0
-    error_message = "Azure subscription ID must be provided via IRIS_AZURE_SUBSCRIPTION or TF_VAR_subscription_id"
-  }
   description = "Azure subscription ID"
   type        = string
+  validation {
+    condition     = length(var.subscription_id) > 0
+    error_message = "Azure subscription ID must be provided via AZURE_SUBSCRIPTION_ID or TF_VAR_subscription_id"
+  }
 }
 
 variable "location" {
@@ -19,13 +19,14 @@ variable "resource_group_name" {
   default     = "iris-dynamic-rg"
 }
 
+variable "key_vault_name" {
+  description = "Azure Key Vault name (passed to sub-agent containers as IRIS_KEY_VAULT)"
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Tags applied to all resources"
   type        = map(string)
-}
-
-variable "key_vault_name" {
-  description = "Azure Key Vault name passed to sub-agent containers"
-  type        = string
-  default     = "iris-core-kv-51560915"
+  default     = {}
 }
