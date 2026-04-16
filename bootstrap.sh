@@ -281,7 +281,30 @@ if [[ "$SETUP_MODE" == true ]]; then
   # ── GitHub token ──
   GITHUB_TOKEN=""
   if confirm "Add GitHub token for repo access?"; then
-    GITHUB_TOKEN=$(prompt_secret "GitHub token (ghp_...)")
+    echo ""
+    echo "  ┌─ GitHub Token Setup ──────────────────────────────────────────┐"
+    echo "  │                                                                │"
+    echo "  │  1. Go to https://github.com/settings/tokens                  │"
+    echo "  │     → Fine-grained personal access tokens → Generate new      │"
+    echo "  │                                                                │"
+    echo "  │  2. Set Token name: iris-<your-org>                           │"
+    echo "  │     Resource owner: your org (if accessing org repos)         │"
+    echo "  │     Repository access: All repositories (or select specific)  │"
+    echo "  │                                                                │"
+    echo "  │  3. Permissions:                                               │"
+    echo "  │       Contents:       Read and write                          │"
+    echo "  │       Pull requests:  Read and write                          │"
+    echo "  │       Issues:         Read and write                          │"
+    echo "  │       Workflows:      Read and write  (if using CI)           │"
+    echo "  │                                                                │"
+    echo "  │  4. Generate token → copy the  github_pat_...  value          │"
+    echo "  │                                                                │"
+    echo "  │  Note: Classic tokens (ghp_...) also work —                   │"
+    echo "  │        use 'repo' + 'workflow' scopes.                        │"
+    echo "  └────────────────────────────────────────────────────────────────┘"
+    echo ""
+    read -r -p "[iris-bootstrap] Press Enter when your token is ready..."
+    GITHUB_TOKEN=$(prompt_secret "GitHub token (github_pat_... or ghp_...)")
   fi
 
   # ── Email (optional) ──
