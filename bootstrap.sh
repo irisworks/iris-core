@@ -16,6 +16,7 @@ set -euo pipefail
 
 IRIS_DIR="/iris"
 REPO_URL="${REPO_URL:-}"
+IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/30Signals/iris-core.git}"
 KV_NAME="${KV_NAME:-}"
 KV_RESOURCE_GROUP="${KV_RESOURCE_GROUP:-}"
 REPO_DIR="${REPO_DIR:-}"
@@ -763,6 +764,21 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
   # Ensure remote URL is clean (no embedded token) after clone
   CLEAN_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's|https://[^@]*@|https://|')
   git -C "$REPO_DIR" remote set-url origin "$CLEAN_URL"
+
+  # Set up upstream remote pointing to iris-core, if this repo is a fork/overlay
+  # Skip if origin IS iris-core already
+  ORIGIN_URL=$(git -C "$REPO_DIR" remote get-url origin)
+  if [[ "$ORIGIN_URL" != "$IRIS_CORE_URL" ]]; then
+    if git -C "$REPO_DIR" remote get-url upstream &>/dev/null 2>&1; then
+      git -C "$REPO_DIR" remote set-url upstream "$IRIS_CORE_URL"
+      log "upstream remote updated → $IRIS_CORE_URL"
+    else
+      git -C "$REPO_DIR" remote add upstream "$IRIS_CORE_URL"
+      log "upstream remote added → $IRIS_CORE_URL"
+    fi
+    git -C "$REPO_DIR" fetch upstream --quiet
+    log "To merge future iris-core updates: git fetch upstream && git merge upstream/main"
+  fi
 else
   [[ -d "$REPO_DIR/.git" ]] || die "REPO_DIR '$REPO_DIR' is not a git checkout."
   log "Using local repo at $REPO_DIR"
