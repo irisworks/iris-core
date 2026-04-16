@@ -31,7 +31,7 @@ search-web "stock market today S&P 500"
 Requires `PERPLEXITY-API-KEY` in Azure Key Vault:
 
 ```bash
-az keyvault secret set --vault-name iris-core-kv-51560915 \
+az keyvault secret set --vault-name "$IRIS_KEY_VAULT" \
   --name PERPLEXITY-API-KEY \
   --value "your-api-key-here"
 ```
