@@ -146,7 +146,23 @@ fi
 
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 SUBSCRIPTION_NAME=$(az account show --query name -o tsv)
-log "Subscription: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+log "Active subscription: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+
+# If multiple subscriptions exist, let user pick one
+SUBSCRIPTION_COUNT=$(az account list --query "length(@)" -o tsv 2>/dev/null || echo "1")
+if [[ "$SUBSCRIPTION_COUNT" -gt 1 ]]; then
+  echo ""
+  log "Available subscriptions:"
+  az account list --query "[].{Name:name, ID:id, Default:isDefault}" -o table
+  echo ""
+  chosen=$(prompt "Subscription ID or name to use" "$SUBSCRIPTION_ID")
+  if [[ "$chosen" != "$SUBSCRIPTION_ID" ]]; then
+    az account set --subscription "$chosen"
+    SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+    SUBSCRIPTION_NAME=$(az account show --query name -o tsv)
+    log "Switched to: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+  fi
+fi
 
 # ────────────────────────────────────────────────────────────
 # 3. GitHub login
