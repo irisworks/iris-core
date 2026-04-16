@@ -742,12 +742,27 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
   if [[ ! -d "$REPO_DIR/.git" ]]; then
     [[ -z "$REPO_URL" ]] && REPO_URL=$(git -C "$(dirname "$0")" remote get-url origin 2>/dev/null || true)
     [[ -z "$REPO_URL" ]] && die "Cannot determine repo URL. Set REPO_URL=https://github.com/your-org/iris-core.git"
+
+    # Store token in git credential store so it never appears in remote URLs
+    if [[ -n "$GITHUB_TOKEN" ]]; then
+      git config --global credential.helper store
+      # Extract hostname from REPO_URL
+      REPO_HOST=$(echo "$REPO_URL" | sed 's|https://||' | cut -d/ -f1)
+      echo "https://${GITHUB_TOKEN}:x-oauth-basic@${REPO_HOST}" > ~/.git-credentials
+      chmod 600 ~/.git-credentials
+      log "GitHub credentials stored (token not embedded in remote URL)"
+    fi
+
     log "Cloning $REPO_URL → $REPO_DIR..."
     git clone "$REPO_URL" "$REPO_DIR"
   else
     log "Updating repo at $REPO_DIR..."
     git -C "$REPO_DIR" pull --ff-only 2>/dev/null || log "Warning: could not pull latest — continuing with current checkout"
   fi
+
+  # Ensure remote URL is clean (no embedded token) after clone
+  CLEAN_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's|https://[^@]*@|https://|')
+  git -C "$REPO_DIR" remote set-url origin "$CLEAN_URL"
 else
   [[ -d "$REPO_DIR/.git" ]] || die "REPO_DIR '$REPO_DIR' is not a git checkout."
   log "Using local repo at $REPO_DIR"
