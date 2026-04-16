@@ -668,33 +668,34 @@ elif [[ -f "$REPO_DIR/data/models.json.template" ]]; then
   log "Warning: using models.json.template — edit $IRIS_DIR/data/models.json to configure your provider"
 fi
 
-# Write .env
+# Write .env — strip any trailing newlines from secret values before writing
 log "Writing /iris/.env..."
-cat > "$IRIS_DIR/.env" << ENV
-IRIS_PROVIDER=${IRIS_PROVIDER}
-IRIS_MODEL=${IRIS_MODEL}
-IRIS_ENV=${IRIS_ENV}
-
-FOUNDRY_E2_KEY=${FOUNDRY_E2_KEY:-}
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-OPENAI_API_KEY=${OPENAI_API_KEY:-}
-
-IRIS_SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
-IRIS_SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
-
-GITHUB_TOKEN=${GITHUB_TOKEN:-}
-RESEND_API_KEY=${RESEND_API_KEY:-}
-
-AZURE_SUBSCRIPTION_ID=${SUBSCRIPTION_ID}
-IRIS_KEY_VAULT=${KV_NAME}
-IRIS_REPO_DIR=${REPO_DIR}
-IRIS_STORAGE_ROOT=${IRIS_DIR}/data
-
-IRIS_BASE_DOMAIN=${IRIS_BASE_DOMAIN:-}
-CERTBOT_EMAIL=${CERTBOT_EMAIL:-}
-GIT_USER_EMAIL=${GIT_USER_EMAIL:-iris@example.com}
-ENV
-chmod 600 "$IRIS_DIR/.env"
+e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
+{
+  echo "IRIS_PROVIDER=$(e "$IRIS_PROVIDER")"
+  echo "IRIS_MODEL=$(e "$IRIS_MODEL")"
+  echo "IRIS_ENV=$(e "$IRIS_ENV")"
+  echo ""
+  echo "FOUNDRY_E2_KEY=$(e "${FOUNDRY_E2_KEY:-}")"
+  echo "ANTHROPIC_API_KEY=$(e "${ANTHROPIC_API_KEY:-}")"
+  echo "OPENAI_API_KEY=$(e "${OPENAI_API_KEY:-}")"
+  echo ""
+  echo "IRIS_SLACK_APP_TOKEN=$(e "${SLACK_APP_TOKEN:-}")"
+  echo "IRIS_SLACK_BOT_TOKEN=$(e "${SLACK_BOT_TOKEN:-}")"
+  echo ""
+  echo "GITHUB_TOKEN=$(e "${GITHUB_TOKEN:-}")"
+  echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"
+  echo ""
+  echo "AZURE_SUBSCRIPTION_ID=$(e "$SUBSCRIPTION_ID")"
+  echo "IRIS_KEY_VAULT=$(e "$KV_NAME")"
+  echo "IRIS_REPO_DIR=$(e "$REPO_DIR")"
+  echo "IRIS_STORAGE_ROOT=${IRIS_DIR}/data"
+  echo ""
+  echo "IRIS_BASE_DOMAIN=$(e "${IRIS_BASE_DOMAIN:-}")"
+  echo "CERTBOT_EMAIL=$(e "${CERTBOT_EMAIL:-}")"
+  echo "GIT_USER_EMAIL=$(e "${GIT_USER_EMAIL:-iris@example.com}")"
+} | sudo tee "$IRIS_DIR/.env" > /dev/null
+sudo chmod 600 "$IRIS_DIR/.env"
 
 # ────────────────────────────────────────────────────────────
 # 9. Build iris-runtime
