@@ -70,6 +70,7 @@ resource "null_resource" "agent" {
         --network iris-internal \
         --add-host=iris-host:host-gateway \
         --env-file ${var.iris_dir}/.env \
+        ${fileexists("${var.iris_dir}/.secrets.env") ? "--env-file ${var.iris_dir}/.secrets.env" : ""} \
         -e IRIS_ENV=prod \
         -e AGENT_NAME=${var.agent_name} \
         -e IRIS_KEY_VAULT=${var.key_vault_name} \
