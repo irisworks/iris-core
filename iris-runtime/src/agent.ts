@@ -80,7 +80,14 @@ function loadConstitution(workspaceDir: string): string {
 	if (!existsSync(constitutionPath)) return "";
 	try {
 		const content = readFileSync(constitutionPath, "utf-8").trim();
-		return content ? `## Constitution (read-only — set by operators, not editable by Iris)\n${content}` : "";
+		if (!content) return "";
+		// Inject today's date so agents can reason about relative dates
+		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		const today = new Date().toLocaleDateString(undefined, {
+			weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: tz
+		});
+		const dateInjection = `\n\n> **Today's date:** ${today}`;
+		return `## Constitution (read-only — set by operators, not editable by Iris)\n${content}${dateInjection}`;
 	} catch (error) {
 		log.logWarning("Failed to read CONSTITUTION.md", `${constitutionPath}: ${error}`);
 		return "";
@@ -691,8 +698,8 @@ function createRunner(
 					log.logThinking(logCtx, thinking);
 					if (!isSessionChannel) {
 						queue.enqueueMessage(`_${thinking}_`, "main", "thinking main");
+						queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
 					}
-					queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
 				}
 
 				if (text.trim()) {
