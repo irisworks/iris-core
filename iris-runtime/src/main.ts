@@ -468,7 +468,7 @@ if (SLACK_ENABLED) {
 	// Bridge-only mode — no Slack connection, events watcher only
 	log.logInfo("Slack tokens not set — running in bridge-only mode (events watcher + bridge server)");
 
-	// Create a minimal stub bot for the events watcher
+	// Create a minimal stub bot for the events watcher and session injection
 	const stubBot = {
 		getUser: () => undefined,
 		getChannel: () => undefined,
@@ -481,8 +481,23 @@ if (SLACK_ENABLED) {
 		postInThread: async () => Date.now().toString(),
 		uploadFile: async () => {},
 		logBotResponse: () => {},
+		logToFile: () => {},
+		resetSessionContext: () => {},
 		enqueueEvent: (event: any) => handler.handleEvent(event, stubBot as any),
+		injectSessionMessage: async (sessionId: string, user: string, text: string) => {
+			// Re-use the same logic as SlackBot.injectSessionMessage
+			const { registerSessionRequest } = await import("./sessions.js");
+			const channelId = `SESSION-${sessionId}`;
+			const ts = (Date.now() / 1000).toFixed(6);
+			const responsePromise = registerSessionRequest(sessionId, 90_000);
+			const slackEvent = { type: "mention" as const, channel: channelId, user, text, ts, attachments: [] };
+			handler.handleEvent(slackEvent, stubBot as any);
+			return responsePromise;
+		},
 	} as any;
+
+	// Wire botRef so the API server's injectSessionMessage works
+	botRef = stubBot;
 
 	const eventsWatcher = createEventsWatcher(workingDir, stubBot);
 	eventsWatcher.start();

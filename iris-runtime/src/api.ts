@@ -40,6 +40,7 @@ import {
 interface SessionInjector {
 	injectSessionMessage(sessionId: string, user: string, text: string): Promise<string>;
 	postMessage(channel: string, text: string): Promise<string>;
+	resetSessionContext(sessionId: string): void;
 }
 
 interface ChannelState {
@@ -88,13 +89,13 @@ export function startApiServer(
 		const urlParts = url.replace(/^\//, "").split("/").map((p) => decodeURIComponent(p));
 
 		try {
-			// ── GET /health ────────────────────────────────────────────────────
+			// ── GET /health ────────────────────────────────────────────────────────────
 			if (method === "GET" && url === "/health") {
 				json(res, 200, { ok: true, channels: channelStates.size });
 				return;
 			}
 
-			// ── GET /channels ──────────────────────────────────────────────────
+			// ── GET /channels ──────────────────────────────────────────────────────
 			if (method === "GET" && url === "/channels") {
 				const channels = Array.from(channelStates.entries()).map(([id, state]) => ({
 					id,
@@ -104,7 +105,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── POST /event ────────────────────────────────────────────────────
+			// ── POST /event ────────────────────────────────────────────────────────────
 			// Inject a synthetic immediate event into Iris's queue.
 			// body: { channelId: string, text: string, user?: string }
 			if (method === "POST" && url === "/event") {
@@ -125,7 +126,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── POST /escalate ─────────────────────────────────────────────────
+			// ── POST /escalate ─────────────────────────────────────────────────────
 			// Sub-agent escalates a problem to Iris for diagnosis and recovery.
 			// body: {
 			//   agent:       string   — name of escalating agent (e.g. "cricket-scores")
@@ -171,7 +172,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── POST /sessions/open ───────────────────────────────────────────────
+			// ── POST /sessions/open ──────────────────────────────────────────────────────
 			// Post a message to a channel, get the ts, create a session — all in one call.
 			// body: { channel, text, workingChannel?, clientEmail?, metadata? }
 			// returns: { sessionId, threadTs, message }
@@ -213,7 +214,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── POST /sessions/email-inbound ──────────────────────────────────────
+			// ── POST /sessions/email-inbound ────────────────────────────────────────────────
 			// Must be checked BEFORE /sessions/:id to avoid treating "email-inbound" as an ID
 			if (method === "POST" && urlParts[0] === "sessions" && urlParts[1] === "email-inbound") {
 				let body: { from?: string; subject?: string; text?: string };
@@ -246,7 +247,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── POST /sessions ─────────────────────────────────────────────────────
+			// ── POST /sessions ───────────────────────────────────────────────────────────────
 			if (method === "POST" && urlParts[0] === "sessions" && urlParts.length === 1) {
 				let body: {
 					originChannel?: string;
@@ -279,14 +280,14 @@ export function startApiServer(
 				return;
 			}
 
-			// ── GET /sessions ──────────────────────────────────────────────────────
+			// ── GET /sessions ────────────────────────────────────────────────────────────────
 			if (method === "GET" && urlParts[0] === "sessions" && urlParts.length === 1) {
 				const sessions = loadSessions(workingDir);
 				json(res, 200, { sessions: Array.from(sessions.values()) });
 				return;
 			}
 
-			// ── GET /sessions/:id ──────────────────────────────────────────────────
+			// ── GET /sessions/:id ──────────────────────────────────────────────────────────
 			if (method === "GET" && urlParts[0] === "sessions" && urlParts.length === 2 && urlParts[1]) {
 				const sessionId = urlParts[1];
 				const sessions = loadSessions(workingDir);
@@ -299,7 +300,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── PATCH /sessions/:id ────────────────────────────────────────────────
+			// ── PATCH /sessions/:id ──────────────────────────────────────────────────────────
 			if (method === "PATCH" && urlParts[0] === "sessions" && urlParts.length === 2 && urlParts[1]) {
 				const sessionId = urlParts[1];
 				let body: Partial<Session>;
@@ -321,7 +322,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── POST /sessions/:id/message ─────────────────────────────────────────
+			// ── POST /sessions/:id/message ─────────────────────────────────────────────────────
 			if (method === "POST" && urlParts[0] === "sessions" && urlParts[2] === "message") {
 				const sessionId = urlParts[1];
 				const sessions = loadSessions(workingDir);
@@ -357,7 +358,7 @@ export function startApiServer(
 				return;
 			}
 
-			// ── GET /sessions/:id/history ──────────────────────────────────────────
+			// ── GET /sessions/:id/history ────────────────────────────────────────────────────────
 			if (method === "GET" && urlParts[0] === "sessions" && urlParts[2] === "history") {
 				const sessionId = urlParts[1];
 				const sessions = loadSessions(workingDir);
@@ -378,6 +379,73 @@ export function startApiServer(
 					.map((line) => { try { return JSON.parse(line); } catch { return null; } })
 					.filter(Boolean);
 				json(res, 200, { history });
+				return;
+			}
+
+			// ── POST /sessions/:id/reset ────────────────────────────────────────────────────
+			// Wipes context.jsonl and log.jsonl for a session so the next message
+			// starts completely fresh. Used by bridge /clear command.
+			if (method === "POST" && urlParts[0] === "sessions" && urlParts[2] === "reset") {
+				const sessionId = urlParts[1];
+				const sessions = loadSessions(workingDir);
+				if (!sessions.has(sessionId)) {
+					json(res, 404, { error: "session not found" });
+					return;
+				}
+				const sessionDir = join(workingDir, `SESSION-${sessionId}`);
+				const { writeFileSync: wf, existsSync: ef } = await import("fs");
+				if (ef(join(sessionDir, "context.jsonl"))) wf(join(sessionDir, "context.jsonl"), "");
+				if (ef(join(sessionDir, "log.jsonl")))     wf(join(sessionDir, "log.jsonl"), "");
+				if (ef(join(sessionDir, "last_prompt.jsonl"))) wf(join(sessionDir, "last_prompt.jsonl"), "");
+				// Also reset the in-memory agent context
+				const bot = getBot();
+				if (bot) {
+					try { bot.resetSessionContext(sessionId); } catch { /* best effort */ }
+				}
+				log.logInfo(`[api] POST /sessions/${sessionId}/reset: context wiped`);
+				json(res, 200, { status: "ok", message: "Context cleared" });
+				return;
+			}
+
+			// ── POST /sessions/:id/inject-turn ────────────────────────────────────────────────
+			// Appends a human-agent echo message to session log WITHOUT triggering LLM.
+			// Written as a plain user message with "[team]:" prefix so it's
+			// visible in both LLM context sync AND bash grep searches.
+			if (method === "POST" && urlParts[0] === "sessions" && urlParts[2] === "inject-turn") {
+				const sessionId = urlParts[1];
+				const sessions = loadSessions(workingDir);
+				if (!sessions.has(sessionId)) {
+					json(res, 404, { error: "session not found" });
+					return;
+				}
+				let body: { text?: string; user?: string };
+				try {
+					body = JSON.parse(await readBody(req)) as typeof body;
+				} catch {
+					json(res, 400, { error: "invalid JSON body" });
+					return;
+				}
+				if (!body.text) {
+					json(res, 400, { error: "text is required" });
+					return;
+				}
+				// Always write as a user-role log entry with [team] prefix
+				// — syncs naturally into LLM context, and bash grep finds it too
+				const entry = {
+					date: new Date().toISOString(),
+					ts: (Date.now() / 1000).toFixed(6),
+					user: "human-agent",
+					userName: "team",
+					text: `[team]: ${body.text}`,
+					attachments: [],
+					isBot: false,
+				};
+				const logPath = join(workingDir, `SESSION-${sessionId}`, "log.jsonl");
+				const { mkdirSync, appendFileSync } = await import("fs");
+				mkdirSync(join(workingDir, `SESSION-${sessionId}`), { recursive: true });
+				appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
+				log.logInfo(`[api] POST /sessions/${sessionId}/inject-turn: ${body.text.substring(0, 60)}`);
+				json(res, 200, { status: "ok" });
 				return;
 			}
 
