@@ -228,6 +228,12 @@ export class ChannelStore {
 			throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 		}
 
+		// Guard: Slack returns HTML login page if bot lacks files:read scope
+		const contentType = response.headers.get("content-type") || "";
+		if (contentType.includes("text/html")) {
+			throw new Error(`Slack returned HTML instead of file — bot token likely missing files:read scope`);
+		}
+
 		const buffer = await response.arrayBuffer();
 		await writeFile(filePath, Buffer.from(buffer));
 	}

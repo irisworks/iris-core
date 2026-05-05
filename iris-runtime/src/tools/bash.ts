@@ -18,7 +18,7 @@ function getTempFilePath(): string {
 const bashSchema = Type.Object({
 	label: Type.String({ description: "Brief description of what this command does (shown to user)" }),
 	command: Type.String({ description: "Bash command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 120)" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 300)" })),
 });
 
 interface BashToolDetails {
@@ -34,7 +34,7 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 		parameters: bashSchema,
 		execute: async (
 			_toolCallId: string,
-			{ command, timeout = 120 }: { label: string; command: string; timeout?: number },
+			{ command, timeout = 300 }: { label: string; command: string; timeout?: number },
 			signal?: AbortSignal,
 		) => {
 			// Track output for potential temp file writing
