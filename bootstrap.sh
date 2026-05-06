@@ -4,8 +4,11 @@
 #
 # Modes:
 #
-#   First-time setup, secrets in Azure Key Vault (default):
+#   First-time setup (will ask whether to use Key Vault):
 #     bash bootstrap.sh --setup
+#
+#   First-time setup, secrets in Azure Key Vault:
+#     bash bootstrap.sh --setup --keyvault
 #
 #   First-time setup, secrets stored directly in /iris/.env:
 #     bash bootstrap.sh --setup --no-keyvault
@@ -28,6 +31,7 @@ KV_RESOURCE_GROUP="${KV_RESOURCE_GROUP:-}"
 REPO_DIR="${REPO_DIR:-}"
 SETUP_MODE=false
 NO_KEYVAULT=false
+KEYVAULT_EXPLICIT=false   # true when --keyvault or --no-keyvault was passed
 
 IRIS_PROVIDER="${IRIS_PROVIDER:-}"
 IRIS_MODEL="${IRIS_MODEL:-}"
@@ -65,10 +69,28 @@ prompt_secret() {
 for arg in "$@"; do
   case "$arg" in
     --setup)       SETUP_MODE=true ;;
-    --no-keyvault) NO_KEYVAULT=true ;;
+    --no-keyvault) NO_KEYVAULT=true;  KEYVAULT_EXPLICIT=true ;;
+    --keyvault)    NO_KEYVAULT=false; KEYVAULT_EXPLICIT=true ;;
     *) die "Unknown argument: $arg" ;;
   esac
 done
+
+# In setup mode, if neither --keyvault nor --no-keyvault was passed,
+# ask the user which storage method they want.
+if [[ "$SETUP_MODE" == true && "$KEYVAULT_EXPLICIT" == false ]]; then
+  echo ""
+  echo "  Where should Iris store secrets?"
+  echo ""
+  echo "  1) Azure Key Vault  — recommended for production; requires Azure account"
+  echo "  2) /iris/.env file  — simpler; no Azure required; keep the file secure"
+  echo ""
+  read -r -p "[iris-bootstrap] Choice [1]: " kv_choice
+  case "${kv_choice:-1}" in
+    2) NO_KEYVAULT=true  ;;
+    *) NO_KEYVAULT=false ;;
+  esac
+  echo ""
+fi
 
 docker_cmd() {
   if docker info &>/dev/null; then docker "$@"; else sudo docker "$@"; fi
@@ -145,7 +167,7 @@ fi
 
 # ────────────────────────────────────────────────────────────
 # 2. Azure login
-# Skipped entirely when --no-keyvault is set.
+# Skipped entirely when --no-keyvault is set (or user chose /iris/.env).
 # When Key Vault is used, tries Managed Identity and service
 # principal before falling back to interactive device login.
 # ────────────────────────────────────────────────────────────
@@ -185,7 +207,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
     fi
   fi
 else
-  log_h "Azure (skipped — Key Vault not used)"
+  log_h "Azure (skipped — using /iris/.env for secrets)"
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -265,11 +287,11 @@ prompt_secrets() {
       ;;
     amazon-bedrock)
       echo ""
-      echo "  ┌─ AWS Bedrock Credentials ─────────────────────────────────────┐"
+      echo "  ┌─ AWS Bedrock Credentials ───────────────────────────────────────┐"
       echo "  │  1) IAM Role  — instance profile, no keys needed              │"
       echo "  │  2) Access key + secret                                        │"
       echo "  │  3) Named AWS profile (~/.aws/config)                          │"
-      echo "  └────────────────────────────────────────────────────────────────┘"
+      echo "  └────────────────────────────────────────────────────────────────────┘"
       read -r -p "[iris-bootstrap] Credential method [1]: " bedrock_cred_choice
       case "${bedrock_cred_choice:-1}" in
         2)
@@ -316,7 +338,7 @@ prompt_secrets() {
     echo "  │         message.im   message.mpim                            │"
     echo "  │                                                               │"
     echo "  │  5. App Home → enable Messages Tab                           │"
-    echo "  └───────────────────────────────────────────────────────────────┘"
+    echo "  └───────────────────────────────────────────────────────────────────┘"
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your app is created and tokens are ready..."
     SLACK_APP_TOKEN=$(prompt_secret "Slack App token (xapp-...)")
@@ -331,12 +353,12 @@ prompt_secrets() {
   GITHUB_TOKEN=""
   if confirm "Add GitHub token for repo access?"; then
     echo ""
-    echo "  ┌─ GitHub Token Setup ──────────────────────────────────────────┐"
+    echo "  ┌─ GitHub Token Setup ────────────────────────────────────────────┐"
     echo "  │  1. https://github.com/settings/tokens                        │"
     echo "  │     → Fine-grained personal access tokens → Generate new      │"
     echo "  │  2. Permissions: Contents, Pull requests, Issues (read/write) │"
     echo "  │  3. Copy the  github_pat_...  value                           │"
-    echo "  └────────────────────────────────────────────────────────────────┘"
+    echo "  └────────────────────────────────────────────────────────────────────┘"
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your token is ready..."
     GITHUB_TOKEN=$(prompt_secret "GitHub token (github_pat_... or ghp_...)")
@@ -387,7 +409,7 @@ AWS_REGION_INPUT=""
 AWS_PROFILE_INPUT=""
 
 if [[ "$NO_KEYVAULT" == false ]]; then
-  # ── Key Vault path ────────────────────────────────────────
+  # ── Key Vault path ───────────────────────────────────────────────
   if [[ "$SETUP_MODE" == true ]]; then
     log_h "First-time setup"
     echo ""
@@ -473,7 +495,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   fi
 
 else
-  # ── No-Key-Vault path ─────────────────────────────────────
+  # ── No-Key-Vault path ───────────────────────────────────────────────
   if [[ "$SETUP_MODE" == true ]] || [[ ! -f "$IRIS_DIR/.env" ]]; then
     log_h "Secret configuration (stored in /iris/.env)"
     echo ""
@@ -501,7 +523,7 @@ else
   fi
 fi
 
-# ── Map prompted values to .env variable names ────────────────
+# ── Map prompted values to .env variable names ────────────────────
 # (only needed for --no-keyvault path; Key Vault path populates
 #  these from fetch_secret in step 7)
 if [[ "$NO_KEYVAULT" == true ]]; then
@@ -516,7 +538,7 @@ if [[ "$NO_KEYVAULT" == true ]]; then
   esac
 fi
 
-# ── Generate models.json (setup mode only) ────────────────────
+# ── Generate models.json (setup mode only) ────────────────────────────
 if [[ "$SETUP_MODE" == true ]]; then
   log_h "Generating models.json"
   TEMPLATE="$( cd "$(dirname "$0")" && pwd )/data/models.json.template"
