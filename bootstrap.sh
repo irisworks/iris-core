@@ -853,6 +853,7 @@ cd - > /dev/null
 log_h "Installing systemd service"
 NODE_BIN="$(which node)"
 IRIS_RUNTIME_BIN="$REPO_DIR/iris-runtime/dist/main.js"
+DOTENV_CONFIG="$RUNTIME_DIR/node_modules/dotenv/config"
 
 sudo tee /etc/systemd/system/iris.service > /dev/null << UNIT
 [Unit]
@@ -864,8 +865,7 @@ Wants=network-online.target
 Type=simple
 User=${USER}
 WorkingDirectory=${IRIS_DIR}
-EnvironmentFile=${IRIS_DIR}/.env
-ExecStart=${NODE_BIN} ${IRIS_RUNTIME_BIN} --sandbox=host ${IRIS_DIR}/data
+ExecStart=${NODE_BIN} --require ${DOTENV_CONFIG} ${IRIS_RUNTIME_BIN} --sandbox=host ${IRIS_DIR}/data
 Restart=always
 RestartSec=10
 StandardOutput=append:${IRIS_DIR}/iris-runtime.log
