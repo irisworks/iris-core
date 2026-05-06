@@ -248,7 +248,8 @@ export function logStartup(workingDir: string, sandbox: string): void {
 }
 
 export function logConnected(): void {
-	console.log("⚡️ Iris connected and listening!");
+	const agentName = process.env.AGENT_NAME ? `Iris-${process.env.AGENT_NAME}` : "Iris";
+	console.log(`⚡️ ${agentName} connected and listening!`);
 	console.log("");
 }
 

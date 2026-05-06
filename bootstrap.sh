@@ -2,13 +2,22 @@
 # ============================================================
 # Iris Bootstrap Script
 #
-# Two modes:
+# Modes:
 #
-#   First-time setup (interactive):
+#   First-time setup (will ask whether to use Key Vault):
 #     bash bootstrap.sh --setup
 #
-#   Restore / re-deploy (Key Vault + secrets already exist):
+#   First-time setup, secrets in Azure Key Vault:
+#     bash bootstrap.sh --setup --keyvault
+#
+#   First-time setup, secrets stored directly in /iris/.env:
+#     bash bootstrap.sh --setup --no-keyvault
+#
+#   Re-deploy, Key Vault + secrets already exist:
 #     KV_NAME=<vault> bash bootstrap.sh
+#
+#   Re-deploy, /iris/.env already exists:
+#     bash bootstrap.sh --no-keyvault
 #
 # All config can be passed via env vars to skip prompts.
 # ============================================================
@@ -21,6 +30,8 @@ KV_NAME="${KV_NAME:-}"
 KV_RESOURCE_GROUP="${KV_RESOURCE_GROUP:-}"
 REPO_DIR="${REPO_DIR:-}"
 SETUP_MODE=false
+NO_KEYVAULT=false
+KEYVAULT_EXPLICIT=false   # true when --keyvault or --no-keyvault was passed
 
 IRIS_PROVIDER="${IRIS_PROVIDER:-}"
 IRIS_MODEL="${IRIS_MODEL:-}"
@@ -33,15 +44,13 @@ log()     { echo "[iris-bootstrap] $*"; }
 log_h()   { echo ""; echo "[iris-bootstrap] ── $* ──"; }
 die()     { echo "[iris-bootstrap] ERROR: $*" >&2; exit 1; }
 confirm() {
-  # confirm "Question" default(y/n) → returns 0 for yes, 1 for no
   local prompt="$1" default="${2:-y}"
   local yn_hint; [[ "$default" == "y" ]] && yn_hint="[Y/n]" || yn_hint="[y/N]"
   read -r -p "[iris-bootstrap] $prompt $yn_hint " answer
   answer="${answer:-$default}"
-  [[ "${answer,,}" == "y" ]]
+  [[  "${answer,,}" == "y" ]]
 }
 prompt() {
-  # prompt "Question" [default] → prints answer to stdout
   local question="$1" default="${2:-}"
   local hint; [[ -n "$default" ]] && hint=" [$default]" || hint=""
   read -r -p "[iris-bootstrap] $question$hint: " answer
@@ -50,7 +59,7 @@ prompt() {
 prompt_secret() {
   local question="$1"
   read -r -s -p "[iris-bootstrap] $question: " answer
-  echo ""  # newline after silent input
+  echo ""
   echo "$answer"
 }
 
@@ -59,10 +68,29 @@ prompt_secret() {
 # ────────────────────────────────────────────────────────────
 for arg in "$@"; do
   case "$arg" in
-    --setup) SETUP_MODE=true ;;
+    --setup)       SETUP_MODE=true ;;
+    --no-keyvault) NO_KEYVAULT=true;  KEYVAULT_EXPLICIT=true ;;
+    --keyvault)    NO_KEYVAULT=false; KEYVAULT_EXPLICIT=true ;;
     *) die "Unknown argument: $arg" ;;
   esac
 done
+
+# In setup mode, if neither --keyvault nor --no-keyvault was passed,
+# ask the user which storage method they want.
+if [[ "$SETUP_MODE" == true && "$KEYVAULT_EXPLICIT" == false ]]; then
+  echo ""
+  echo "  Where should Iris store secrets?"
+  echo ""
+  echo "  1) Azure Key Vault  — recommended for production; requires Azure account"
+  echo "  2) /iris/.env file  — simpler; no Azure required; keep the file secure"
+  echo ""
+  read -r -p "[iris-bootstrap] Choice [1]: " kv_choice
+  case "${kv_choice:-1}" in
+    2) NO_KEYVAULT=true  ;;
+    *) NO_KEYVAULT=false ;;
+  esac
+  echo ""
+fi
 
 docker_cmd() {
   if docker info &>/dev/null; then docker "$@"; else sudo docker "$@"; fi
@@ -86,7 +114,8 @@ if ! command -v docker &>/dev/null; then
   sudo usermod -aG docker "$USER"
 fi
 
-if ! command -v az &>/dev/null; then
+# Azure CLI only needed when using Key Vault
+if [[ "$NO_KEYVAULT" == false ]] && ! command -v az &>/dev/null; then
   log "Installing Azure CLI..."
   curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 fi
@@ -138,31 +167,47 @@ fi
 
 # ────────────────────────────────────────────────────────────
 # 2. Azure login
+# Skipped entirely when --no-keyvault is set (or user chose /iris/.env).
+# When Key Vault is used, tries Managed Identity and service
+# principal before falling back to interactive device login.
 # ────────────────────────────────────────────────────────────
-log_h "Azure login"
-if ! az account show &>/dev/null; then
-  log "Not logged in to Azure. Running az login..."
-  az login
-fi
+SUBSCRIPTION_ID=""
 
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-SUBSCRIPTION_NAME=$(az account show --query name -o tsv)
-log "Active subscription: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+if [[ "$NO_KEYVAULT" == false ]]; then
+  log_h "Azure login"
 
-# If multiple subscriptions exist, let user pick one
-SUBSCRIPTION_COUNT=$(az account list --query "length(@)" -o tsv 2>/dev/null || echo "1")
-if [[ "$SUBSCRIPTION_COUNT" -gt 1 ]]; then
-  echo ""
-  log "Available subscriptions:"
-  az account list --query "[].{Name:name, ID:id, Default:isDefault}" -o table
-  echo ""
-  chosen=$(prompt "Subscription ID or name to use" "$SUBSCRIPTION_ID")
-  if [[ "$chosen" != "$SUBSCRIPTION_ID" ]]; then
-    az account set --subscription "$chosen"
-    SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-    SUBSCRIPTION_NAME=$(az account show --query name -o tsv)
-    log "Switched to: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+  if az account show &>/dev/null 2>&1; then
+    log "Authenticated (Managed Identity or existing session)"
+  elif [[ -n "${AZURE_CLIENT_ID:-}" && -n "${AZURE_CLIENT_SECRET:-}" && -n "${AZURE_TENANT_ID:-}" ]]; then
+    log "Logging in via service principal..."
+    az login --service-principal \
+      -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID" -o none
+  else
+    log "No existing Azure session detected — starting interactive login..."
+    log "(Tip: assign a Managed Identity to this VM to skip this step on future runs)"
+    az login
   fi
+
+  SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+  SUBSCRIPTION_NAME=$(az account show --query name -o tsv)
+  log "Active subscription: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+
+  SUBSCRIPTION_COUNT=$(az account list --query "length(@)" -o tsv 2>/dev/null || echo "1")
+  if [[ "$SUBSCRIPTION_COUNT" -gt 1 ]]; then
+    echo ""
+    log "Available subscriptions:"
+    az account list --query "[].{Name:name, ID:id, Default:isDefault}" -o table
+    echo ""
+    chosen=$(prompt "Subscription ID or name to use" "$SUBSCRIPTION_ID")
+    if [[ "$chosen" != "$SUBSCRIPTION_ID" ]]; then
+      az account set --subscription "$chosen"
+      SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+      SUBSCRIPTION_NAME=$(az account show --query name -o tsv)
+      log "Switched to: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+    fi
+  fi
+else
+  log_h "Azure (skipped — using /iris/.env for secrets)"
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -177,23 +222,23 @@ GH_USER=$(gh api user --jq .login)
 log "GitHub user: $GH_USER"
 
 # ────────────────────────────────────────────────────────────
-# 4. --setup mode: interactive first-time configuration
+# Shared: prompt for all secrets
+# Called in --setup mode (both paths) and in --no-keyvault
+# restore mode when /iris/.env does not yet exist.
+# Sets: IRIS_PROVIDER, IRIS_MODEL, LLM_API_KEY, FOUNDRY_ACCOUNT,
+#       AWS_ACCESS_KEY_INPUT, AWS_SECRET_KEY_INPUT, AWS_REGION_INPUT,
+#       AWS_PROFILE_INPUT, SLACK_APP_TOKEN, SLACK_BOT_TOKEN,
+#       GITHUB_TOKEN, RESEND_API_KEY, IRIS_BASE_DOMAIN,
+#       CERTBOT_EMAIL, GIT_USER_EMAIL
 # ────────────────────────────────────────────────────────────
-if [[ "$SETUP_MODE" == true ]]; then
-  log_h "First-time setup"
-  echo ""
-  echo "  This will configure Iris for a new deployment."
-  echo "  You'll be prompted for provider, API keys, and optional settings."
-  echo "  All values are stored in Azure Key Vault — never on disk."
-  echo ""
-
+prompt_secrets() {
   # ── LLM Provider ──
   if [[ -z "$IRIS_PROVIDER" ]]; then
     echo "[iris-bootstrap] Choose LLM provider:"
     echo "  1) anthropic       — Claude Sonnet / Opus (recommended)"
     echo "  2) openai          — GPT-4o / GPT-4"
-    echo "  3) foundry-e2      — Azure AI Foundry (Azure OpenAI / third-party models)"
-    echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Nova, Llama via AWS)"
+    echo "  3) foundry-e2      — Azure AI Foundry (Azure OpenAI)"
+    echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)"
     read -r -p "[iris-bootstrap] Choice [1]: " provider_choice
     case "${provider_choice:-1}" in
       1) IRIS_PROVIDER="anthropic" ;;
@@ -223,6 +268,8 @@ if [[ "$SETUP_MODE" == true ]]; then
   AWS_REGION_INPUT=""
   AWS_ACCESS_KEY_INPUT=""
   AWS_SECRET_KEY_INPUT=""
+  AWS_PROFILE_INPUT=""
+
   case "$IRIS_PROVIDER" in
     anthropic)
       LLM_API_KEY=$(prompt_secret "Anthropic API key (sk-ant-...)")
@@ -240,25 +287,12 @@ if [[ "$SETUP_MODE" == true ]]; then
       ;;
     amazon-bedrock)
       echo ""
-      echo "  ┌─ AWS Bedrock Credentials ─────────────────────────────────────┐"
-      echo "  │                                                                │"
-      echo "  │  Option A — IAM Role (recommended for EC2/AWS VMs):           │"
-      echo "  │    No credentials needed — Iris will use the instance role.   │"
-      echo "  │    Ensure the role has: bedrock:InvokeModel permission        │"
-      echo "  │                                                                │"
-      echo "  │  Option B — Access Key (for non-AWS VMs):                     │"
-      echo "  │    AWS Console → IAM → Users → Security credentials           │"
-      echo "  │    → Create access key → Application running outside AWS      │"
-      echo "  │    Policy needed: AmazonBedrockFullAccess (or custom)         │"
-      echo "  │                                                                │"
-      echo "  │  Option C — AWS Profile (if ~/.aws/config already set up)     │"
-      echo "  └────────────────────────────────────────────────────────────────┘"
-      echo ""
-      echo "[iris-bootstrap] Credential method:"
-      echo "  1) IAM Role (instance profile — no keys needed)"
-      echo "  2) Access key + secret"
-      echo "  3) Named AWS profile"
-      read -r -p "[iris-bootstrap] Choice [1]: " bedrock_cred_choice
+      echo "  ┌─ AWS Bedrock Credentials ───────────────────────────────────────┐"
+      echo "  │  1) IAM Role  — instance profile, no keys needed              │"
+      echo "  │  2) Access key + secret                                        │"
+      echo "  │  3) Named AWS profile (~/.aws/config)                          │"
+      echo "  └────────────────────────────────────────────────────────────────────┘"
+      read -r -p "[iris-bootstrap] Credential method [1]: " bedrock_cred_choice
       case "${bedrock_cred_choice:-1}" in
         2)
           AWS_ACCESS_KEY_INPUT=$(prompt_secret "AWS Access Key ID (AKIA...)")
@@ -299,17 +333,12 @@ if [[ "$SETUP_MODE" == true ]]; then
     echo "  │         mpim:history       reactions:write   users:read       │"
     echo "  │     → Install to Workspace → copy the  xoxb-...  token       │"
     echo "  │                                                               │"
-    echo "  │  4. Event Subscriptions (left sidebar)                        │"
-    echo "  │     → Enable Events → Subscribe to bot events:               │"
-    echo "  │         app_mention  message.channels  message.groups         │"
-    echo "  │         message.im   message.mpim                             │"
+    echo "  │  4. Event Subscriptions → Enable → subscribe to:             │"
+    echo "  │         app_mention  message.channels  message.groups        │"
+    echo "  │         message.im   message.mpim                            │"
     echo "  │                                                               │"
-    echo "  │  5. App Home (left sidebar)                                   │"
-    echo "  │     → Show Tabs → enable Messages Tab                         │"
-    echo "  │     → Allow users to send Slash commands and messages         │"
-    echo "  │                                                               │"
-    echo "  │  6. Reinstall app if prompted after scope changes             │"
-    echo "  └───────────────────────────────────────────────────────────────┘"
+    echo "  │  5. App Home → enable Messages Tab                           │"
+    echo "  └───────────────────────────────────────────────────────────────────┘"
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your app is created and tokens are ready..."
     SLACK_APP_TOKEN=$(prompt_secret "Slack App token (xapp-...)")
@@ -317,33 +346,19 @@ if [[ "$SETUP_MODE" == true ]]; then
     [[ -z "$SLACK_APP_TOKEN" ]] && die "Slack App token is required."
     [[ -z "$SLACK_BOT_TOKEN" ]] && die "Slack Bot token is required."
   else
-    log "Skipping Slack — you can add SLACK-APP-TOKEN / SLACK-BOT-TOKEN to Key Vault later."
+    log "Skipping Slack — you can add IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN to /iris/.env later."
   fi
 
   # ── GitHub token ──
   GITHUB_TOKEN=""
   if confirm "Add GitHub token for repo access?"; then
     echo ""
-    echo "  ┌─ GitHub Token Setup ──────────────────────────────────────────┐"
-    echo "  │                                                                │"
-    echo "  │  1. Go to https://github.com/settings/tokens                  │"
+    echo "  ┌─ GitHub Token Setup ────────────────────────────────────────────┐"
+    echo "  │  1. https://github.com/settings/tokens                        │"
     echo "  │     → Fine-grained personal access tokens → Generate new      │"
-    echo "  │                                                                │"
-    echo "  │  2. Set Token name: iris-<your-org>                           │"
-    echo "  │     Resource owner: your org (if accessing org repos)         │"
-    echo "  │     Repository access: All repositories (or select specific)  │"
-    echo "  │                                                                │"
-    echo "  │  3. Permissions:                                               │"
-    echo "  │       Contents:       Read and write                          │"
-    echo "  │       Pull requests:  Read and write                          │"
-    echo "  │       Issues:         Read and write                          │"
-    echo "  │       Workflows:      Read and write  (if using CI)           │"
-    echo "  │                                                                │"
-    echo "  │  4. Generate token → copy the  github_pat_...  value          │"
-    echo "  │                                                                │"
-    echo "  │  Note: Classic tokens (ghp_...) also work —                   │"
-    echo "  │        use 'repo' + 'workflow' scopes.                        │"
-    echo "  └────────────────────────────────────────────────────────────────┘"
+    echo "  │  2. Permissions: Contents, Pull requests, Issues (read/write) │"
+    echo "  │  3. Copy the  github_pat_...  value                           │"
+    echo "  └────────────────────────────────────────────────────────────────────┘"
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your token is ready..."
     GITHUB_TOKEN=$(prompt_secret "GitHub token (github_pat_... or ghp_...)")
@@ -367,102 +382,172 @@ if [[ "$SETUP_MODE" == true ]]; then
   if [[ -z "$GIT_USER_EMAIL" ]]; then
     GIT_USER_EMAIL=$(prompt "Git author email for Iris commits" "iris@example.com")
   fi
+}
 
-  # ── Key Vault ──
-  echo ""
-  log_h "Key Vault setup"
+# ────────────────────────────────────────────────────────────
+# 4. Secret configuration
+# ────────────────────────────────────────────────────────────
+GENERATED_MODELS_JSON=""
 
-  # Derive a default KV name (max 24 chars, alphanumeric + dashes)
-  if [[ -z "$KV_NAME" ]]; then
-    # Try to derive from repo directory name or hostname
-    suggested="iris-kv-$(hostname -s | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-12 | sed 's/-*$//')"
-    KV_NAME=$(prompt "Key Vault name (must be globally unique)" "$suggested")
-  fi
+# Variables written to .env — initialise so step 8 always has them
+ANTHROPIC_API_KEY=""
+OPENAI_API_KEY=""
+FOUNDRY_E2_KEY=""
+AWS_ACCESS_KEY_ID=""
+AWS_SECRET_ACCESS_KEY=""
+AWS_REGION=""
+AWS_PROFILE=""
+SLACK_APP_TOKEN=""
+SLACK_BOT_TOKEN=""
+GITHUB_TOKEN=""
+RESEND_API_KEY=""
+LLM_API_KEY=""
+FOUNDRY_ACCOUNT=""
+AWS_ACCESS_KEY_INPUT=""
+AWS_SECRET_KEY_INPUT=""
+AWS_REGION_INPUT=""
+AWS_PROFILE_INPUT=""
 
-  # Derive resource group from VM metadata or prompt
-  if [[ -z "$KV_RESOURCE_GROUP" ]]; then
-    VM_RG=$(curl -sf -H Metadata:true \
-      "http://169.254.169.254/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text" 2>/dev/null || echo "")
-    if [[ -n "$VM_RG" ]]; then
-      KV_RESOURCE_GROUP=$(prompt "Resource group for Key Vault" "$VM_RG")
+if [[ "$NO_KEYVAULT" == false ]]; then
+  # ── Key Vault path ───────────────────────────────────────────────
+  if [[ "$SETUP_MODE" == true ]]; then
+    log_h "First-time setup"
+    echo ""
+    echo "  Secrets will be stored in Azure Key Vault — never on disk."
+    echo ""
+
+    prompt_secrets
+
+    # ── Key Vault creation ──
+    echo ""
+    log_h "Key Vault setup"
+
+    if [[ -z "$KV_NAME" ]]; then
+      suggested="iris-kv-$(hostname -s | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-12 | sed 's/-*$//')"
+      KV_NAME=$(prompt "Key Vault name (must be globally unique)" "$suggested")
+    fi
+
+    if [[ -z "$KV_RESOURCE_GROUP" ]]; then
+      VM_RG=$(curl -sf -H Metadata:true \
+        "http://169.254.169.254/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text" 2>/dev/null || echo "")
+      if [[ -n "$VM_RG" ]]; then
+        KV_RESOURCE_GROUP=$(prompt "Resource group for Key Vault" "$VM_RG")
+      else
+        KV_RESOURCE_GROUP=$(prompt "Resource group for Key Vault" "iris-rg")
+      fi
+    fi
+
+    VM_LOCATION=$(curl -sf -H Metadata:true \
+      "http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text" 2>/dev/null || echo "eastus2")
+
+    if az keyvault show --name "$KV_NAME" &>/dev/null 2>&1; then
+      log "Key Vault '$KV_NAME' already exists — reusing."
     else
-      KV_RESOURCE_GROUP=$(prompt "Resource group for Key Vault" "iris-rg")
+      log "Creating Key Vault '$KV_NAME' in '$KV_RESOURCE_GROUP'..."
+      if ! az group show -n "$KV_RESOURCE_GROUP" &>/dev/null 2>&1; then
+        log "Creating resource group '$KV_RESOURCE_GROUP' in $VM_LOCATION..."
+        az group create -n "$KV_RESOURCE_GROUP" -l "$VM_LOCATION" -o none
+      fi
+      az keyvault create \
+        --name "$KV_NAME" \
+        --resource-group "$KV_RESOURCE_GROUP" \
+        --location "$VM_LOCATION" \
+        --enable-rbac-authorization false \
+        --retention-days 7 \
+        -o none
+      log "✓ Key Vault created: $KV_NAME"
     fi
-  fi
 
-  VM_LOCATION=$(curl -sf -H Metadata:true \
-    "http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text" 2>/dev/null || echo "eastus2")
+    CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
+    if [[ -n "$CURRENT_USER_ID" ]]; then
+      az keyvault set-policy \
+        --name "$KV_NAME" \
+        --object-id "$CURRENT_USER_ID" \
+        --secret-permissions get list set delete \
+        -o none 2>/dev/null || true
+    fi
 
-  # Create Key Vault if it doesn't exist
-  if az keyvault show --name "$KV_NAME" &>/dev/null 2>&1; then
-    log "Key Vault '$KV_NAME' already exists — reusing."
+    log "Seeding secrets into Key Vault..."
+    seed_secret() {
+      local name="$1" value="$2"
+      [[ -z "$value" ]] && return
+      az keyvault secret set --vault-name "$KV_NAME" --name "$name" --value "$value" -o none
+      log "  ✓ $name"
+    }
+    case "$IRIS_PROVIDER" in
+      anthropic)      seed_secret "ANTHROPIC-API-KEY"     "$LLM_API_KEY" ;;
+      openai)         seed_secret "OPENAI-API-KEY"        "$LLM_API_KEY" ;;
+      foundry-e2)     seed_secret "FOUNDRY-E2-KEY"        "$LLM_API_KEY" ;;
+      amazon-bedrock) seed_secret "AWS-ACCESS-KEY-ID"     "${AWS_ACCESS_KEY_INPUT:-}"
+                      seed_secret "AWS-SECRET-ACCESS-KEY" "${AWS_SECRET_KEY_INPUT:-}"
+                      seed_secret "AWS-REGION"            "${AWS_REGION_INPUT:-us-east-1}"
+                      seed_secret "AWS-PROFILE"           "${AWS_PROFILE_INPUT:-}" ;;
+    esac
+    seed_secret "SLACK-APP-TOKEN" "$SLACK_APP_TOKEN"
+    seed_secret "SLACK-BOT-TOKEN" "$SLACK_BOT_TOKEN"
+    seed_secret "GITHUB-TOKEN"    "$GITHUB_TOKEN"
+    seed_secret "RESEND-API-KEY"  "$RESEND_API_KEY"
+    log "✓ Secrets seeded."
   else
-    log "Creating Key Vault '$KV_NAME' in '$KV_RESOURCE_GROUP'..."
-
-    # Ensure resource group exists
-    if ! az group show -n "$KV_RESOURCE_GROUP" &>/dev/null 2>&1; then
-      log "Creating resource group '$KV_RESOURCE_GROUP' in $VM_LOCATION..."
-      az group create -n "$KV_RESOURCE_GROUP" -l "$VM_LOCATION" -o none
-    fi
-
-    az keyvault create \
-      --name "$KV_NAME" \
-      --resource-group "$KV_RESOURCE_GROUP" \
-      --location "$VM_LOCATION" \
-      --enable-rbac-authorization false \
-      --retention-days 7 \
-      -o none
-    log "✓ Key Vault created: $KV_NAME"
+    # Restore mode — defaults only
+    [[ -z "$IRIS_PROVIDER" ]] && IRIS_PROVIDER="foundry-e2"
+    [[ -z "$IRIS_MODEL" ]]    && IRIS_MODEL="gpt-4o"
   fi
 
-  # Grant current user access
-  CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
-  if [[ -n "$CURRENT_USER_ID" ]]; then
-    az keyvault set-policy \
-      --name "$KV_NAME" \
-      --object-id "$CURRENT_USER_ID" \
-      --secret-permissions get list set delete \
-      -o none 2>/dev/null || true
+else
+  # ── No-Key-Vault path ───────────────────────────────────────────────
+  if [[ "$SETUP_MODE" == true ]] || [[ ! -f "$IRIS_DIR/.env" ]]; then
+    log_h "Secret configuration (stored in /iris/.env)"
+    echo ""
+    echo "  Secrets will be written directly to /iris/.env (chmod 600)."
+    echo "  No Azure Key Vault will be used."
+    echo "  Keep /iris/.env secure — it contains your API keys."
+    echo ""
+    prompt_secrets
+  else
+    log_h "Using existing /iris/.env — skipping secret prompts"
+    log "  Re-run with --setup --no-keyvault to update secrets."
+    # Source existing .env so step 8 can rewrite it with any new env vars
+    set +u
+    # shellcheck disable=SC1090
+    source "$IRIS_DIR/.env" 2>/dev/null || true
+    set -u
+    IRIS_PROVIDER="${IRIS_PROVIDER:-foundry-e2}"
+    IRIS_MODEL="${IRIS_MODEL:-gpt-4o}"
+    SLACK_APP_TOKEN="${IRIS_SLACK_APP_TOKEN:-}"
+    SLACK_BOT_TOKEN="${IRIS_SLACK_BOT_TOKEN:-}"
+    AWS_ACCESS_KEY_INPUT="${AWS_ACCESS_KEY_ID:-}"
+    AWS_SECRET_KEY_INPUT="${AWS_SECRET_ACCESS_KEY:-}"
+    AWS_REGION_INPUT="${AWS_REGION:-}"
+    AWS_PROFILE_INPUT="${AWS_PROFILE:-}"
   fi
+fi
 
-  # Seed secrets
-  log "Seeding secrets into Key Vault..."
-
-  seed_secret() {
-    local name="$1" value="$2"
-    [[ -z "$value" ]] && return
-    az keyvault secret set --vault-name "$KV_NAME" --name "$name" --value "$value" -o none
-    log "  ✓ $name"
-  }
-
+# ── Map prompted values to .env variable names ────────────────────
+# (only needed for --no-keyvault path; Key Vault path populates
+#  these from fetch_secret in step 7)
+if [[ "$NO_KEYVAULT" == true ]]; then
   case "$IRIS_PROVIDER" in
-    anthropic)      seed_secret "ANTHROPIC-API-KEY"    "$LLM_API_KEY" ;;
-    openai)         seed_secret "OPENAI-API-KEY"       "$LLM_API_KEY" ;;
-    foundry-e2)     seed_secret "FOUNDRY-E2-KEY"       "$LLM_API_KEY" ;;
-    amazon-bedrock) seed_secret "AWS-ACCESS-KEY-ID"    "${AWS_ACCESS_KEY_INPUT:-}"
-                    seed_secret "AWS-SECRET-ACCESS-KEY" "${AWS_SECRET_KEY_INPUT:-}"
-                    seed_secret "AWS-REGION"            "${AWS_REGION_INPUT:-us-east-1}"
-                    seed_secret "AWS-PROFILE"           "${AWS_PROFILE_INPUT:-}" ;;
+    anthropic)      ANTHROPIC_API_KEY="${LLM_API_KEY:-}" ;;
+    openai)         OPENAI_API_KEY="${LLM_API_KEY:-}" ;;
+    foundry-e2)     FOUNDRY_E2_KEY="${LLM_API_KEY:-}" ;;
+    amazon-bedrock) AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_INPUT:-}"
+                    AWS_SECRET_ACCESS_KEY="${AWS_SECRET_KEY_INPUT:-}"
+                    AWS_REGION="${AWS_REGION_INPUT:-}"
+                    AWS_PROFILE="${AWS_PROFILE_INPUT:-}" ;;
   esac
+fi
 
-  seed_secret "SLACK-APP-TOKEN" "$SLACK_APP_TOKEN"
-  seed_secret "SLACK-BOT-TOKEN" "$SLACK_BOT_TOKEN"
-  seed_secret "GITHUB-TOKEN"    "$GITHUB_TOKEN"
-  seed_secret "RESEND-API-KEY"  "$RESEND_API_KEY"
-
-  log "✓ Secrets seeded."
-
-  # ── Generate models.json from template ──
+# ── Generate models.json (setup mode only) ────────────────────────────
+if [[ "$SETUP_MODE" == true ]]; then
   log_h "Generating models.json"
   TEMPLATE="$( cd "$(dirname "$0")" && pwd )/data/models.json.template"
 
-  if [[ "$IRIS_PROVIDER" == "foundry-e2" && -n "$FOUNDRY_ACCOUNT" ]]; then
-    # Replace placeholder account name in template
-    sed "s|<your-account>|$FOUNDRY_ACCOUNT|g" "$TEMPLATE" > /tmp/iris-models.json
+  if [[ "$IRIS_PROVIDER" == "foundry-e2" && -n "${FOUNDRY_ACCOUNT:-}" ]]; then
+    sed "s|<your-account>|${FOUNDRY_ACCOUNT}|g" "$TEMPLATE" > /tmp/iris-models.json
     log "✓ models.json generated for Foundry account: $FOUNDRY_ACCOUNT"
   elif [[ "$IRIS_PROVIDER" == "anthropic" ]]; then
-    # Generate a minimal Anthropic models.json
-    cat > /tmp/iris-models.json << MODELJSON
+    cat > /tmp/iris-models.json << 'MODELJSON'
 {
   "providers": {
     "anthropic": {
@@ -470,33 +555,9 @@ if [[ "$SETUP_MODE" == true ]]; then
       "api": "anthropic",
       "apiKey": "ANTHROPIC_API_KEY",
       "models": [
-        {
-          "id": "claude-sonnet-4",
-          "name": "Claude Sonnet 4",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 16000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "claude-opus-4",
-          "name": "Claude Opus 4",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 32000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "claude-haiku-4-5",
-          "name": "Claude Haiku 4.5",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 8096,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        }
+        { "id": "claude-sonnet-4",   "name": "Claude Sonnet 4",   "reasoning": false, "input": ["text","image"], "contextWindow": 200000, "maxTokens": 16000, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "claude-opus-4",     "name": "Claude Opus 4",     "reasoning": true,  "input": ["text","image"], "contextWindow": 200000, "maxTokens": 32000, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5",  "reasoning": false, "input": ["text","image"], "contextWindow": 200000, "maxTokens": 8096,  "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
     }
   }
@@ -504,7 +565,7 @@ if [[ "$SETUP_MODE" == true ]]; then
 MODELJSON
     log "✓ models.json generated for Anthropic"
   elif [[ "$IRIS_PROVIDER" == "openai" ]]; then
-    cat > /tmp/iris-models.json << MODELJSON
+    cat > /tmp/iris-models.json << 'MODELJSON'
 {
   "providers": {
     "openai": {
@@ -512,24 +573,8 @@ MODELJSON
       "api": "openai-completions",
       "apiKey": "OPENAI_API_KEY",
       "models": [
-        {
-          "id": "gpt-4o",
-          "name": "GPT-4o",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 128000,
-          "maxTokens": 16384,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "gpt-4o-mini",
-          "name": "GPT-4o mini",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 128000,
-          "maxTokens": 16384,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        }
+        { "id": "gpt-4o",      "name": "GPT-4o",      "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "gpt-4o-mini", "name": "GPT-4o mini", "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
     }
   }
@@ -546,60 +591,11 @@ MODELJSON
       "api": "bedrock-converse-stream",
       "apiKey": "AWS_PROFILE",
       "models": [
-        {
-          "id": "us.anthropic.claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6 (Bedrock)",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 16000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "us.anthropic.claude-opus-4-6-v1",
-          "name": "Claude Opus 4.6 (Bedrock)",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 32000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-          "name": "Claude Sonnet 4.5 (Bedrock)",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 16000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-          "name": "Claude Haiku 4.5 (Bedrock)",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 8096,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "us.anthropic.claude-opus-4-1-20250805-v1:0",
-          "name": "Claude Opus 4.1 (Bedrock)",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "contextWindow": 200000,
-          "maxTokens": 32000,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        },
-        {
-          "id": "amazon.nova-pro-v1:0",
-          "name": "Amazon Nova Pro",
-          "reasoning": false,
-          "input": ["text", "image"],
-          "contextWindow": 300000,
-          "maxTokens": 5120,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        }
+        { "id": "us.anthropic.claude-sonnet-4-6",            "name": "Claude Sonnet 4.6 (Bedrock)", "reasoning": false, "input": ["text","image"], "contextWindow": 200000, "maxTokens": 16000, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "us.anthropic.claude-opus-4-6-v1",           "name": "Claude Opus 4.6 (Bedrock)",   "reasoning": true,  "input": ["text","image"], "contextWindow": 200000, "maxTokens": 32000, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "name": "Claude Sonnet 4.5 (Bedrock)", "reasoning": false, "input": ["text","image"], "contextWindow": 200000, "maxTokens": 16000, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",  "name": "Claude Haiku 4.5 (Bedrock)",  "reasoning": false, "input": ["text","image"], "contextWindow": 200000, "maxTokens": 8096,  "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "amazon.nova-pro-v1:0",                       "name": "Amazon Nova Pro",             "reasoning": false, "input": ["text","image"], "contextWindow": 300000, "maxTokens": 5120,  "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
     }
   }
@@ -607,25 +603,16 @@ MODELJSON
 MODELJSON
     log "✓ models.json generated for Amazon Bedrock (region: $BEDROCK_REGION)"
   else
-    # Fallback: use template as-is
     cp "$TEMPLATE" /tmp/iris-models.json
-    log "⚠ Using template models.json — edit data/models.json manually if needed"
+    log "⚠ Using template models.json — edit $IRIS_DIR/data/models.json manually if needed"
   fi
-
-  # Stash for use in step 5
   GENERATED_MODELS_JSON=/tmp/iris-models.json
-
-else
-  # ── Restore mode: validate required vars ──
-  [[ -z "$IRIS_PROVIDER" ]] && IRIS_PROVIDER="foundry-e2"
-  [[ -z "$IRIS_MODEL" ]]    && IRIS_MODEL="gpt-4o"
-  GENERATED_MODELS_JSON=""
 fi
 
 # ────────────────────────────────────────────────────────────
-# 5. DNS + NSG setup (only if IRIS_BASE_DOMAIN is set)
+# 5. DNS + NSG setup (Azure only, only if IRIS_BASE_DOMAIN set)
 # ────────────────────────────────────────────────────────────
-if [[ -n "$IRIS_BASE_DOMAIN" ]]; then
+if [[ -n "$IRIS_BASE_DOMAIN" && "$NO_KEYVAULT" == false ]]; then
   log_h "Public networking ($IRIS_BASE_DOMAIN)"
 
   VM_NAME=$(curl -sf -H Metadata:true \
@@ -699,53 +686,57 @@ NGINX
   sudo rm -f /etc/nginx/sites-enabled/default
   sudo nginx -t 2>/dev/null && sudo systemctl reload nginx
   log "nginx ready"
+elif [[ -n "$IRIS_BASE_DOMAIN" && "$NO_KEYVAULT" == true ]]; then
+  log "Note: DNS/NSG setup skipped (requires Azure CLI). Configure your domain manually."
 fi
 
 # ────────────────────────────────────────────────────────────
-# 6. Resolve Key Vault
+# 6. Resolve Key Vault (skipped when --no-keyvault)
 # ────────────────────────────────────────────────────────────
-log_h "Key Vault"
-if [[ -n "$KV_NAME" ]]; then
-  log "Using Key Vault: $KV_NAME"
-elif [[ -n "$KV_RESOURCE_GROUP" ]]; then
-  log "Looking up Key Vault in '$KV_RESOURCE_GROUP'..."
-  KV_NAME=$(az keyvault list \
-    --resource-group "$KV_RESOURCE_GROUP" \
-    --query "[0].name" -o tsv 2>/dev/null || true)
-fi
-[[ -z "$KV_NAME" ]] && die "No Key Vault found. Run with --setup, or set KV_NAME=<vault-name>."
-log "Key Vault: $KV_NAME"
-
-# ────────────────────────────────────────────────────────────
-# 7. Fetch secrets from Key Vault
-# ────────────────────────────────────────────────────────────
-log_h "Fetching secrets"
-
-fetch_secret() {
-  az keyvault secret show --vault-name "$KV_NAME" --name "$1" --query value -o tsv 2>/dev/null || true
-}
-
-ANTHROPIC_API_KEY=$(fetch_secret "ANTHROPIC-API-KEY")
-OPENAI_API_KEY=$(fetch_secret "OPENAI-API-KEY")
-FOUNDRY_E2_KEY=$(fetch_secret "FOUNDRY-E2-KEY")
-GITHUB_TOKEN=$(fetch_secret "GITHUB-TOKEN")
-SLACK_APP_TOKEN=$(fetch_secret "SLACK-APP-TOKEN")
-SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
-RESEND_API_KEY=$(fetch_secret "RESEND-API-KEY")
-AWS_ACCESS_KEY_ID=$(fetch_secret "AWS-ACCESS-KEY-ID")
-AWS_SECRET_ACCESS_KEY=$(fetch_secret "AWS-SECRET-ACCESS-KEY")
-AWS_REGION=$(fetch_secret "AWS-REGION")
-AWS_PROFILE=$(fetch_secret "AWS-PROFILE")
-
-# Validate at least one LLM key
-if [[ -z "$ANTHROPIC_API_KEY" && -z "$OPENAI_API_KEY" && -z "$FOUNDRY_E2_KEY" && -z "$AWS_ACCESS_KEY_ID" && -z "$AWS_PROFILE" && "$IRIS_PROVIDER" != "amazon-bedrock" ]]; then
-  die "No LLM API key found in Key Vault '$KV_NAME'. Run --setup or seed the appropriate key manually."
+if [[ "$NO_KEYVAULT" == false ]]; then
+  log_h "Key Vault"
+  if [[ -n "$KV_NAME" ]]; then
+    log "Using Key Vault: $KV_NAME"
+  elif [[ -n "$KV_RESOURCE_GROUP" ]]; then
+    log "Looking up Key Vault in '$KV_RESOURCE_GROUP'..."
+    KV_NAME=$(az keyvault list \
+      --resource-group "$KV_RESOURCE_GROUP" \
+      --query "[0].name" -o tsv 2>/dev/null || true)
+  fi
+  [[ -z "$KV_NAME" ]] && die "No Key Vault found. Run with --setup, or set KV_NAME=<vault-name>."
+  log "Key Vault: $KV_NAME"
 fi
 
-# Warn (not die) if Slack is missing — lets people test without Slack first
-if [[ -z "$SLACK_APP_TOKEN" || -z "$SLACK_BOT_TOKEN" ]]; then
-  log "Warning: Slack tokens not found — Iris will start but won't connect to Slack."
-  log "  Add SLACK-APP-TOKEN and SLACK-BOT-TOKEN to Key Vault when ready."
+# ────────────────────────────────────────────────────────────
+# 7. Fetch secrets from Key Vault (skipped when --no-keyvault)
+# ────────────────────────────────────────────────────────────
+if [[ "$NO_KEYVAULT" == false ]]; then
+  log_h "Fetching secrets"
+
+  fetch_secret() {
+    az keyvault secret show --vault-name "$KV_NAME" --name "$1" --query value -o tsv 2>/dev/null || true
+  }
+
+  ANTHROPIC_API_KEY=$(fetch_secret "ANTHROPIC-API-KEY")
+  OPENAI_API_KEY=$(fetch_secret "OPENAI-API-KEY")
+  FOUNDRY_E2_KEY=$(fetch_secret "FOUNDRY-E2-KEY")
+  GITHUB_TOKEN=$(fetch_secret "GITHUB-TOKEN")
+  SLACK_APP_TOKEN=$(fetch_secret "SLACK-APP-TOKEN")
+  SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
+  RESEND_API_KEY=$(fetch_secret "RESEND-API-KEY")
+  AWS_ACCESS_KEY_ID=$(fetch_secret "AWS-ACCESS-KEY-ID")
+  AWS_SECRET_ACCESS_KEY=$(fetch_secret "AWS-SECRET-ACCESS-KEY")
+  AWS_REGION=$(fetch_secret "AWS-REGION")
+  AWS_PROFILE=$(fetch_secret "AWS-PROFILE")
+
+  if [[ -z "$ANTHROPIC_API_KEY" && -z "$OPENAI_API_KEY" && -z "$FOUNDRY_E2_KEY" && -z "$AWS_ACCESS_KEY_ID" && -z "$AWS_PROFILE" && "$IRIS_PROVIDER" != "amazon-bedrock" ]]; then
+    die "No LLM API key found in Key Vault '$KV_NAME'. Run --setup or seed the key manually."
+  fi
+
+  if [[ -z "$SLACK_APP_TOKEN" || -z "$SLACK_BOT_TOKEN" ]]; then
+    log "Warning: Slack tokens not found — Iris will start but won't connect to Slack."
+    log "  Add SLACK-APP-TOKEN and SLACK-BOT-TOKEN to Key Vault when ready."
+  fi
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -762,14 +753,12 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
     [[ -z "$REPO_URL" ]] && REPO_URL=$(git -C "$(dirname "$0")" remote get-url origin 2>/dev/null || true)
     [[ -z "$REPO_URL" ]] && die "Cannot determine repo URL. Set REPO_URL=https://github.com/your-org/iris-core.git"
 
-    # Store token in git credential store so it never appears in remote URLs
     if [[ -n "$GITHUB_TOKEN" ]]; then
       git config --global credential.helper store
-      # Extract hostname from REPO_URL
       REPO_HOST=$(echo "$REPO_URL" | sed 's|https://||' | cut -d/ -f1)
       echo "https://${GITHUB_TOKEN}:x-oauth-basic@${REPO_HOST}" > ~/.git-credentials
       chmod 600 ~/.git-credentials
-      log "GitHub credentials stored (token not embedded in remote URL)"
+      log "GitHub credentials stored"
     fi
 
     log "Cloning $REPO_URL → $REPO_DIR..."
@@ -779,12 +768,9 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
     git -C "$REPO_DIR" pull --ff-only 2>/dev/null || log "Warning: could not pull latest — continuing with current checkout"
   fi
 
-  # Ensure remote URL is clean (no embedded token) after clone
   CLEAN_URL=$(git -C "$REPO_DIR" remote get-url origin | sed 's|https://[^@]*@|https://|')
   git -C "$REPO_DIR" remote set-url origin "$CLEAN_URL"
 
-  # Set up upstream remote pointing to iris-core, if this repo is a fork/overlay
-  # Skip if origin IS iris-core already
   ORIGIN_URL=$(git -C "$REPO_DIR" remote get-url origin)
   if [[ "$ORIGIN_URL" != "$IRIS_CORE_URL" ]]; then
     if git -C "$REPO_DIR" remote get-url upstream &>/dev/null 2>&1; then
@@ -808,7 +794,6 @@ ln -sfn "$REPO_DIR/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 
-# models.json: use generated (from --setup) or template fallback
 if [[ -n "$GENERATED_MODELS_JSON" && -f "$GENERATED_MODELS_JSON" ]]; then
   cp "$GENERATED_MODELS_JSON" "$IRIS_DIR/data/models.json"
 elif [[ -f "$REPO_DIR/data/models.json" ]]; then
@@ -818,7 +803,7 @@ elif [[ -f "$REPO_DIR/data/models.json.template" ]]; then
   log "Warning: using models.json.template — edit $IRIS_DIR/data/models.json to configure your provider"
 fi
 
-# Write .env — strip any trailing newlines from secret values before writing
+# Write /iris/.env
 log "Writing /iris/.env..."
 e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
 {
@@ -840,8 +825,8 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "GITHUB_TOKEN=$(e "${GITHUB_TOKEN:-}")"
   echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"
   echo ""
-  echo "AZURE_SUBSCRIPTION_ID=$(e "$SUBSCRIPTION_ID")"
-  echo "IRIS_KEY_VAULT=$(e "$KV_NAME")"
+  echo "AZURE_SUBSCRIPTION_ID=$(e "${SUBSCRIPTION_ID:-}")"
+  echo "IRIS_KEY_VAULT=$(e "${KV_NAME:-}")"
   echo "IRIS_REPO_DIR=$(e "$REPO_DIR")"
   echo "IRIS_STORAGE_ROOT=${IRIS_DIR}/data"
   echo ""
@@ -850,6 +835,7 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "GIT_USER_EMAIL=$(e "${GIT_USER_EMAIL:-iris@example.com}")"
 } | sudo tee "$IRIS_DIR/.env" > /dev/null
 sudo chmod 600 "$IRIS_DIR/.env"
+log "✓ /iris/.env written"
 
 # ────────────────────────────────────────────────────────────
 # 9. Build iris-runtime
@@ -867,6 +853,7 @@ cd - > /dev/null
 log_h "Installing systemd service"
 NODE_BIN="$(which node)"
 IRIS_RUNTIME_BIN="$REPO_DIR/iris-runtime/dist/main.js"
+DOTENV_CONFIG="$RUNTIME_DIR/node_modules/dotenv/config"
 
 sudo tee /etc/systemd/system/iris.service > /dev/null << UNIT
 [Unit]
@@ -878,8 +865,7 @@ Wants=network-online.target
 Type=simple
 User=${USER}
 WorkingDirectory=${IRIS_DIR}
-EnvironmentFile=${IRIS_DIR}/.env
-ExecStart=${NODE_BIN} ${IRIS_RUNTIME_BIN} --sandbox=host ${IRIS_DIR}/data
+ExecStart=${NODE_BIN} --require ${DOTENV_CONFIG} ${IRIS_RUNTIME_BIN} --sandbox=host ${IRIS_DIR}/data
 Restart=always
 RestartSec=10
 StandardOutput=append:${IRIS_DIR}/iris-runtime.log
@@ -910,12 +896,16 @@ log ""
 log "  Status:    sudo systemctl status iris"
 log "  Logs:      sudo journalctl -u iris -f"
 log "  Provider:  ${IRIS_PROVIDER}/${IRIS_MODEL}"
+if [[ "$NO_KEYVAULT" == false ]]; then
 log "  Key Vault: ${KV_NAME}"
+else
+log "  Secrets:   /iris/.env  (edit and restart to update)"
+fi
 log "  Workspace: ${IRIS_DIR}"
 log ""
-if [[ -n "$SLACK_APP_TOKEN" ]]; then
+if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
   log "  Slack:     @iris in any channel"
 else
-  log "  Slack:     not configured (add SLACK-APP-TOKEN / SLACK-BOT-TOKEN to Key Vault)"
+  log "  Slack:     not configured (add tokens to /iris/.env and restart)"
 fi
 log ""

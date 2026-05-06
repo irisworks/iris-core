@@ -3,7 +3,7 @@ import { WebClient } from "@slack/web-api";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "./log.js";
-import { findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
+import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
 import type { Attachment, ChannelStore } from "./store.js";
 
 // Telegram bot bridge endpoint
@@ -68,6 +68,7 @@ export interface SlackUser {
 export interface SlackChannel {
 	id: string;
 	name: string;
+	mode?: string;
 }
 
 // Types used by agent.ts
@@ -179,6 +180,7 @@ export class SlackBot {
 	private workingDir: string;
 	private store: ChannelStore;
 	private botUserId: string | null = null;
+	private botId: string | null = null; // bot_id (different from user_id) — used to filter own messages in leads channels
 	private startupTs: string | null = null; // Messages older than this are just logged, not processed
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -191,7 +193,9 @@ export class SlackBot {
 	private telegramContexts = new Map<string, { chatId: string; messageId?: string }>();
 
 	// Channel modes loaded from workingDir/data/channels.json
-	private channelModes = new Map<string, "thread" | "dm" | "admin">();
+	private channelModes = new Map<string, "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin">();
+	private channelPassthroughUrls = new Map<string, string>(); // channel -> endpoint URL for passthrough mode
+	private channelRequireMention = new Set<string>(); // channels where top-level messages require @mention
 
 	// SESSION-<id> → real Slack { channel, threadTs } for routing postMessage/updateMessage
 	private sessionRoutes = new Map<string, { channel: string; threadTs: string }>();
@@ -237,10 +241,16 @@ export class SlackBot {
 		const channelsPath = join(this.workingDir, "data", "channels.json");
 		if (!existsSync(channelsPath)) return;
 		try {
-			const raw = JSON.parse(readFileSync(channelsPath, "utf-8")) as Record<string, { mode: string }>;
+			const raw = JSON.parse(readFileSync(channelsPath, "utf-8")) as Record<string, { mode: string; url?: string; requireMentionForTopLevel?: boolean }>;
 			for (const [id, config] of Object.entries(raw)) {
-				if (config.mode === "thread" || config.mode === "dm" || config.mode === "admin") {
+				if (config.mode === "thread" || config.mode === "interactive-thread" || config.mode === "passthrough" || config.mode === "leads" || config.mode === "dm" || config.mode === "admin") {
 					this.channelModes.set(id, config.mode);
+				}
+				if (config.mode === "passthrough" && config.url) {
+					this.channelPassthroughUrls.set(id, config.url);
+				}
+				if (config.requireMentionForTopLevel) {
+					this.channelRequireMention.add(id);
 				}
 			}
 			log.logInfo(`[channels] Loaded ${this.channelModes.size} channel mode entries`);
@@ -252,9 +262,9 @@ export class SlackBot {
 	/**
 	 * Get the configured mode for a channel.
 	 * Checks exact match first, then prefix wildcards (e.g. "D*").
-	 * Defaults to "admin" (preserves existing behaviour for unconfigured channels).
+	 * Defaults to "dm" (non-admin unless explicitly configured).
 	 */
-	private getChannelMode(channelId: string): "thread" | "dm" | "admin" {
+	private getChannelMode(channelId: string): "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin" {
 		const exact = this.channelModes.get(channelId);
 		if (exact) return exact;
 		for (const [pattern, mode] of this.channelModes) {
@@ -293,7 +303,7 @@ export class SlackBot {
 			isBot: false,
 		});
 
-		const responsePromise = registerSessionRequest(sessionId);
+		const responsePromise = registerSessionRequest(sessionId, 600_000);
 
 		const slackEvent: SlackEvent = {
 			type: "mention",
@@ -308,6 +318,11 @@ export class SlackBot {
 		return responsePromise;
 	}
 
+	resetSessionContext(_sessionId: string): void {
+		// File-based reset is handled directly in api.ts (context.jsonl wiped).
+		// In-memory agent state will reload clean from the empty file on next message.
+	}
+
 	// ==========================================================================
 	// Public API
 	// ==========================================================================
@@ -315,6 +330,7 @@ export class SlackBot {
 	async start(): Promise<void> {
 		const auth = await this.webClient.auth.test();
 		this.botUserId = auth.user_id as string;
+		this.botId = auth.bot_id as string | null;
 
 		this.loadChannelModes();
 		await Promise.all([this.fetchUsers(), this.fetchChannels()]);
@@ -633,6 +649,40 @@ export class SlackBot {
 				}
 			}
 
+			// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs
+			if (channelMode === "passthrough") {
+				const passthroughUrl = this.channelPassthroughUrls.get(e.channel);
+				if (!passthroughUrl) {
+					log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
+					ack();
+					return;
+				}
+				const threadTs = e.thread_ts ?? e.ts;
+				const user = this.users.get(slackEvent.user);
+				const userName = user?.displayName || user?.userName || slackEvent.user;
+				const senderId = `slack_${threadTs.replace(".", "")}`;
+				ack();
+				// Fire async — don't block the ack
+				(async () => {
+					try {
+						const apiKey = process.env.PASSTHROUGH_API_KEY ?? "";
+						const body = JSON.stringify({ text: slackEvent.text, user: userName, sender_id: senderId });
+						const resp = await fetch(passthroughUrl, {
+							method: "POST",
+							headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
+							body,
+						});
+						const json = await resp.json() as { response?: string; text?: string; error?: string };
+						const reply = json.response || json.text || json.error || "(no response)";
+						await this.postInThread(e.channel, threadTs, reply);
+					} catch (err) {
+						log.logWarning(`[${e.channel}] passthrough error`, err instanceof Error ? err.message : String(err));
+						await this.postInThread(e.channel, e.ts, "_Bot unavailable, please try again._");
+					}
+				})();
+				return;
+			}
+
 			// Thread-mode channels: only respond inside registered session threads
 			if (channelMode === "thread") {
 				if (!e.thread_ts) {
@@ -651,6 +701,46 @@ export class SlackBot {
 				const sessionChannel = `SESSION-${session.sessionId}`;
 				this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
 				// Also log user message to the session directory
+				const user = this.users.get(slackEvent.user);
+				this.logToFile(sessionChannel, {
+					date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
+					ts: slackEvent.ts,
+					user: slackEvent.user,
+					userName: user?.userName,
+					displayName: user?.displayName,
+					text: slackEvent.text,
+					attachments: slackEvent.attachments || [],
+					isBot: false,
+				});
+				slackEvent.channel = sessionChannel;
+			}
+
+			// Interactive-thread mode: top-level @mention creates a session;
+			// subsequent replies in the same thread continue it without needing @mention.
+			if (channelMode === "interactive-thread") {
+				const sessions = loadSessions(this.workingDir);
+				const threadTs = e.thread_ts ?? e.ts; // top-level: ts becomes the thread anchor
+
+				let session = findByThread(sessions, e.channel, threadTs);
+
+				if (!session) {
+					if (e.thread_ts) {
+						// Reply in an unrecognised thread — create a session anchored to the thread
+						session = createSession(this.workingDir, {
+							originChannel: e.channel,
+							originThreadTs: e.thread_ts,
+						});
+					} else {
+						// Top-level @mention — create a new session anchored to this message's ts
+						session = createSession(this.workingDir, {
+							originChannel: e.channel,
+							originThreadTs: e.ts,
+						});
+					}
+				}
+
+				const sessionChannel = `SESSION-${session.sessionId}`;
+				this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs });
 				const user = this.users.get(slackEvent.user);
 				this.logToFile(sessionChannel, {
 					date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
@@ -692,18 +782,48 @@ export class SlackBot {
 				channel_type?: string;
 				subtype?: string;
 				bot_id?: string;
-				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
+				files?: Array<{ name: string; url_private_download?: string; url_private?: string; filetype?: string; plain_text?: string; preview_plain_text?: string; subject?: string }>;
+				blocks?: Array<{ type: string; text?: { type: string; text: string }; elements?: any[] }>;
 			};
 
 			// Skip bot messages, edits, etc.
-			if (e.bot_id || !e.user || e.user === this.botUserId) {
-				ack();
-				return;
-			}
+			// Exception: in leads mode, allow all bot/integration messages (n8n, insta, email, etc.)
+			// Only skip own bot messages to avoid loops.
+			const isEmailLead = !!e.bot_id && !e.user &&
+				Array.isArray((e as any).files) &&
+				(e as any).files.some((f: any) => f.filetype === "email");
+
+			const channelModeForFilter = this.getChannelMode(e.channel);
+			const isLeadsChannel = channelModeForFilter === "leads";
+
+			// Subtype filter — allow bot_message in leads channels (workflow/n8n/insta/email bots)
 			if (e.subtype !== undefined && e.subtype !== "file_share") {
-				ack();
-				return;
+				if (!(isLeadsChannel && e.subtype === "bot_message")) {
+					ack();
+					return;
+				}
 			}
+
+			// Bot/user filter — in leads channels allow all integrations, only skip our own messages
+			if (isLeadsChannel) {
+				if (e.user === this.botUserId || e.bot_id === this.botId) {
+					ack();
+					return;
+				}
+			} else {
+				// In interactive-thread mode, allow bot messages ONLY if they're top-level (thread anchors)
+				// This lets skills post thread openers that trigger session creation
+				const isInteractiveThread = channelModeForFilter === "interactive-thread";
+				const isTopLevel = !e.thread_ts;
+				const isBotMessage = e.bot_id || !e.user || e.user === this.botUserId;
+
+				if (isBotMessage && !(isInteractiveThread && isTopLevel)) {
+					// Skip bot messages except for top-level in interactive-thread channels
+					ack();
+					return;
+				}
+			}
+
 			if (!e.text && (!e.files || e.files.length === 0)) {
 				ack();
 				return;
@@ -726,8 +846,28 @@ export class SlackBot {
 				type: isDM ? "dm" : "mention",
 				channel: e.channel,
 				ts: e.ts,
-				user: e.user,
-				text: (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
+				user: e.user || e.bot_id || "integration",
+				text: (() => {
+					// For email leads, extract plain_text from the email file
+					if (isEmailLead) {
+						const emailFile = (e as any).files?.find((f: any) => f.filetype === "email");
+						const subject = emailFile?.subject ? `Subject: ${emailFile.subject}\n` : "";
+						const body = emailFile?.plain_text || emailFile?.preview_plain_text || "";
+						return `${subject}${body}`.trim();
+					}
+					// For block-based messages (insta-bot, n8n) — blocks have the full content, e.text is a short fallback
+					if (isLeadsChannel && e.blocks && e.blocks.length > 0) {
+						const blockText = e.blocks
+							.map((b: any) => b.text?.text || b.elements?.map((el: any) => el.text || "").join("") || "")
+							.join("\n")
+							.trim();
+						if (blockText && blockText.length > (e.text || "").length) {
+							return blockText.replace(/<@[A-Z0-9]+>/gi, "").trim();
+						}
+					}
+					// For all other messages — use text as-is
+					return (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim();
+				})(),
 				files: e.files,
 			};
 
@@ -736,7 +876,9 @@ export class SlackBot {
 			slackEvent.attachments = this.logUserMessage(slackEvent);
 
 			// Only trigger processing for messages AFTER startup (not replayed old messages)
-			if (this.startupTs && e.ts < this.startupTs) {
+			// Exception: "leads" mode channels process missed messages on restart
+			const channelMode = this.channelModes.get(e.channel);
+			if (this.startupTs && e.ts < this.startupTs && channelMode !== "leads") {
 				log.logInfo(`[${e.channel}] Skipping old message (pre-startup): ${slackEvent.text.substring(0, 30)}`);
 				ack();
 				return;
@@ -746,6 +888,17 @@ export class SlackBot {
 			if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) {
 				ack();
 				return;
+			}
+
+			// Leads mode: top-level message (no thread) fires LLM without @mention needed
+			if (!isDM && !isBotMention && !e.thread_ts) {
+				const channelMode = this.getChannelMode(e.channel);
+				if (channelMode === "leads") {
+					const queue = this.getQueue(e.channel);
+					queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+					ack();
+					return;
+				}
 			}
 
 			// Session thread routing for thread-mode channels (non-DM, non-@mention)
@@ -776,6 +929,75 @@ export class SlackBot {
 							sessionQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
 						}
 						ack();
+						return;
+					}
+				}
+				if (channelMode === "interactive-thread") {
+					const sessions = loadSessions(this.workingDir);
+					let session = findByThread(sessions, e.channel, e.thread_ts);
+
+					if (!session) {
+						if (!e.thread_ts) {
+							// Top-level non-mention message — only create session if mention not required
+							if (this.channelRequireMention.has(e.channel)) {
+								// requireMentionForTopLevel: ignore, @mention via app_mention will create the session
+								ack();
+								return;
+							}
+						}
+						// Unknown thread — create a session anchored to it
+						session = createSession(this.workingDir, {
+							originChannel: e.channel,
+							originThreadTs: e.thread_ts ?? e.ts,
+						});
+					}
+
+					const sessionChannel = `SESSION-${session.sessionId}`;
+					this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
+					const user = this.users.get(slackEvent.user);
+					this.logToFile(sessionChannel, {
+						date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
+						ts: slackEvent.ts,
+						user: slackEvent.user,
+						userName: user?.userName,
+						displayName: user?.displayName,
+						text: slackEvent.text,
+						attachments: slackEvent.attachments || [],
+						isBot: false,
+					});
+					slackEvent.channel = sessionChannel;
+					const sessionQueue = this.getQueue(sessionChannel);
+					if (sessionQueue.size() >= 5) {
+						this.postInThread(e.channel, e.thread_ts, "_Too many messages queued. Please wait._");
+					} else {
+						sessionQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+					}
+					ack();
+					return;
+				}
+				if (channelMode === "passthrough") {
+					const passthroughUrl = this.channelPassthroughUrls.get(e.channel);
+					if (passthroughUrl) {
+						const user = this.users.get(slackEvent.user);
+						const userName = user?.displayName || user?.userName || slackEvent.user;
+						const senderId = `slack_${e.thread_ts.replace(".", "")}`;
+						ack();
+						(async () => {
+							try {
+								const apiKey = process.env.PASSTHROUGH_API_KEY ?? "";
+								const body = JSON.stringify({ text: slackEvent.text, user: userName, sender_id: senderId });
+								const resp = await fetch(passthroughUrl, {
+									method: "POST",
+									headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
+									body,
+								});
+								const json = await resp.json() as { response?: string; text?: string; error?: string };
+								const reply = json.response || json.text || json.error || "(no response)";
+								await this.postInThread(e.channel, e.thread_ts!, reply);
+							} catch (err) {
+								log.logWarning(`[${e.channel}] passthrough error`, err instanceof Error ? err.message : String(err));
+							}
+						})();
 						return;
 					}
 				}
