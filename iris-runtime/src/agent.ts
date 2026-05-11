@@ -198,19 +198,11 @@ function buildSystemPrompt(
 - Be careful with system modifications`;
 
 	const constitutionSection = constitution ? `\n\n${constitution}` : "";
-	const now = new Date();
-	const pad = (n: number) => n.toString().padStart(2, "0");
-	const offset = -now.getTimezoneOffset();
-	const offsetSign = offset >= 0 ? "+" : "-";
-	const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
-	const offsetMins = pad(Math.abs(offset) % 60);
-	const currentDateTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
 
 	return `You are Iris, a Slack-connected orchestrator for specialized sub-agents. Be concise. No emojis.${constitutionSection}
 
 ## Context
-- Current date/time: ${currentDateTime}
-- For precise timestamps, use: date
+- For the current date/time, use: date
 - You have access to previous conversation context including tool results from prior turns.
 - For older history beyond your context, search log.jsonl (contains user messages and your final responses, but not tool results).
 
