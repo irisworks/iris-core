@@ -3,7 +3,8 @@ import { spawn } from "child_process";
 export type SandboxConfig =
 	| { type: "host" }
 	| { type: "docker"; container: string }
-	| { type: "firecracker"; agentIp: string };
+	| { type: "firecracker"; agentIp: string }
+	| { type: "firecracker-pool"; sessionId: string };
 
 export function parseSandboxArg(value: string): SandboxConfig {
 	if (value === "host") {
@@ -25,7 +26,11 @@ export function parseSandboxArg(value: string): SandboxConfig {
 		}
 		return { type: "firecracker", agentIp };
 	}
-	console.error(`Error: Invalid sandbox type '${value}'. Use 'host', 'docker:<container-name>', or 'firecracker:<agent-ip>'`);
+	if (value === "firecracker-pool") {
+		// sessionId is assigned later by createExecutor when the channelId is known
+		return { type: "firecracker-pool", sessionId: "" };
+	}
+	console.error(`Error: Invalid sandbox type '${value}'. Use 'host', 'docker:<container>', 'firecracker:<ip>', or 'firecracker-pool'`);
 	process.exit(1);
 }
 
@@ -44,6 +49,12 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 			console.error("Check that the VM is booted: systemctl status iris-fc-<name>");
 			process.exit(1);
 		}
+		return;
+	}
+
+	if (config.type === "firecracker-pool") {
+		// Pool VMs are acquired lazily per session — nothing to validate upfront
+		console.log("  Firecracker pool mode: VMs will be spawned on demand per session.");
 		return;
 	}
 
@@ -91,16 +102,32 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
 }
 
 /**
- * Create an executor that runs commands on host, in Docker, or inside a Firecracker microVM
+ * Create an executor for the given sandbox config.
+ * For firecracker-pool mode, sessionId (channelId) must be provided so the
+ * VmManager can track which VM belongs to which session.
  */
-export function createExecutor(config: SandboxConfig): Executor {
+export function createExecutor(config: SandboxConfig, sessionId?: string): Executor {
 	if (config.type === "host") {
 		return new HostExecutor();
 	}
 	if (config.type === "firecracker") {
 		return new FirecrackerExecutor(config.agentIp);
 	}
+	if (config.type === "firecracker-pool") {
+		if (!sessionId) throw new Error("firecracker-pool sandbox requires a sessionId");
+		return new FirecrackerPoolExecutor(sessionId);
+	}
 	return new DockerExecutor(config.container);
+}
+
+/**
+ * Release the VM held by an executor (no-op for non-pool executors).
+ * Call this when a session ends.
+ */
+export async function releaseExecutor(executor: Executor): Promise<void> {
+	if (executor instanceof FirecrackerPoolExecutor) {
+		await executor.release();
+	}
 }
 
 export interface Executor {
@@ -216,6 +243,35 @@ class DockerExecutor implements Executor {
 	getWorkspacePath(_hostPath: string): string {
 		// Docker container sees /workspace
 		return "/workspace";
+	}
+}
+
+class FirecrackerPoolExecutor implements Executor {
+	private inner: FirecrackerExecutor | undefined;
+
+	constructor(private sessionId: string) {}
+
+	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+		if (!this.inner) {
+			const { vmManager } = await import("./vm-manager.js");
+			const guestIp = await vmManager.acquire(this.sessionId);
+			this.inner = new FirecrackerExecutor(guestIp);
+		} else {
+			// Refresh idle TTL on each command
+			const { vmManager } = await import("./vm-manager.js");
+			vmManager.touch(this.sessionId);
+		}
+		return this.inner.exec(command, options);
+	}
+
+	getWorkspacePath(_hostPath: string): string {
+		return "/workspace";
+	}
+
+	async release(): Promise<void> {
+		const { vmManager } = await import("./vm-manager.js");
+		await vmManager.release(this.sessionId);
+		this.inner = undefined;
 	}
 }
 

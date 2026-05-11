@@ -19,7 +19,7 @@ import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
-import { createExecutor, type SandboxConfig } from "./sandbox.js";
+import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
 import type { ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
@@ -464,7 +464,7 @@ function createRunner(
 	provider: string,
 	modelId: string,
 ): AgentRunner {
-	const executor = createExecutor(sandboxConfig);
+	const executor = createExecutor(sandboxConfig, channelId);
 	const workspaceDir = channelDir.replace(`/${channelId}`, "");
 	const workspacePath = executor.getWorkspacePath(workspaceDir);
 
@@ -1011,6 +1011,8 @@ function createRunner(
 
 		reset(): void {
 			agent.reset();
+			// Release VM if this is a pool-mode session (next exec will boot a fresh one)
+			void releaseExecutor(executor);
 			// Truncate the context file so future loads start fresh
 			try {
 				writeFileSync(contextFile, "");
