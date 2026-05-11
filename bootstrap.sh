@@ -19,6 +19,12 @@
 #   Re-deploy, /iris/.env already exists:
 #     bash bootstrap.sh --no-keyvault
 #
+#   Install Firecracker + build rootfs (run once on a KVM-capable VM):
+#     bash bootstrap.sh --firecracker
+#
+#   Combine flags (e.g. first-time setup + Firecracker):
+#     bash bootstrap.sh --setup --no-keyvault --firecracker
+#
 # All config can be passed via env vars to skip prompts.
 # ============================================================
 set -euo pipefail
@@ -32,6 +38,7 @@ REPO_DIR="${REPO_DIR:-}"
 SETUP_MODE=false
 NO_KEYVAULT=false
 KEYVAULT_EXPLICIT=false   # true when --keyvault or --no-keyvault was passed
+FIRECRACKER_MODE=false
 
 IRIS_PROVIDER="${IRIS_PROVIDER:-}"
 IRIS_MODEL="${IRIS_MODEL:-}"
@@ -68,9 +75,10 @@ prompt_secret() {
 # ────────────────────────────────────────────────────────────
 for arg in "$@"; do
   case "$arg" in
-    --setup)       SETUP_MODE=true ;;
-    --no-keyvault) NO_KEYVAULT=true;  KEYVAULT_EXPLICIT=true ;;
-    --keyvault)    NO_KEYVAULT=false; KEYVAULT_EXPLICIT=true ;;
+    --setup)        SETUP_MODE=true ;;
+    --no-keyvault)  NO_KEYVAULT=true;  KEYVAULT_EXPLICIT=true ;;
+    --keyvault)     NO_KEYVAULT=false; KEYVAULT_EXPLICIT=true ;;
+    --firecracker)  FIRECRACKER_MODE=true ;;
     *) die "Unknown argument: $arg" ;;
   esac
 done
@@ -163,6 +171,83 @@ if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versi
   log "Installing Node.js 22..."
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
+fi
+
+# ────────────────────────────────────────────────────────────
+# 1b. Firecracker (optional — only when --firecracker is passed)
+# ────────────────────────────────────────────────────────────
+if [[ "$FIRECRACKER_MODE" == true ]]; then
+  log_h "Firecracker setup"
+
+  # Verify KVM is available (requires nested-virt or bare-metal)
+  if [[ ! -e /dev/kvm ]]; then
+    log "WARNING: /dev/kvm not found. Firecracker requires KVM."
+    log "On Azure, use a Ddsv5-series VM or enable nested virtualisation."
+    log "Skipping Firecracker install."
+  else
+    FC_VERSION="${FC_VERSION:-1.7.0}"
+    FC_BIN="/usr/local/bin/firecracker"
+    JAILER_BIN="/usr/local/bin/jailer"
+
+    if [[ ! -f "$FC_BIN" ]]; then
+      log "Downloading Firecracker v${FC_VERSION}..."
+      FC_ARCH=$(uname -m)  # x86_64 or aarch64
+      FC_TGZ="/tmp/firecracker-v${FC_VERSION}-${FC_ARCH}.tgz"
+      curl -Lo "$FC_TGZ" \
+        "https://github.com/firecracker-microvm/firecracker/releases/download/v${FC_VERSION}/firecracker-v${FC_VERSION}-${FC_ARCH}.tgz"
+      tar -xzf "$FC_TGZ" -C /tmp
+      sudo install "/tmp/release-v${FC_VERSION}-${FC_ARCH}/firecracker-v${FC_VERSION}-${FC_ARCH}" "$FC_BIN"
+      sudo install "/tmp/release-v${FC_VERSION}-${FC_ARCH}/jailer-v${FC_VERSION}-${FC_ARCH}" "$JAILER_BIN"
+      rm -f "$FC_TGZ"
+      log "Firecracker installed: $($FC_BIN --version)"
+    else
+      log "Firecracker already installed: $($FC_BIN --version)"
+    fi
+
+    # Jailer system user (uid/gid 10000)
+    if ! id irisjailer &>/dev/null; then
+      log "Creating irisjailer system user (uid/gid 10000)..."
+      sudo groupadd -g 10000 irisjailer 2>/dev/null || true
+      sudo useradd -u 10000 -g 10000 -r -s /usr/sbin/nologin irisjailer
+    fi
+
+    # KVM group membership for current user
+    sudo usermod -aG kvm "$USER" 2>/dev/null || true
+
+    # Kernel image
+    VMLINUX="/var/lib/iris/firecracker/vmlinux"
+    if [[ ! -f "$VMLINUX" ]]; then
+      log "Downloading Firecracker-compatible kernel..."
+      sudo mkdir -p "$(dirname "$VMLINUX")"
+      FC_ARCH=$(uname -m)
+      sudo curl -Lo "$VMLINUX" \
+        "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${FC_ARCH}/kernels/vmlinux.bin"
+      log "Kernel downloaded: $VMLINUX"
+    else
+      log "Kernel already present: $VMLINUX"
+    fi
+
+    # Build rootfs (requires iris-runtime:local Docker image)
+    ROOTFS="/var/lib/iris/firecracker/rootfs.ext4"
+    if [[ ! -f "$ROOTFS" ]]; then
+      log "Building Firecracker rootfs from iris-runtime Docker image..."
+      log "(This requires iris-runtime:local to be built first — building now...)"
+      resolve_repo_dir
+      cd "$REPO_DIR/iris-runtime"
+      npm ci --prefer-offline 2>/dev/null || npm install
+      npm run build
+      docker_cmd build -t iris-runtime:local .
+      sudo bash "$REPO_DIR/scripts/build-firecracker-rootfs.sh"
+    else
+      log "Rootfs already present: $ROOTFS"
+    fi
+
+    log ""
+    log "  Firecracker is ready. Next step:"
+    log "  Uncomment a 'module \"public_sandbox\"' block in terraform/agents.tf"
+    log "  and run: cd ${REPO_DIR:-/iris/repo}/terraform && terraform apply"
+    log ""
+  fi
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -907,5 +992,12 @@ if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
   log "  Slack:     @iris in any channel"
 else
   log "  Slack:     not configured (add tokens to /iris/.env and restart)"
+fi
+if [[ "$FIRECRACKER_MODE" == true ]]; then
+  if [[ -f "/var/lib/iris/firecracker/rootfs.ext4" ]]; then
+    log "  Firecracker: rootfs ready — uncomment a module in terraform/agents.tf to provision"
+  else
+    log "  Firecracker: /dev/kvm missing or rootfs not built — see log above"
+  fi
 fi
 log ""

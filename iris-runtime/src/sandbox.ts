@@ -1,6 +1,9 @@
 import { spawn } from "child_process";
 
-export type SandboxConfig = { type: "host" } | { type: "docker"; container: string };
+export type SandboxConfig =
+	| { type: "host" }
+	| { type: "docker"; container: string }
+	| { type: "firecracker"; agentIp: string };
 
 export function parseSandboxArg(value: string): SandboxConfig {
 	if (value === "host") {
@@ -14,12 +17,33 @@ export function parseSandboxArg(value: string): SandboxConfig {
 		}
 		return { type: "docker", container };
 	}
-	console.error(`Error: Invalid sandbox type '${value}'. Use 'host' or 'docker:<container-name>'`);
+	if (value.startsWith("firecracker:")) {
+		const agentIp = value.slice("firecracker:".length);
+		if (!agentIp) {
+			console.error("Error: firecracker sandbox requires agent IP (e.g., firecracker:172.20.1.2)");
+			process.exit(1);
+		}
+		return { type: "firecracker", agentIp };
+	}
+	console.error(`Error: Invalid sandbox type '${value}'. Use 'host', 'docker:<container-name>', or 'firecracker:<agent-ip>'`);
 	process.exit(1);
 }
 
 export async function validateSandbox(config: SandboxConfig): Promise<void> {
 	if (config.type === "host") {
+		return;
+	}
+
+	if (config.type === "firecracker") {
+		try {
+			const res = await fetch(`http://${config.agentIp}:8080/health`, { signal: AbortSignal.timeout(5000) });
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			console.log(`  Firecracker VM at ${config.agentIp} is healthy.`);
+		} catch (err) {
+			console.error(`Error: Firecracker VM at ${config.agentIp} is not reachable: ${err}`);
+			console.error("Check that the VM is booted: systemctl status iris-fc-<name>");
+			process.exit(1);
+		}
 		return;
 	}
 
@@ -67,11 +91,14 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
 }
 
 /**
- * Create an executor that runs commands either on host or in Docker container
+ * Create an executor that runs commands on host, in Docker, or inside a Firecracker microVM
  */
 export function createExecutor(config: SandboxConfig): Executor {
 	if (config.type === "host") {
 		return new HostExecutor();
+	}
+	if (config.type === "firecracker") {
+		return new FirecrackerExecutor(config.agentIp);
 	}
 	return new DockerExecutor(config.container);
 }
@@ -188,6 +215,50 @@ class DockerExecutor implements Executor {
 
 	getWorkspacePath(_hostPath: string): string {
 		// Docker container sees /workspace
+		return "/workspace";
+	}
+}
+
+class FirecrackerExecutor implements Executor {
+	constructor(private agentIp: string) {}
+
+	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+		const url = `http://${this.agentIp}:8080/exec`;
+		const timeout = options?.timeout ?? 60;
+
+		const controller = new AbortController();
+		const httpTimeout = setTimeout(() => controller.abort(), (timeout + 5) * 1000);
+
+		if (options?.signal) {
+			options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+		}
+
+		try {
+			const res = await fetch(url, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ command, timeout }),
+				signal: controller.signal,
+			});
+
+			if (!res.ok) {
+				const text = await res.text();
+				return { stdout: "", stderr: `Firecracker exec HTTP ${res.status}: ${text}`, code: 1 };
+			}
+
+			const data = (await res.json()) as { stdout: string; stderr: string; exit_code: number };
+			return { stdout: data.stdout, stderr: data.stderr, code: data.exit_code };
+		} catch (err) {
+			if (options?.signal?.aborted) {
+				throw new Error("Command aborted");
+			}
+			throw new Error(`Firecracker VM unreachable at ${this.agentIp}: ${err}`);
+		} finally {
+			clearTimeout(httpTimeout);
+		}
+	}
+
+	getWorkspacePath(_hostPath: string): string {
 		return "/workspace";
 	}
 }
