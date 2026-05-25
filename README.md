@@ -397,7 +397,7 @@ Iris supports two secret storage backends:
 **Azure Key Vault** (recommended for production):
 
 ```bash
-KV=$(terraform output -raw key_vault_name)
+KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)   # set by bootstrap --setup
 az keyvault secret set --vault-name "$KV" --name "FOUNDRY-E2-KEY"   --value "<key>"
 az keyvault secret set --vault-name "$KV" --name "SLACK-APP-TOKEN"  --value "xapp-..."
 az keyvault secret set --vault-name "$KV" --name "SLACK-BOT-TOKEN"  --value "xoxb-..."
@@ -424,8 +424,7 @@ irisflow/
 ├── MEMORY.md                       # Iris's mutable global memory
 ├── README.md
 ├── data/
-│   ├── models.json                 # LLM provider + model config
-│   └── models.json.template        # template for new installs
+│   └── models.json.template        # template — bootstrap generates models.json from this
 ├── iris-runtime/                   # @iris-core/runtime — fork of pi-mom
 │   └── src/
 │       ├── main.ts                 # --provider, --model, --sandbox flags
@@ -480,7 +479,7 @@ irisflow/
 | `/dev/kvm` not found | Wrong Azure VM series | Resize to Ddsv5 series (e.g. `Standard_D4ds_v5`) — B-series, D-series, F-series do not support KVM |
 | `firecracker: permission denied` | Not in kvm group | `sudo usermod -aG kvm $USER` then log out and SSH back in |
 | VM boots but `/health` times out | exec-server not started | Check `journalctl -u iris-fc-<name>` |
-| Jailer fails to chroot | `irisjailer` user missing | `sudo useradd -u 10000 -g 10000 -r irisjailer` |
+| Jailer fails to chroot | `irisjailer` user missing | `sudo groupadd -g 10000 irisjailer 2>/dev/null; sudo useradd -u 10000 -g 10000 -r -s /usr/sbin/nologin irisjailer` |
 | rootfs missing | Build script not run | `sudo bash scripts/build-firecracker-rootfs.sh` |
 
 ---
