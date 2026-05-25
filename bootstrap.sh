@@ -232,6 +232,8 @@ if [[ "$FIRECRACKER_MODE" == true ]]; then
     if [[ ! -f "$ROOTFS" ]]; then
       log "Building Firecracker rootfs from iris-runtime Docker image..."
       log "(This requires iris-runtime:local to be built first — building now...)"
+      # e2fsprogs provides mkfs.ext4, required by build-firecracker-rootfs.sh
+      sudo apt-get install -y e2fsprogs
       resolve_repo_dir
       cd "$REPO_DIR/iris-runtime"
       npm ci --prefer-offline 2>/dev/null || npm install
