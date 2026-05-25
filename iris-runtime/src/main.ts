@@ -419,7 +419,18 @@ const handler: IrisHandler = {
 // Start
 // ============================================================================
 
-log.logStartup(workingDir, sandbox.type === "host" ? "host" : `docker:${sandbox.container}`);
+let sandboxLabel = "";
+if (sandbox.type === "host") {
+	sandboxLabel = "host";
+} else if (sandbox.type === "docker") {
+	sandboxLabel = `docker:${sandbox.container}`;
+} else if (sandbox.type === "firecracker") {
+	sandboxLabel = `firecracker:${sandbox.agentIp}`;
+} else if (sandbox.type === "firecracker-pool") {
+	sandboxLabel = "firecracker-pool";
+}
+
+log.logStartup(workingDir, sandboxLabel);
 log.logInfo(`iris-runtime: provider=${provider} model=${model} environment=${environment}`);
 
 // Start internal API server (default port 3000, always-on for sub-agent escalation)
