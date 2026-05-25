@@ -419,17 +419,16 @@ const handler: IrisHandler = {
 // Start
 // ============================================================================
 
-let sandboxLabel = "";
+let sandboxLabel: string;
 if (sandbox.type === "host") {
 	sandboxLabel = "host";
 } else if (sandbox.type === "docker") {
 	sandboxLabel = `docker:${sandbox.container}`;
 } else if (sandbox.type === "firecracker") {
 	sandboxLabel = `firecracker:${sandbox.agentIp}`;
-} else if (sandbox.type === "firecracker-pool") {
+} else {
 	sandboxLabel = "firecracker-pool";
 }
-
 log.logStartup(workingDir, sandboxLabel);
 log.logInfo(`iris-runtime: provider=${provider} model=${model} environment=${environment}`);
 
