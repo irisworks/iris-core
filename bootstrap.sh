@@ -31,7 +31,7 @@ set -euo pipefail
 
 IRIS_DIR="/iris"
 REPO_URL="${REPO_URL:-}"
-IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/30Signals/iris-core.git}"
+IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/irisflow.git}"
 KV_NAME="${KV_NAME:-}"
 KV_RESOURCE_GROUP="${KV_RESOURCE_GROUP:-}"
 REPO_DIR="${REPO_DIR:-}"
@@ -867,7 +867,7 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
       git -C "$REPO_DIR" remote add upstream "$IRIS_CORE_URL"
       log "upstream remote added → $IRIS_CORE_URL"
     fi
-    git -C "$REPO_DIR" fetch upstream --quiet
+    git -C "$REPO_DIR" fetch upstream --quiet 2>/dev/null || log "Warning: could not fetch upstream — continuing (you can run 'git fetch upstream' manually later)"
     log "To merge future iris-core updates: git fetch upstream && git merge upstream/main"
   fi
 else
