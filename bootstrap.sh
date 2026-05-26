@@ -66,7 +66,7 @@ prompt() {
 prompt_secret() {
   local question="$1"
   read -r -s -p "[iris-bootstrap] $question: " answer
-  echo ""
+  echo "" >&2
   echo "$answer"
 }
 
