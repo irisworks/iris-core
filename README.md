@@ -22,7 +22,7 @@ This repository is the source of truth for Iris's constitution, runtime, infrast
 ```
 You (Slack)
 └── Iris  (Azure VM, systemd service)
-    ├── iris-runtime          provider-agnostic fork of pi-mom
+    ├── iris-runtime
     ├── CONSTITUTION.md       read-only operator rules, injected every prompt
     ├── MEMORY.md             mutable global memory
     ├── skills/               hot-reloaded capabilities
@@ -82,270 +82,317 @@ Still pending:
 
 ## Setup
 
----
+Pick the path that matches your environment — one command does everything:
 
-## Option 1 — Simple Setup (no isolated VMs)
+| | No Firecracker | With Firecracker (isolated microVMs) |
+|---|---|---|
+| **No Azure** | [Option 1](#option-1--no-azure-no-firecracker) — simplest | [Option 3](#option-3--no-azure-with-firecracker) |
+| **Azure Key Vault** | [Option 2](#option-2--azure-key-vault-no-firecracker) | [Option 4](#option-4--azure-key-vault--firecracker-full-production) — full production |
 
-Iris runs on your VM and executes bash commands directly on the host. No Azure account required.
-
-**What you need before starting:**
-- A VM running Ubuntu 22.04 LTS
-- An API key for your LLM provider (Anthropic, OpenAI, Azure AI Foundry, or AWS Bedrock)
-- A Slack workspace where you have admin access (optional but recommended)
-- A GitHub account (optional, for Iris to commit skills back to the repo)
-
-**Step 1 — Clone the repo**
+All four paths start the same way:
 
 ```bash
 sudo mkdir -p /iris && sudo chown $USER:$USER /iris
 git clone https://github.com/irisworks/irisflow.git /iris/repo
-# When prompted for password, use a GitHub Personal Access Token (PAT) instead of your account password:
-# Username: <your-github-username>
-# Password: <your-github-pat-token>
 cd /iris/repo
 ```
 
-**Step 2 — Run the bootstrap script**
+Then run the single command for your chosen path below.
 
-The bootstrap script will guide you through setting up your Slack App step-by-step in the terminal. You don't need to configure Slack beforehand; just follow the interactive prompts.
+---
+
+## Option 1 — No Azure, No Firecracker
+
+Iris runs on your VM and executes commands directly on the host. No Azure account, no KVM needed.
+
+**Requirements:** Ubuntu 22.04 VM · LLM provider API key · Slack workspace (admin) · GitHub account (optional)
 
 ```bash
 bash bootstrap.sh --setup --no-keyvault
 ```
 
-What happens in order:
+**Exactly what you will see:**
 
-1. **Dependencies install automatically** — Docker, Node 22, nginx, jq, GitHub CLI, Terraform, etc. This takes a few minutes with no prompts.
-2. **GitHub CLI login** — `gh auth login` opens a browser or shows a one-time device code. Go to [github.com/login/device](https://github.com/login/device) and enter the code, or approve in your browser.
-3. **Interactive prompts** — you'll be asked for:
-   - Your LLM provider and API key
-   - **Slack App Setup Instructions**: The script will print exactly how to create your app, enable Socket Mode, set OAuth scopes, and configure Event Subscriptions.
-   - `[iris-bootstrap] Slack App token (xapp-...):` and `Slack Bot token (xoxb-...):` (enter the tokens generated following the on-screen instructions)
-   - `Add GitHub token for repo access? [Y/n]` (enter `y` or `n`)
-   - `[iris-bootstrap] GitHub token (github_pat_... or ghp_...):`
-   - `Set up email sending (Resend.com)? [y/N]` (enter `y` or `n`)
-   - `Set up public domain (e.g. iris.example.com)? [y/N]` (enter `y` or `n`)
-   - `Git author email for Iris commits` (add your email id)
-4. **Automated finish** — writes `/iris/.env`, builds the runtime, starts `iris.service`.
+```
+[iris-bootstrap] ── System dependencies ──
+(automated: Docker, Node 22, jq, nginx, certbot, GitHub CLI, Terraform)
 
-**Step 4 — Verify**
+[iris-bootstrap] ── GitHub login ──
+(gh auth login opens browser or shows device code)
+> Go to https://github.com/login/device and enter the code shown
 
+[iris-bootstrap] Choose LLM provider:
+  1) anthropic       — Claude Sonnet / Opus (recommended)
+  2) openai          — GPT-4o / GPT-4
+  3) foundry-e2      — Azure AI Foundry (Azure OpenAI)
+  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)
+[iris-bootstrap] Choice [1]:
+
+[iris-bootstrap] Anthropic API key (sk-ant-...):
+
+[iris-bootstrap] Set up Slack integration? [Y/n]
+
+  ┌─ Slack App Setup ────────────────────────────────────────────┐
+  │                                                               │
+  │  1. Go to https://api.slack.com/apps → Create New App        │
+  │     → From scratch → name it 'Iris' → pick your workspace    │
+  │                                                               │
+  │  2. Socket Mode (left sidebar)                                │
+  │     → Enable Socket Mode → generate App-Level Token          │
+  │     → name it 'iris-socket' → scope: connections:write       │
+  │     → copy the  xapp-...  token  (App Token)                 │
+  │                                                               │
+  │  3. OAuth & Permissions (left sidebar)                        │
+  │     → Bot Token Scopes → Add:                                 │
+  │         app_mentions:read  channels:history  channels:read    │
+  │         chat:write         groups:history    groups:read      │
+  │         im:history         im:read           im:write         │
+  │         mpim:history       reactions:write   users:read       │
+  │     → Install to Workspace → copy the  xoxb-...  token       │
+  │                                                               │
+  │  4. Event Subscriptions → Enable → subscribe to bot events:   │
+  │         app_mention  message.channels  message.groups        │
+  │         message.im   message.mpim                            │
+  │                                                               │
+  │  5. App Home → enable Messages Tab                           │
+  └───────────────────────────────────────────────────────────────────┘
+
+[iris-bootstrap] Press Enter when your app is created and tokens are ready...
+[iris-bootstrap] Slack App token (xapp-...):
+[iris-bootstrap] Slack Bot token (xoxb-...):
+
+[iris-bootstrap] Add GitHub token for repo access? [Y/n]
+[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
+[iris-bootstrap] Set up public domain (e.g. iris.example.com)? [y/N]
+[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
+
+[iris-bootstrap] ── Workspace ──
+(automated: writes /iris/.env, symlinks MEMORY.md / CONSTITUTION.md / skills)
+
+[iris-bootstrap] ── Building iris-runtime ──
+(automated: npm install + npm run build)
+
+[iris-bootstrap] ── Installing systemd service ──
+(automated: installs iris.service, starts Iris)
+
+[iris-bootstrap] ── Done ──
+  ✓ Iris is running!
+  Status:    sudo systemctl status iris
+  Logs:      sudo journalctl -u iris -f
+  Secrets:   /iris/.env
+  Slack:     @iris in any channel
+```
+
+**Verify:**
 ```bash
 sudo systemctl status iris
-sudo journalctl -u iris -f
 ```
-
-Then message Iris in Slack:
-
-```
-@iris what model are you?
-```
-
-That's it. Iris is running.
+Then in Slack: `@iris what model are you?`
 
 ---
 
-## Option 2 — Full Setup with Firecracker (isolated microVMs)
+## Option 2 — Azure Key Vault, No Firecracker
 
-Every Slack channel gets its own sandboxed Linux VM, booted fresh on demand and destroyed after 30 minutes of inactivity. Nothing one user does can affect another.
+Same as Option 1 but secrets live in Azure Key Vault instead of `/iris/.env`.
 
-**What you need before starting:**
-- A VM running Ubuntu 22.04 LTS **with KVM support** — on Azure you must use the **Ddsv5 series** (e.g. `Standard_D4ds_v5`) or a bare-metal SKU. Regular D-series, B-series, or F-series VMs do not have KVM and will not work for Firecracker
-- An API key for your LLM provider
-- A Slack workspace where you have admin access
-- A GitHub account
-- An Azure account — **only needed if you want to use Azure Key Vault for secrets and Terraform for agent provisioning.** If you prefer to store secrets in a local `.env` file you can skip Steps 1 and 2.
-
----
-
-**Step 1 — Install Azure CLI and log in** _(skip if not using Azure)_
+**Requirements:** All of Option 1 + Azure account
 
 ```bash
-curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-az login
+bash bootstrap.sh --setup --keyvault
 ```
 
----
+**Exactly what you will see:**
 
-**Step 2 — Create Terraform state storage** _(skip if not using Azure)_
-
-Pick a globally unique name for your storage account and keep it — you will need it later.
-The name must be 3-24 characters, lowercase letters and numbers only (no hyphens or underscores).
-
-```bash
-SA_NAME="iristfstatericky"   # replace — lowercase letters and numbers only, max 24 chars
-
-az group create -n iris-tfstate-rg -l eastus
-
-az storage account create \
-  -n "$SA_NAME" -g iris-tfstate-rg \
-  -l eastus --sku Standard_LRS \
-  --min-tls-version TLS1_2 \
-  --allow-blob-public-access false
-
-az storage container create \
-  -n tfstate --account-name "$SA_NAME" --auth-mode login
 ```
+[iris-bootstrap] ── System dependencies ──
+(automated: same as Option 1 + Azure CLI)
 
----
+[iris-bootstrap] ── Azure login ──
+(az login opens browser or shows device code)
+(skipped automatically if this VM has a managed identity)
+Active subscription: My-Subscription (xxxxxxxx-xxxx-...)
 
-**Step 3 — Create your Slack app**
+[iris-bootstrap] ── GitHub login ──
+(gh auth login)
 
-Go to [https://api.slack.com/apps](https://api.slack.com/apps) and create a new app. You need admin access to a Slack workspace.
+[iris-bootstrap] Choose LLM provider:   (same as Option 1)
+[iris-bootstrap] Anthropic API key (sk-ant-...):
+[iris-bootstrap] Set up Slack integration? [Y/n]
+  (same Slack setup box as Option 1)
+[iris-bootstrap] Slack App token (xapp-...):
+[iris-bootstrap] Slack Bot token (xoxb-...):
+[iris-bootstrap] Add GitHub token for repo access? [Y/n]
+[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
+[iris-bootstrap] Set up public domain? [y/N]
 
-1. Click **Create New App → From scratch**, name it `Iris`, pick your workspace
-2. **Socket Mode** (left sidebar) → Enable Socket Mode → Generate App-Level Token → name it `iris-socket`, scope: `connections:write` → copy the `xapp-...` token (App Token - store it, it will be needed later)
-3. **OAuth & Permissions** (left sidebar) → Bot Token Scopes → Add these scopes:
-   `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`,
-   `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`,
-   `mpim:history`, `reactions:write`, `users:read`
-   → Install to Workspace → copy the `xoxb-...` token (Bot Token - store it, it will be needed later)
-4. **Event Subscriptions** → Enable → subscribe to **bot events**:
-   `app_mention`, `message.channels`, `message.groups`, `message.im`, `message.mpim`
-5. **App Home** → enable the Messages Tab
+[iris-bootstrap] Key Vault name [iris-kv-myhostname]:
+[iris-bootstrap] Resource group for Key Vault [iris-rg]:
+[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
 
-Keep both tokens (`xapp-...` and `xoxb-...`) ready — the bootstrap script will ask for them.
+[iris-bootstrap] ── Key Vault setup ──
+(automated: creates Key Vault, seeds all secrets)
 
----
+[iris-bootstrap] ── Workspace ──  (automated)
+[iris-bootstrap] ── Building iris-runtime ──  (automated)
+[iris-bootstrap] ── Installing systemd service ──  (automated)
 
-**Step 4 — Clone the repo and run bootstrap**
-
-```bash
-sudo mkdir -p /iris && sudo chown $USER:$USER /iris
-git clone https://github.com/irisworks/irisflow.git /iris/repo
-# When prompted for password, use a GitHub Personal Access Token (PAT):
-# Username: <your-github-username>
-# Password: <your-github-pat-token>
-cd /iris/repo
-bash bootstrap.sh --setup
-```
-
-What happens in order:
-
-1. **Dependencies install automatically** — Docker, Node 22, nginx, jq, GitHub CLI, Terraform, etc. No prompts, takes a few minutes.
-2. **GitHub CLI login** — `gh auth login` opens a browser or shows a one-time device code. Go to [github.com/login/device](https://github.com/login/device) and enter the code, or approve in your browser.
-3. **Secret storage choice** — choose **Azure Key Vault** (recommended, uses your existing Azure login from Step 1) or **`/iris/.env`** (if you skipped Steps 1 and 2).
-4. **Interactive prompts** — you'll be asked for:
-   - Your LLM provider and API key
-   - `[iris-bootstrap] Press Enter when your app is created and tokens are ready...`
-   - `[iris-bootstrap] Slack App token (xapp-...):` and `Slack Bot token (xoxb-...):` (your tokens from Step 3)
-   - `Add GitHub token for repo access? [Y/n]`y (enter `y` or `n`)
-   - `[iris-bootstrap] Press Enter when your token is ready...`
-   - `[iris-bootstrap] GitHub token (github_pat_... or ghp_...):`
-   - `Set up email sending (Resend.com)? [y/N]`n (enter `y` or `n`)
-   - `Set up public domain (e.g. iris.example.com)? [y/N]`n (enter `y` or `n`)
-   - `Git author email for Iris commits` (add your email id)
-5. **Automated finish** — creates Key Vault and seeds secrets (or writes `/iris/.env`), builds the runtime, starts `iris.service`.
-
-Verify Iris is running before continuing:
-
-```bash
-sudo systemctl status iris
-# Then in Slack: @iris what model are you?
+[iris-bootstrap] ── Done ──
+  ✓ Iris is running!
+  Key Vault: iris-kv-myhostname
+  Slack:     @iris in any channel
 ```
 
 ---
 
-**Step 5 — Set up Firecracker**
+## Option 3 — No Azure, With Firecracker
 
-First confirm KVM is available:
+Every bash command Iris runs executes inside an isolated Firecracker microVM. No Azure account needed. Requires a VM with KVM — on Azure use **Ddsv5 series** (e.g. `Standard_D4ds_v5`). B-series and D-series do not have KVM.
+
+**Requirements:** Ubuntu 22.04 VM with `/dev/kvm` · LLM API key · Slack workspace (admin) · GitHub account (optional)
 
 ```bash
-ls /dev/kvm   # must exist — if missing, your VM is the wrong series
-              # on Azure: resize to Ddsv5 (e.g. Standard_D4ds_v5)
+bash bootstrap.sh --setup --no-keyvault --firecracker
 ```
 
-Then run:
+**Exactly what you will see:**
 
-```bash
-bash /iris/repo/bootstrap.sh --firecracker --no-keyvault
 ```
+[iris-bootstrap] ── KVM check ──
+✓ /dev/kvm found
+(if kvm group not yet active, script re-execs itself via sg kvm — no logout needed)
 
-This downloads Firecracker, creates the jailer system user, downloads a Linux kernel, and builds the base VM image. It takes a few minutes.
+[iris-bootstrap] ── System dependencies ──
+(automated: same as Option 1 + e2fsprogs)
 
-When it finishes, **log out and back in** so your `kvm` group membership takes effect:
+[iris-bootstrap] ── Firecracker setup ──
+(automated: downloading firecracker v1.7.0...)
+(automated: downloading jailer v1.7.0...)
+(automated: creating irisjailer system user uid/gid 10000)
+(automated: adding azureuser to kvm group)
+(automated: downloading Linux kernel → /var/lib/iris/firecracker/vmlinux)
 
-```bash
-exit   # then SSH back in
-groups | grep kvm   # should show kvm
+[iris-bootstrap] ── GitHub login ──  (gh auth login)
+
+[iris-bootstrap] Choose LLM provider:   (same as Option 1)
+[iris-bootstrap] Anthropic API key (sk-ant-...):
+[iris-bootstrap] Set up Slack integration? [Y/n]
+  (same Slack setup box as Option 1)
+[iris-bootstrap] Slack App token (xapp-...):
+[iris-bootstrap] Slack Bot token (xoxb-...):
+[iris-bootstrap] Add GitHub token for repo access? [Y/n]
+[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
+[iris-bootstrap] Set up public domain? [y/N]
+[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
+
+[iris-bootstrap] ── Workspace ──
+(automated: writes /iris/.env)
+
+[iris-bootstrap] ── Building iris-runtime ──
+(automated: npm install + npm run build + docker build iris-runtime:local)
+(automated: building rootfs.ext4 from Docker image — takes ~1 minute)
+
+[iris-bootstrap] ── Installing systemd service ──
+(automated: installs iris.service, starts Iris temporarily on --sandbox=host)
+
+[iris-bootstrap] ── Provisioning Firecracker sandbox VM ──
+(automated: writing /var/lib/iris/firecracker/agents/public-sandbox/vm-config.json)
+(automated: writing /etc/systemd/system/iris-fc-public-sandbox.service)
+(automated: starting iris-fc-public-sandbox)
+
+[iris-bootstrap] ── Firecracker health check ──
+Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
+✓ VM is healthy (4s)
+
+[iris-bootstrap] ── Switching Iris to Firecracker sandbox ──
+(automated: writes drop-in /etc/systemd/system/iris.service.d/sandbox.conf)
+(automated: daemon-reload + restart iris)
+
+[iris-bootstrap] ── Done ──
+  ✓ Iris is running!
+  Firecracker: iris-fc-public-sandbox → 172.20.1.2
+  Sandbox:     --sandbox=firecracker:172.20.1.2
+  Secrets:     /iris/.env
+  VM logs:     journalctl -u iris-fc-public-sandbox -f
+  Test:        @iris run: uname -a
 ```
 
 ---
 
-**Step 6 — Provision the sandbox VM via Terraform** _(requires Steps 1 and 2 — Azure login and storage account)_
+## Option 4 — Azure Key Vault + Firecracker (full production)
 
-Open `terraform/agents.tf` and uncomment the `public_sandbox` block:
+Azure Key Vault for secrets + Terraform to manage the sandbox VM lifecycle. Everything automated.
 
-```hcl
-module "public_sandbox" {
-  source       = "./modules/firecracker-agent"
-  agent_name   = "public-sandbox"
-  slot         = 1          # host: 172.20.1.1  guest: 172.20.1.2
-  vcpu_count   = 2
-  mem_size_mib = 512
-  use_jailer   = true
-}
-```
-
-Then apply:
+**Requirements:** All of Option 3 + Azure account
 
 ```bash
-cd /iris/repo/terraform
-
-SA_NAME="iristfstatericky"   # same name from Step 2
-
-terraform init \
-  -backend-config="resource_group_name=iris-tfstate-rg" \
-  -backend-config="storage_account_name=${SA_NAME}" \
-  -backend-config="container_name=tfstate" \
-  -backend-config="key=iris-dynamic.terraform.tfstate" \
-  -backend-config="use_azuread_auth=true"
-
-export TF_VAR_subscription_id=$(az account show --query id -o tsv)
-
-terraform apply
+bash bootstrap.sh --setup --keyvault --firecracker
 ```
 
-Verify the VM is running:
-
-```bash
-systemctl status iris-fc-public-sandbox
-curl http://172.20.1.2:8080/health   # → {"status":"ok"}
-```
-
-To add more sandbox VMs, add another module block with a different `agent_name` and `slot` number.
-
----
-
-**Step 7 — Connect Iris to the microVM**
-
-```bash
-sudo nano /etc/systemd/system/iris.service
-```
-
-Find the `ExecStart` line and change `--sandbox=host` to either:
-
-- **Static** (Iris always uses the VM at slot 1):
-  ```
-  --sandbox=firecracker:172.20.1.2
-  ```
-
-- **Dynamic pool** (fresh VM per Slack channel, auto-released after 30 min idle):
-  ```
-  --sandbox=firecracker-pool
-  ```
-
-Then restart:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart iris
-```
-
-Verify by asking Iris to run a command in Slack — the output should come from inside the microVM:
+**Exactly what you will see:**
 
 ```
-@iris run: uname -a
+[iris-bootstrap] ── KVM check ──
+✓ /dev/kvm found
+
+[iris-bootstrap] ── System dependencies ──
+(automated: same as Option 1 + Azure CLI + e2fsprogs)
+
+[iris-bootstrap] ── Firecracker setup ──
+(automated: downloads firecracker + jailer + kernel, creates irisjailer user)
+
+[iris-bootstrap] ── Azure login ──
+(az login — skipped if managed identity detected)
+Active subscription: My-Subscription (xxxxxxxx-xxxx-...)
+
+[iris-bootstrap] ── GitHub login ──  (gh auth login)
+
+[iris-bootstrap] Choose LLM provider:   (same as Option 1)
+[iris-bootstrap] Anthropic API key (sk-ant-...):
+[iris-bootstrap] Set up Slack integration? [Y/n]
+  (same Slack setup box as Option 1)
+[iris-bootstrap] Slack App token (xapp-...):
+[iris-bootstrap] Slack Bot token (xoxb-...):
+[iris-bootstrap] Add GitHub token for repo access? [Y/n]
+[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
+[iris-bootstrap] Set up public domain? [y/N]
+
+[iris-bootstrap] Key Vault name [iris-kv-myhostname]:
+[iris-bootstrap] Resource group for Key Vault [iris-rg]:
+[iris-bootstrap] Terraform state storage account name (lowercase + numbers, max 24 chars) [iristfstatemyhostname]:
+[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
+
+[iris-bootstrap] ── Key Vault setup ──
+(automated: creates Key Vault iris-kv-myhostname, seeds all secrets)
+
+[iris-bootstrap] ── Workspace ──
+(automated: writes /iris/.env)
+
+[iris-bootstrap] ── Building iris-runtime ──
+(automated: npm install + npm run build + docker build + rootfs.ext4 — ~2 minutes)
+
+[iris-bootstrap] ── Installing systemd service ──
+(automated: installs iris.service)
+
+[iris-bootstrap] ── Provisioning Firecracker sandbox VM ──
+(automated: creating Terraform state storage iristfstatemyhostname)
+(automated: terraform init with Azure backend)
+(automated: terraform apply — provisions iris-fc-public-sandbox.service)
+
+[iris-bootstrap] ── Firecracker health check ──
+Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
+✓ VM is healthy (5s)
+
+[iris-bootstrap] ── Switching Iris to Firecracker sandbox ──
+(automated: writes drop-in, daemon-reload, restarts iris)
+
+[iris-bootstrap] ── Done ──
+  ✓ Iris is running!
+  Firecracker: iris-fc-public-sandbox → 172.20.1.2
+  Sandbox:     --sandbox=firecracker:172.20.1.2
+  Key Vault:   iris-kv-myhostname
+  Terraform:   iris-tfstate-rg / iristfstatemyhostname
+  VM logs:     journalctl -u iris-fc-public-sandbox -f
+  Test:        @iris run: uname -a
 ```
 
 ---
@@ -516,25 +563,3 @@ If resuming work, read these first:
 - [CONSTITUTION.md](CONSTITUTION.md)
 - [MEMORY.md](MEMORY.md)
 
-## Commit Log
-
-**2026-05-25** — Add Firecracker microVM layer
-
-- `iris-runtime/src/vm-manager.ts` — VmManager singleton, on-demand pool (slots 1-254, 30min idle TTL)
-- `iris-runtime/src/sandbox.ts` — FirecrackerExecutor, FirecrackerPoolExecutor, DockerExecutor, HostExecutor
-- `scripts/fc-up.sh` / `fc-down.sh` — VM lifecycle (tap device, rootfs copy, Firecracker process)
-- `scripts/build-firecracker-rootfs.sh` — build 2 GiB ext4 rootfs from iris-runtime Docker image
-- `scripts/iris-exec-server.py` — HTTP exec server baked into rootfs (GET /health, POST /exec)
-- `skills/firecracker-agent/` — skill for provisioning and managing microVMs
-- `agents/public-sandbox/` — first Firecracker sub-agent scaffold (MEMORY.md, README, handle-request skill)
-- `terraform/modules/firecracker-agent/` — Terraform module for static Firecracker agents with optional jailer
-- `terraform/agents.tf` — updated with Firecracker module documentation and commented example
-
-**2025-04-13 19:52** — Increase bridge timeout from 30s to 60s
-
-- Changed `BRIDGE_TIMEOUT_MS` in `iris-runtime/src/bridge.ts` from 30,000ms to 60,000ms
-
-**2025-04-13 19:35** — Remove aggressive 40-message context trim
-
-- Removed hardcoded `MAX_CONTEXT_MESSAGES=40` limit from `iris-runtime/src/agent.ts`
-- Context management now relies on pi-framework's auto-compaction

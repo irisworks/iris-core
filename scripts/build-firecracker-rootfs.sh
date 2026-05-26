@@ -54,40 +54,37 @@ log "Installing iris-exec-server..."
 cp "$REPO_DIR/scripts/iris-exec-server.py" "$MOUNT_DIR/usr/local/bin/iris-exec-server"
 chmod +x "$MOUNT_DIR/usr/local/bin/iris-exec-server"
 
-# ── Wire exec-server into rc.local for auto-start on boot ──
-cat > "$MOUNT_DIR/etc/rc.local" << 'RC'
+# ── Install lightweight /sbin/init for Firecracker (replaces systemd) ──
+# Firecracker boots into this minimal init: mounts pseudo-fs, configures
+# networking from guestip=/hostip= kernel args, starts exec-server.
+# iproute2 must be present — ensured by the Dockerfile.
+log "Installing Firecracker /sbin/init..."
+cat > "$MOUNT_DIR/sbin/init" << 'INIT'
 #!/bin/sh
-mkdir -p /workspace
-python3 /usr/local/bin/iris-exec-server >> /var/log/iris-exec-server.log 2>&1 &
-exit 0
-RC
-chmod +x "$MOUNT_DIR/etc/rc.local"
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null || true
 
-# ── Ensure rc.local runs at boot (Debian/Ubuntu style) ──
-if [[ -d "$MOUNT_DIR/etc/systemd/system" ]]; then
-  cat > "$MOUNT_DIR/etc/systemd/system/iris-exec-server.service" << 'SVC'
-[Unit]
-Description=Iris Exec Server
-After=network.target
+GUEST_IP=$(grep -o 'guestip=[^ ]*' /proc/cmdline | cut -d= -f2)
+HOST_IP=$(grep -o 'hostip=[^ ]*' /proc/cmdline | cut -d= -f2)
 
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/iris-exec-server
-Restart=always
-RestartSec=2
-StandardOutput=append:/var/log/iris-exec-server.log
-StandardError=append:/var/log/iris-exec-server.log
-
-[Install]
-WantedBy=multi-user.target
-SVC
-  # Symlink to multi-user.target.wants so it starts automatically
-  mkdir -p "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants"
-  ln -sf /etc/systemd/system/iris-exec-server.service \
-    "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants/iris-exec-server.service"
+if [ -n "$GUEST_IP" ] && [ -n "$HOST_IP" ]; then
+  ip addr add "${GUEST_IP}/30" dev eth0 2>/dev/null || true
+  ip link set eth0 up 2>/dev/null || true
+  ip route add default via "$HOST_IP" 2>/dev/null || true
 fi
 
-# ── /workspace directory for agent work ──
+mkdir -p /workspace /var/log
+
+python3 /usr/local/bin/iris-exec-server >> /var/log/iris-exec-server.log 2>&1 &
+
+while true; do sleep 3600; done
+INIT
+chmod +x "$MOUNT_DIR/sbin/init"
+
+# ── /workspace directory for agent sessions ──
 mkdir -p "$MOUNT_DIR/workspace"
 
 log "Unmounting rootfs..."

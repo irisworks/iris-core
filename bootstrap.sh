@@ -22,8 +22,10 @@
 #   Install Firecracker + build rootfs (run once on a KVM-capable VM):
 #     bash bootstrap.sh --firecracker
 #
-#   Combine flags (e.g. first-time setup + Firecracker):
-#     bash bootstrap.sh --setup --no-keyvault --firecracker
+#   Combine flags:
+#     bash bootstrap.sh --setup --no-keyvault --firecracker   # no Azure, isolated microVMs
+#     bash bootstrap.sh --setup --keyvault --firecracker      # Azure Key Vault + microVMs
+#     bash bootstrap.sh --setup --firecracker --pool          # dynamic pool (fresh VM per channel)
 #
 # All config can be passed via env vars to skip prompts.
 # ============================================================
@@ -39,6 +41,10 @@ SETUP_MODE=false
 NO_KEYVAULT=false
 KEYVAULT_EXPLICIT=false   # true when --keyvault or --no-keyvault was passed
 FIRECRACKER_MODE=false
+SA_NAME="${SA_NAME:-}"
+FIRECRACKER_SANDBOX="${FIRECRACKER_SANDBOX:-static}"
+SANDBOX_FLAG=""
+FC_GUEST_IP="172.20.1.2"
 
 IRIS_PROVIDER="${IRIS_PROVIDER:-}"
 IRIS_MODEL="${IRIS_MODEL:-}"
@@ -79,6 +85,8 @@ for arg in "$@"; do
     --no-keyvault)  NO_KEYVAULT=true;  KEYVAULT_EXPLICIT=true ;;
     --keyvault)     NO_KEYVAULT=false; KEYVAULT_EXPLICIT=true ;;
     --firecracker)  FIRECRACKER_MODE=true ;;
+    --pool)         FIRECRACKER_SANDBOX="pool" ;;
+    --static)       FIRECRACKER_SANDBOX="static" ;;
     *) die "Unknown argument: $arg" ;;
   esac
 done
@@ -473,6 +481,12 @@ prompt_secrets() {
   # ── Git email ──
   if [[ -z "$GIT_USER_EMAIL" ]]; then
     GIT_USER_EMAIL=$(prompt "Git author email for Iris commits" "iris@example.com")
+  fi
+
+  # ── Terraform state storage (Firecracker + Azure path only) ──
+  if [[ "$FIRECRACKER_MODE" == true && "$NO_KEYVAULT" == false && -z "$SA_NAME" ]]; then
+    suggested_sa="iristfstate$(hostname -s | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9' | cut -c1-10)"
+    SA_NAME=$(prompt "Terraform state storage account name (lowercase + numbers, max 24 chars)" "$suggested_sa")
   fi
 }
 
@@ -925,6 +939,7 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo ""
   echo "AZURE_SUBSCRIPTION_ID=$(e "${SUBSCRIPTION_ID:-}")"
   echo "IRIS_KEY_VAULT=$(e "${KV_NAME:-}")"
+  echo "IRIS_TF_STORAGE_ACCOUNT=$(e "${SA_NAME:-}")"
   echo "IRIS_REPO_DIR=$(e "$REPO_DIR")"
   echo "IRIS_STORAGE_ROOT=${IRIS_DIR}/data"
   echo ""
@@ -989,6 +1004,208 @@ if ! sudo systemctl is-active --quiet iris; then
 fi
 
 # ────────────────────────────────────────────────────────────
+# 11. Provision Firecracker sandbox VM
+# ────────────────────────────────────────────────────────────
+if [[ "$FIRECRACKER_MODE" == true ]]; then
+  log_h "Provisioning Firecracker sandbox VM"
+
+  ROOTFS="/var/lib/iris/firecracker/rootfs.ext4"
+  [[ -f "$ROOTFS" ]] || die "Rootfs not found at $ROOTFS — Firecracker build may have failed above."
+
+  if [[ "$NO_KEYVAULT" == true ]]; then
+    # ── Direct bash path (no Terraform) ──────────────────────────────
+    FC_AGENT_NAME="public-sandbox"
+    FC_SLOT=1
+    FC_AGENT_DIR="/var/lib/iris/firecracker/agents/${FC_AGENT_NAME}"
+    FC_HOST_IP="172.20.${FC_SLOT}.1"
+    FC_TAP="vmtap${FC_SLOT}"
+    FC_MAC=$(printf "AA:FC:00:00:%02X:02" "$FC_SLOT")
+    FC_CONFIG="${FC_AGENT_DIR}/vm-config.json"
+    FC_LOG="/var/log/iris-fc-${FC_AGENT_NAME}.log"
+    FC_SERVICE="iris-fc-${FC_AGENT_NAME}"
+
+    sudo mkdir -p "$FC_AGENT_DIR"
+
+    if [[ ! -f "${FC_AGENT_DIR}/rootfs.ext4" ]]; then
+      log "Copying base rootfs for ${FC_AGENT_NAME}..."
+      sudo cp --sparse=always "$ROOTFS" "${FC_AGENT_DIR}/rootfs.ext4"
+    fi
+
+    log "Writing vm-config.json..."
+    sudo tee "$FC_CONFIG" > /dev/null << JSON
+{
+  "boot-source": {
+    "kernel_image_path": "/var/lib/iris/firecracker/vmlinux",
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off guestip=172.20.${FC_SLOT}.2 hostip=${FC_HOST_IP}"
+  },
+  "drives": [
+    {
+      "drive_id": "rootfs",
+      "path_on_host": "${FC_AGENT_DIR}/rootfs.ext4",
+      "is_root_device": true,
+      "is_read_only": false
+    }
+  ],
+  "machine-config": {
+    "vcpu_count": 2,
+    "mem_size_mib": 512
+  },
+  "network-interfaces": [
+    {
+      "iface_id": "eth0",
+      "guest_mac": "${FC_MAC}",
+      "host_dev_name": "${FC_TAP}"
+    }
+  ]
+}
+JSON
+
+    log "Writing ${FC_SERVICE}.service..."
+    sudo tee "/etc/systemd/system/${FC_SERVICE}.service" > /dev/null << UNIT
+[Unit]
+Description=Iris Firecracker Agent: ${FC_AGENT_NAME}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+
+ExecStartPre=/bin/bash -c "\
+  rm -f /run/iris-fc-${FC_AGENT_NAME}.socket; \
+  ip link show ${FC_TAP} &>/dev/null || ip tuntap add dev ${FC_TAP} mode tap; \
+  ip addr flush dev ${FC_TAP} 2>/dev/null || true; \
+  ip addr add ${FC_HOST_IP}/30 dev ${FC_TAP}; \
+  ip link set ${FC_TAP} up; \
+  sysctl -w net.ipv4.conf.${FC_TAP}.proxy_arp=1 > /dev/null; \
+  sysctl -w net.ipv6.conf.${FC_TAP}.disable_ipv6=1 > /dev/null"
+
+ExecStart=/usr/local/bin/firecracker \
+  --api-sock /run/iris-fc-${FC_AGENT_NAME}.socket \
+  --config-file ${FC_CONFIG} \
+  --log-path ${FC_LOG} \
+  --level Info
+
+ExecStopPost=/bin/bash -c "\
+  ip link set ${FC_TAP} down 2>/dev/null || true; \
+  ip tuntap del dev ${FC_TAP} mode tap 2>/dev/null || true"
+
+StandardOutput=append:${FC_LOG}
+StandardError=append:${FC_LOG}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$FC_SERVICE"
+    sudo systemctl restart "$FC_SERVICE"
+    log "✓ ${FC_SERVICE} started"
+
+  else
+    # ── Terraform path (Azure backend) ───────────────────────────────
+    [[ -z "$SA_NAME" ]] && die "SA_NAME is required for Firecracker + Azure path. Re-run with --setup."
+
+    log "Creating Terraform state storage (${SA_NAME})..."
+    az group create -n iris-tfstate-rg -l eastus -o none 2>/dev/null || true
+    az storage account create \
+      -n "$SA_NAME" -g iris-tfstate-rg \
+      -l eastus --sku Standard_LRS \
+      --min-tls-version TLS1_2 \
+      --allow-blob-public-access false \
+      -o none 2>/dev/null || true
+    az storage container create \
+      -n tfstate --account-name "$SA_NAME" --auth-mode login \
+      -o none 2>/dev/null || true
+    log "✓ Terraform state storage: ${SA_NAME}"
+
+    log "Uncommenting module public_sandbox in agents.tf..."
+    AGENTS_TF="${REPO_DIR}/terraform/agents.tf"
+    python3 - "$AGENTS_TF" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    txt = f.read()
+if re.search(r'^module "public_sandbox"', txt, re.M):
+    print("  already uncommented")
+    sys.exit(0)
+marker = 'Uncomment the block below'
+idx = txt.rfind(marker)
+if idx < 0:
+    print("  marker not found — edit terraform/agents.tf manually")
+    sys.exit(0)
+start = txt.find('# module "public_sandbox"', idx)
+end_brace = txt.find('# }', start)
+end = txt.find('\n', end_brace) + 1
+block = txt[start:end]
+uncommented = re.sub(r'^# ?', '', block, flags=re.M)
+with open(path, 'w') as f:
+    f.write(txt[:start] + uncommented + txt[end:])
+print("  ✓ uncommented")
+PYEOF
+
+    log "Running terraform init..."
+    terraform -chdir="${REPO_DIR}/terraform" init \
+      -backend-config="resource_group_name=iris-tfstate-rg" \
+      -backend-config="storage_account_name=${SA_NAME}" \
+      -backend-config="container_name=tfstate" \
+      -backend-config="key=iris-dynamic.terraform.tfstate" \
+      -backend-config="use_azuread_auth=true" \
+      -reconfigure
+
+    log "Running terraform apply..."
+    TF_VAR_subscription_id="$SUBSCRIPTION_ID" \
+      terraform -chdir="${REPO_DIR}/terraform" apply -auto-approve
+    log "✓ Terraform apply complete"
+  fi
+
+  # ────────────────────────────────────────────────────────────
+  # 12. Health check + switch iris.service to Firecracker
+  # ────────────────────────────────────────────────────────────
+  log_h "Firecracker health check"
+  log "Waiting for VM at http://${FC_GUEST_IP}:8080/health (up to 20s)..."
+  FC_HEALTHY=false
+  for i in $(seq 1 20); do
+    if curl -sf --max-time 2 "http://${FC_GUEST_IP}:8080/health" > /dev/null 2>&1; then
+      log "✓ VM is healthy (${i}s)"
+      FC_HEALTHY=true
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ "$FC_HEALTHY" == false ]]; then
+    sudo journalctl -u iris-fc-public-sandbox -n 30 --no-pager || true
+    die "VM did not respond after 20s — check logs above."
+  fi
+
+  log_h "Switching Iris to Firecracker sandbox"
+  if [[ "$FIRECRACKER_SANDBOX" == "pool" ]]; then
+    SANDBOX_FLAG="--sandbox=firecracker-pool"
+  else
+    SANDBOX_FLAG="--sandbox=firecracker:${FC_GUEST_IP}"
+  fi
+
+  sudo mkdir -p /etc/systemd/system/iris.service.d
+  sudo tee /etc/systemd/system/iris.service.d/sandbox.conf > /dev/null << DROPIN
+[Service]
+ExecStart=
+ExecStart=${NODE_BIN} --require ${DOTENV_CONFIG} ${IRIS_RUNTIME_BIN} ${SANDBOX_FLAG} ${IRIS_DIR}/data
+DROPIN
+
+  sudo systemctl daemon-reload
+  sudo systemctl restart iris
+  sleep 2
+
+  if ! sudo systemctl is-active --quiet iris; then
+    sudo journalctl -u iris -n 30 --no-pager || true
+    die "iris.service failed to restart in Firecracker mode — check logs above."
+  fi
+  log "✓ Iris switched to Firecracker mode (${SANDBOX_FLAG})"
+fi
+
+# ────────────────────────────────────────────────────────────
 # Done
 # ────────────────────────────────────────────────────────────
 log_h "Done"
@@ -1011,10 +1228,10 @@ else
   log "  Slack:     not configured (add tokens to /iris/.env and restart)"
 fi
 if [[ "$FIRECRACKER_MODE" == true ]]; then
-  if [[ -f "/var/lib/iris/firecracker/rootfs.ext4" ]]; then
-    log "  Firecracker: rootfs ready — uncomment a module in terraform/agents.tf to provision"
-  else
-    log "  Firecracker: /dev/kvm missing or rootfs not built — see log above"
-  fi
+  log "  Firecracker: iris-fc-public-sandbox → ${FC_GUEST_IP}"
+  log "  Sandbox:     ${SANDBOX_FLAG}"
+  [[ "$NO_KEYVAULT" == false ]] && log "  Terraform:   iris-tfstate-rg / ${SA_NAME}"
+  log "  VM logs:     journalctl -u iris-fc-public-sandbox -f"
+  log "  Test:        @iris run: uname -a"
 fi
 log ""
