@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     jq \
     ca-certificates \
+    iproute2 \
     wkhtmltopdf \
     xvfb \
     fontconfig \

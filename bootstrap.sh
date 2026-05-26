@@ -1036,7 +1036,7 @@ if [[ "$FIRECRACKER_MODE" == true ]]; then
 {
   "boot-source": {
     "kernel_image_path": "/var/lib/iris/firecracker/vmlinux",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off guestip=172.20.${FC_SLOT}.2 hostip=${FC_HOST_IP}"
   },
   "drives": [
     {
@@ -1073,6 +1073,7 @@ Restart=on-failure
 RestartSec=5
 
 ExecStartPre=/bin/bash -c "\
+  rm -f /run/iris-fc-${FC_AGENT_NAME}.socket; \
   ip link show ${FC_TAP} &>/dev/null || ip tuntap add dev ${FC_TAP} mode tap; \
   ip addr flush dev ${FC_TAP} 2>/dev/null || true; \
   ip addr add ${FC_HOST_IP}/30 dev ${FC_TAP}; \
@@ -1081,6 +1082,7 @@ ExecStartPre=/bin/bash -c "\
   sysctl -w net.ipv6.conf.${FC_TAP}.disable_ipv6=1 > /dev/null"
 
 ExecStart=/usr/local/bin/firecracker \
+  --api-sock /run/iris-fc-${FC_AGENT_NAME}.socket \
   --config-file ${FC_CONFIG} \
   --log-path ${FC_LOG} \
   --level Info
