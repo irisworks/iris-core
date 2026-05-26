@@ -31,7 +31,7 @@ set -euo pipefail
 
 IRIS_DIR="/iris"
 REPO_URL="${REPO_URL:-}"
-IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/30Signals/iris-core.git}"
+IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/irisflow.git}"
 KV_NAME="${KV_NAME:-}"
 KV_RESOURCE_GROUP="${KV_RESOURCE_GROUP:-}"
 REPO_DIR="${REPO_DIR:-}"
@@ -66,7 +66,7 @@ prompt() {
 prompt_secret() {
   local question="$1"
   read -r -s -p "[iris-bootstrap] $question: " answer
-  echo ""
+  echo "" >&2
   echo "$answer"
 }
 
@@ -420,11 +420,14 @@ prompt_secrets() {
     echo "  │         mpim:history       reactions:write   users:read       │"
     echo "  │     → Install to Workspace → copy the  xoxb-...  token       │"
     echo "  │                                                               │"
-    echo "  │  4. Event Subscriptions → Enable → subscribe to:             │"
+    echo "  │  4. Event Subscriptions → Enable → subscribe to bot events:   │"
     echo "  │         app_mention  message.channels  message.groups        │"
     echo "  │         message.im   message.mpim                            │"
     echo "  │                                                               │"
     echo "  │  5. App Home → enable Messages Tab                           │"
+    echo "  │                                                               │"
+    echo "  │  Note: Make sure to store the xapp and xoxb tokens securely  │"
+    echo "  │  as they will be required in the next steps.                 │"
     echo "  └───────────────────────────────────────────────────────────────────┘"
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your app is created and tokens are ready..."
@@ -432,6 +435,8 @@ prompt_secrets() {
     SLACK_BOT_TOKEN=$(prompt_secret "Slack Bot token (xoxb-...)")
     [[ -z "$SLACK_APP_TOKEN" ]] && die "Slack App token is required."
     [[ -z "$SLACK_BOT_TOKEN" ]] && die "Slack Bot token is required."
+    [[ "$SLACK_APP_TOKEN" != xapp-* ]] && die "Slack App token must start with 'xapp-'. Got: ${SLACK_APP_TOKEN:0:10}..."
+    [[ "$SLACK_BOT_TOKEN" != xoxb-* ]] && die "Slack Bot token must start with 'xoxb-'. Got: ${SLACK_BOT_TOKEN:0:10}..."
   else
     log "Skipping Slack — you can add IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN to /iris/.env later."
   fi
@@ -603,6 +608,12 @@ else
     IRIS_MODEL="${IRIS_MODEL:-gpt-4o}"
     SLACK_APP_TOKEN="${IRIS_SLACK_APP_TOKEN:-}"
     SLACK_BOT_TOKEN="${IRIS_SLACK_BOT_TOKEN:-}"
+    if [[ -n "$SLACK_APP_TOKEN" && "$SLACK_APP_TOKEN" != xapp-* ]]; then
+      die "IRIS_SLACK_APP_TOKEN in /iris/.env looks wrong (expected xapp-... prefix). Fix it and re-run."
+    fi
+    if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != xoxb-* ]]; then
+      die "IRIS_SLACK_BOT_TOKEN in /iris/.env looks wrong (expected xoxb-... prefix). Fix it and re-run."
+    fi
     AWS_ACCESS_KEY_INPUT="${AWS_ACCESS_KEY_ID:-}"
     AWS_SECRET_KEY_INPUT="${AWS_SECRET_ACCESS_KEY:-}"
     AWS_REGION_INPUT="${AWS_REGION:-}"
@@ -867,7 +878,7 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
       git -C "$REPO_DIR" remote add upstream "$IRIS_CORE_URL"
       log "upstream remote added → $IRIS_CORE_URL"
     fi
-    git -C "$REPO_DIR" fetch upstream --quiet
+    git -C "$REPO_DIR" fetch upstream --quiet 2>/dev/null || log "Warning: could not fetch upstream — continuing (you can run 'git fetch upstream' manually later)"
     log "To merge future iris-core updates: git fetch upstream && git merge upstream/main"
   fi
 else
@@ -941,6 +952,10 @@ log_h "Installing systemd service"
 NODE_BIN="$(which node)"
 IRIS_RUNTIME_BIN="$REPO_DIR/iris-runtime/dist/main.js"
 DOTENV_CONFIG="$RUNTIME_DIR/node_modules/dotenv/config"
+
+# Remove any drop-in overrides that may have been created by previous sessions
+# (e.g. switching sandbox to firecracker-pool without Firecracker installed)
+sudo rm -rf /etc/systemd/system/iris.service.d
 
 sudo tee /etc/systemd/system/iris.service > /dev/null << UNIT
 [Unit]
