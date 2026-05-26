@@ -435,6 +435,8 @@ prompt_secrets() {
     SLACK_BOT_TOKEN=$(prompt_secret "Slack Bot token (xoxb-...)")
     [[ -z "$SLACK_APP_TOKEN" ]] && die "Slack App token is required."
     [[ -z "$SLACK_BOT_TOKEN" ]] && die "Slack Bot token is required."
+    [[ "$SLACK_APP_TOKEN" != xapp-* ]] && die "Slack App token must start with 'xapp-'. Got: ${SLACK_APP_TOKEN:0:10}..."
+    [[ "$SLACK_BOT_TOKEN" != xoxb-* ]] && die "Slack Bot token must start with 'xoxb-'. Got: ${SLACK_BOT_TOKEN:0:10}..."
   else
     log "Skipping Slack — you can add IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN to /iris/.env later."
   fi
@@ -606,6 +608,12 @@ else
     IRIS_MODEL="${IRIS_MODEL:-gpt-4o}"
     SLACK_APP_TOKEN="${IRIS_SLACK_APP_TOKEN:-}"
     SLACK_BOT_TOKEN="${IRIS_SLACK_BOT_TOKEN:-}"
+    if [[ -n "$SLACK_APP_TOKEN" && "$SLACK_APP_TOKEN" != xapp-* ]]; then
+      die "IRIS_SLACK_APP_TOKEN in /iris/.env looks wrong (expected xapp-... prefix). Fix it and re-run."
+    fi
+    if [[ -n "$SLACK_BOT_TOKEN" && "$SLACK_BOT_TOKEN" != xoxb-* ]]; then
+      die "IRIS_SLACK_BOT_TOKEN in /iris/.env looks wrong (expected xoxb-... prefix). Fix it and re-run."
+    fi
     AWS_ACCESS_KEY_INPUT="${AWS_ACCESS_KEY_ID:-}"
     AWS_SECRET_KEY_INPUT="${AWS_SECRET_ACCESS_KEY:-}"
     AWS_REGION_INPUT="${AWS_REGION:-}"
@@ -944,6 +952,10 @@ log_h "Installing systemd service"
 NODE_BIN="$(which node)"
 IRIS_RUNTIME_BIN="$REPO_DIR/iris-runtime/dist/main.js"
 DOTENV_CONFIG="$RUNTIME_DIR/node_modules/dotenv/config"
+
+# Remove any drop-in overrides that may have been created by previous sessions
+# (e.g. switching sandbox to firecracker-pool without Firecracker installed)
+sudo rm -rf /etc/systemd/system/iris.service.d
 
 sudo tee /etc/systemd/system/iris.service > /dev/null << UNIT
 [Unit]
