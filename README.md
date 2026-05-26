@@ -22,7 +22,7 @@ This repository is the source of truth for Iris's constitution, runtime, infrast
 ```
 You (Slack)
 └── Iris  (Azure VM, systemd service)
-    ├── iris-runtime          provider-agnostic fork of pi-mom
+    ├── iris-runtime
     ├── CONSTITUTION.md       read-only operator rules, injected every prompt
     ├── MEMORY.md             mutable global memory
     ├── skills/               hot-reloaded capabilities
@@ -563,25 +563,3 @@ If resuming work, read these first:
 - [CONSTITUTION.md](CONSTITUTION.md)
 - [MEMORY.md](MEMORY.md)
 
-## Commit Log
-
-**2026-05-25** — Add Firecracker microVM layer
-
-- `iris-runtime/src/vm-manager.ts` — VmManager singleton, on-demand pool (slots 1-254, 30min idle TTL)
-- `iris-runtime/src/sandbox.ts` — FirecrackerExecutor, FirecrackerPoolExecutor, DockerExecutor, HostExecutor
-- `scripts/fc-up.sh` / `fc-down.sh` — VM lifecycle (tap device, rootfs copy, Firecracker process)
-- `scripts/build-firecracker-rootfs.sh` — build 2 GiB ext4 rootfs from iris-runtime Docker image
-- `scripts/iris-exec-server.py` — HTTP exec server baked into rootfs (GET /health, POST /exec)
-- `skills/firecracker-agent/` — skill for provisioning and managing microVMs
-- `agents/public-sandbox/` — first Firecracker sub-agent scaffold (MEMORY.md, README, handle-request skill)
-- `terraform/modules/firecracker-agent/` — Terraform module for static Firecracker agents with optional jailer
-- `terraform/agents.tf` — updated with Firecracker module documentation and commented example
-
-**2025-04-13 19:52** — Increase bridge timeout from 30s to 60s
-
-- Changed `BRIDGE_TIMEOUT_MS` in `iris-runtime/src/bridge.ts` from 30,000ms to 60,000ms
-
-**2025-04-13 19:35** — Remove aggressive 40-message context trim
-
-- Removed hardcoded `MAX_CONTEXT_MESSAGES=40` limit from `iris-runtime/src/agent.ts`
-- Context management now relies on pi-framework's auto-compaction
