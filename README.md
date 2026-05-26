@@ -105,26 +105,9 @@ git clone https://github.com/irisworks/irisflow.git /iris/repo
 cd /iris/repo
 ```
 
-**Step 2 — Create your Slack app** (optional but recommended)
+**Step 2 — Run the bootstrap script**
 
-Go to [https://api.slack.com/apps](https://api.slack.com/apps) and create a new app. You need admin access to a Slack workspace.
-
-1. Click **Create New App → From scratch**, name it `Iris`, pick your workspace
-2. **Socket Mode** (left sidebar) → Enable Socket Mode → Generate App-Level Token → name it `iris-socket`, scope: `connections:write` → copy the `xapp-...` token (App Token - store it, it will be needed later)
-3. **OAuth & Permissions** (left sidebar) → Bot Token Scopes → Add these scopes:
-   `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`,
-   `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`,
-   `mpim:history`, `reactions:write`, `users:read`
-   → Install to Workspace → copy the `xoxb-...` token (Bot Token - store it, it will be needed later)
-4. **Event Subscriptions** → Enable → subscribe to **bot events**:
-   `app_mention`, `message.channels`, `message.groups`, `message.im`, `message.mpim`
-5. **App Home** → enable the Messages Tab
-
-Keep both tokens (`xapp-...` and `xoxb-...`) ready — the bootstrap script will ask for them.
-
----
-
-**Step 3 — Run the bootstrap script**
+The bootstrap script will guide you through setting up your Slack App step-by-step in the terminal. You don't need to configure Slack beforehand; just follow the interactive prompts.
 
 ```bash
 bash bootstrap.sh --setup --no-keyvault
@@ -136,13 +119,12 @@ What happens in order:
 2. **GitHub CLI login** — `gh auth login` opens a browser or shows a one-time device code. Go to [github.com/login/device](https://github.com/login/device) and enter the code, or approve in your browser.
 3. **Interactive prompts** — you'll be asked for:
    - Your LLM provider and API key
-   - `[iris-bootstrap] Press Enter when your app is created and tokens are ready...`
-   - `[iris-bootstrap] Slack App token (xapp-...):` and `Slack Bot token (xoxb-...):` (your tokens from Step 2)
-   - `Add GitHub token for repo access? [Y/n]`y (enter `y` or `n`)
-   - `[iris-bootstrap] Press Enter when your token is ready...`
+   - **Slack App Setup Instructions**: The script will print exactly how to create your app, enable Socket Mode, set OAuth scopes, and configure Event Subscriptions.
+   - `[iris-bootstrap] Slack App token (xapp-...):` and `Slack Bot token (xoxb-...):` (enter the tokens generated following the on-screen instructions)
+   - `Add GitHub token for repo access? [Y/n]` (enter `y` or `n`)
    - `[iris-bootstrap] GitHub token (github_pat_... or ghp_...):`
-   - `Set up email sending (Resend.com)? [y/N]`n (enter `y` or `n`)
-   - `Set up public domain (e.g. iris.example.com)?n [y/N]` (enter `y` or `n`)
+   - `Set up email sending (Resend.com)? [y/N]` (enter `y` or `n`)
+   - `Set up public domain (e.g. iris.example.com)? [y/N]` (enter `y` or `n`)
    - `Git author email for Iris commits` (add your email id)
 4. **Automated finish** — writes `/iris/.env`, builds the runtime, starts `iris.service`.
 
