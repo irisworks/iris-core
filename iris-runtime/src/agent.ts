@@ -740,6 +740,20 @@ function createRunner(
 		return parts;
 	};
 
+	async function doCompact(): Promise<{ tokensBefore: number } | null> {
+		try {
+			const result = await session.compact();
+			const reloaded = sessionManager.buildSessionContext();
+			if (reloaded.messages.length > 0) {
+				agent.state.messages = reloaded.messages;
+			}
+			return result ? { tokensBefore: result.tokensBefore } : null;
+		} catch (err) {
+			log.logWarning(`[${channelId}] compact() failed`, err instanceof Error ? err.message : String(err));
+			return null;
+		}
+	}
+
 	return {
 		async run(
 			ctx: SlackContext,
@@ -961,6 +975,8 @@ function createRunner(
 			}
 
 			// Log usage summary with context info
+			let contextTokens = 0;
+			let contextWindow = model.contextWindow || 200000;
 			if (runState.totalUsage.cost.total > 0) {
 				// Get last non-aborted assistant message for context calculation
 				const messages = session.messages;
@@ -969,17 +985,33 @@ function createRunner(
 					.reverse()
 					.find((m) => m.role === "assistant" && (m as any).stopReason !== "aborted") as any;
 
-				const contextTokens = lastAssistantMessage
+				contextTokens = lastAssistantMessage
 					? lastAssistantMessage.usage.input +
 						lastAssistantMessage.usage.output +
 						lastAssistantMessage.usage.cacheRead +
 						lastAssistantMessage.usage.cacheWrite
 					: 0;
-				const contextWindow = model.contextWindow || 200000;
 
 				const summary = log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
 				runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
 				await queueChain;
+			}
+
+			// Auto-compact if context is >= 70% full and run completed normally
+			if (
+				contextTokens > 0 &&
+				contextTokens / contextWindow >= 0.7 &&
+				runState.stopReason !== "aborted" &&
+				runState.stopReason !== "error"
+			) {
+				const pct = Math.round((contextTokens / contextWindow) * 100);
+				log.logInfo(`[${channelId}] Auto-compacting: ${contextTokens}/${contextWindow} tokens (${pct}%)`);
+				const compactResult = await doCompact();
+				if (compactResult) {
+					await ctx.respondInThread(
+						`_Context auto-compacted (${pct}% full — ${compactResult.tokensBefore.toLocaleString()} tokens summarised)_`
+					);
+				}
 			}
 
 			// Clear run state
@@ -995,18 +1027,7 @@ function createRunner(
 		},
 
 		async compact(): Promise<{ tokensBefore: number } | null> {
-			try {
-				const result = await session.compact();
-				// Reload messages from session after compaction
-				const reloaded = sessionManager.buildSessionContext();
-				if (reloaded.messages.length > 0) {
-					agent.state.messages = reloaded.messages;
-				}
-				return result ? { tokensBefore: result.tokensBefore } : null;
-			} catch (err) {
-				log.logWarning(`[${channelId}] compact() failed`, err instanceof Error ? err.message : String(err));
-				return null;
-			}
+			return doCompact();
 		},
 
 		reset(): void {
