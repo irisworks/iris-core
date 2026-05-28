@@ -962,11 +962,8 @@ function createRunner(
 					}
 				} else if (finalText.trim()) {
 					try {
-						const mainText =
-							finalText.length > SLACK_MAX_LENGTH
-								? `${finalText.substring(0, SLACK_MAX_LENGTH - 50)}\n\n_(see thread for full response)_`
-								: finalText;
-						await ctx.replaceMessage(mainText);
+						// Pass full text — replaceMessage() handles splitting into chunks
+						await ctx.replaceMessage(finalText);
 					} catch (err) {
 						const errMsg = err instanceof Error ? err.message : String(err);
 						log.logWarning("Failed to replace message with final text", errMsg);

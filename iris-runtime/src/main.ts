@@ -152,9 +152,8 @@ function getState(channelId: string): ChannelState {
 // Create SlackContext adapter
 // ============================================================================
 
-// Max chars per Slack message chunk. chat.update rejects above ~15k in practice.
-// We use 8k to give clean 3-4 message splits for long responses.
-const SLACK_SPLIT_CHARS = 8000;
+// Slack recommends 4000 chars max for chat.update. We use 4000 as the split point.
+const SLACK_SPLIT_CHARS = 4000;
 
 /**
  * Split text into chunks at natural newline boundaries near maxChars.
