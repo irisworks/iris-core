@@ -975,23 +975,20 @@ function createRunner(
 			}
 
 			// Log usage summary with context info
-			let contextTokens = 0;
-			let contextWindow = model.contextWindow || 200000;
+			const contextWindow = model.contextWindow || 200000;
+			const messages = session.messages;
+			const lastAssistantMessage = messages
+				.slice()
+				.reverse()
+				.find((m) => m.role === "assistant" && (m as any).stopReason !== "aborted") as any;
+			const contextTokens = lastAssistantMessage
+				? (lastAssistantMessage.usage.input ?? 0) +
+					(lastAssistantMessage.usage.output ?? 0) +
+					(lastAssistantMessage.usage.cacheRead ?? 0) +
+					(lastAssistantMessage.usage.cacheWrite ?? 0)
+				: 0;
+
 			if (runState.totalUsage.cost.total > 0) {
-				// Get last non-aborted assistant message for context calculation
-				const messages = session.messages;
-				const lastAssistantMessage = messages
-					.slice()
-					.reverse()
-					.find((m) => m.role === "assistant" && (m as any).stopReason !== "aborted") as any;
-
-				contextTokens = lastAssistantMessage
-					? lastAssistantMessage.usage.input +
-						lastAssistantMessage.usage.output +
-						lastAssistantMessage.usage.cacheRead +
-						lastAssistantMessage.usage.cacheWrite
-					: 0;
-
 				const summary = log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
 				runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
 				await queueChain;
