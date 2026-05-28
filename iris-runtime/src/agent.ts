@@ -697,7 +697,7 @@ function createRunner(
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
 					queue.enqueueMessage(text, "main", "response main");
-					queue.enqueueMessage(text, "thread", "response thread", false);
+					// Thread posting handled by replaceMessage() at end of generation
 				}
 			}
 		} else if (event.type === "compaction_start") {
