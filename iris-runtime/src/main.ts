@@ -152,10 +152,28 @@ function getState(channelId: string): ChannelState {
 // Create SlackContext adapter
 // ============================================================================
 
+// Split point for long messages — stay safely under Slack's 40k char hard limit.
+// We split at a newline near this boundary so cuts look natural.
+const SLACK_SPLIT_CHARS = 39000;
+
+/**
+ * Find the best split point at or before maxChars — prefer the last newline
+ * in the final 20% of the window so cuts land between paragraphs/lines.
+ */
+function findSplitPoint(text: string, maxChars: number): number {
+	if (text.length <= maxChars) return text.length;
+	const searchFrom = Math.floor(maxChars * 0.8);
+	const newlineIdx = text.lastIndexOf("\n", maxChars);
+	return newlineIdx >= searchFrom ? newlineIdx + 1 : maxChars;
+}
+
 function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
 	let messageTs: string | null = null;
 	const threadMessageTs: string[] = [];
 	let accumulatedText = "";
+	// Text in the current active Slack message being streamed into
+	let currentChunkText = "";
+	let currentChunkTs: string | null = null;
 	let isWorking = true;
 	const workingIndicator = " ...";
 	let updatePromise = Promise.resolve();
@@ -184,22 +202,38 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			updatePromise = updatePromise.then(async () => {
 				try {
 					accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+					currentChunkText = currentChunkText ? `${currentChunkText}\n${text}` : text;
 
-					// Truncate to stay under Slack's 40K byte limit (not char limit — emoji/CJK are multi-byte)
-					const MAX_BYTES = 24000;
-					const truncationNote = "\n\n_(message truncated, ask me to elaborate on specific parts)_";
-					while (Buffer.byteLength(accumulatedText, "utf8") > MAX_BYTES) {
-						// Trim by slicing chars until under limit
-						accumulatedText = accumulatedText.substring(0, Math.floor(accumulatedText.length * 0.8));
-						accumulatedText = accumulatedText + truncationNote;
+					// If current chunk exceeds the split threshold, spill into a new thread reply
+					while (currentChunkText.length > SLACK_SPLIT_CHARS) {
+						const splitAt = findSplitPoint(currentChunkText, SLACK_SPLIT_CHARS);
+						const thisChunk = currentChunkText.slice(0, splitAt).trimEnd();
+						const remainder = currentChunkText.slice(splitAt).trimStart();
+
+						// Finalise the current message at the split point
+						if (currentChunkTs) {
+							await slack.updateMessage(event.channel, currentChunkTs, thisChunk);
+						} else {
+							const ts = await slack.postMessage(event.channel, thisChunk);
+							messageTs = messageTs ?? ts;
+							currentChunkTs = ts;
+						}
+
+						// Start a new thread reply for the overflow
+						const newTs = await slack.postInThread(event.channel, messageTs!, remainder + (isWorking ? workingIndicator : ""));
+						threadMessageTs.push(newTs);
+						currentChunkTs = newTs;
+						currentChunkText = remainder;
 					}
 
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+					const displayText = isWorking ? currentChunkText + workingIndicator : currentChunkText;
 
-					if (messageTs) {
-						await slack.updateMessage(event.channel, messageTs, displayText);
+					if (currentChunkTs) {
+						await slack.updateMessage(event.channel, currentChunkTs, displayText);
 					} else {
-						messageTs = await slack.postMessage(event.channel, displayText);
+						const ts = await slack.postMessage(event.channel, displayText);
+						messageTs = ts;
+						currentChunkTs = ts;
 					}
 
 					if (shouldLog && messageTs) {
@@ -215,22 +249,33 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		replaceMessage: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
 				try {
-					// Replace the accumulated text entirely, with truncation
-					const MAX_BYTES = 24000;
-					const truncationNote = "\n\n_(message truncated, ask me to elaborate on specific parts)_";
+					// Clamp to 39k chars, split remainder into a thread reply
 					accumulatedText = text;
-					while (Buffer.byteLength(accumulatedText, "utf8") > MAX_BYTES) {
-						accumulatedText = accumulatedText.substring(0, Math.floor(accumulatedText.length * 0.8));
-						accumulatedText = accumulatedText + truncationNote;
-					}
+					currentChunkText = text;
 
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+					if (currentChunkText.length > SLACK_SPLIT_CHARS) {
+						const splitAt = findSplitPoint(currentChunkText, SLACK_SPLIT_CHARS);
+						const firstChunk = currentChunkText.slice(0, splitAt).trimEnd();
+						const overflow = currentChunkText.slice(splitAt).trimStart();
 
-					if (messageTs) {
-						// finalizeMessage resolves bridge requests; equivalent to updateMessage for Slack
-						await slack.finalizeMessage(event.channel, messageTs, displayText);
+						if (messageTs) {
+							await slack.finalizeMessage(event.channel, messageTs, firstChunk);
+						} else {
+							messageTs = await slack.postMessage(event.channel, firstChunk);
+							currentChunkTs = messageTs;
+						}
+
+						const newTs = await slack.postInThread(event.channel, messageTs!, overflow);
+						threadMessageTs.push(newTs);
+						currentChunkTs = newTs;
 					} else {
-						messageTs = await slack.postMessage(event.channel, displayText);
+						const displayText = isWorking ? currentChunkText + workingIndicator : currentChunkText;
+						if (messageTs) {
+							await slack.finalizeMessage(event.channel, messageTs, displayText);
+						} else {
+							messageTs = await slack.postMessage(event.channel, displayText);
+							currentChunkTs = messageTs;
+						}
 					}
 				} catch (err) {
 					log.logWarning("Slack replaceMessage error", err instanceof Error ? err.message : String(err));
@@ -243,14 +288,7 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			updatePromise = updatePromise.then(async () => {
 				try {
 					if (messageTs) {
-						// Truncate thread messages if too long (20K limit for safety)
-						const MAX_THREAD_LENGTH = 20000;
-						let threadText = text;
-						if (threadText.length > MAX_THREAD_LENGTH) {
-							threadText = `${threadText.substring(0, MAX_THREAD_LENGTH - 50)}\n\n_(truncated)_`;
-						}
-
-						const ts = await slack.postInThread(event.channel, messageTs, threadText);
+						const ts = await slack.postInThread(event.channel, messageTs, text);
 						threadMessageTs.push(ts);
 					}
 				} catch (err) {
@@ -284,9 +322,9 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			updatePromise = updatePromise.then(async () => {
 				try {
 					isWorking = working;
-					if (messageTs) {
-						const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-						await slack.updateMessage(event.channel, messageTs, displayText);
+					if (currentChunkTs) {
+						const displayText = isWorking ? currentChunkText + workingIndicator : currentChunkText;
+						await slack.updateMessage(event.channel, currentChunkTs, displayText);
 					}
 				} catch (err) {
 					log.logWarning("Slack setWorking error", err instanceof Error ? err.message : String(err));
