@@ -1,48 +1,17 @@
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
-import { basename, join } from "path";
+import { existsSync, mkdirSync } from "fs";
+import { appendFile } from "fs/promises";
+import { join } from "path";
 import * as log from "./log.js";
 import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
+import { parseChannelKind } from "./channel-kind.js";
 import type { Attachment, ChannelStore } from "./store.js";
+import { ChannelModeConfig } from "./adapters/channel-mode.js";
+import { SlackMessageApi } from "./infra/slack/message-api.js";
+import { SlackRegistry } from "./infra/slack/registry.js";
 
-// Telegram bot bridge endpoint
-const TELEGRAM_BRIDGE_URL = process.env.TELEGRAM_BRIDGE_URL || "http://localhost:3001";
-
-/**
- * Send a response back to Telegram via the bot bridge.
- * Returns the sent text or null if Telegram is not available.
- */
-async function sendToTelegram(chatId: string, text: string, replyTo?: string): Promise<boolean> {
-	try {
-		const response = await fetch(`${TELEGRAM_BRIDGE_URL}/send`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				chatId,
-				text,
-				replyTo,
-			}),
-		});
-		return response.ok;
-	} catch (err) {
-		log.logWarning("[telegram] Failed to send response:", String(err));
-		return false;
-	}
-}
-
-// Slack has a 40,000 character limit for message text
-const SLACK_MAX_LENGTH = 40000;
-
-/**
- * Truncate text to fit within Slack's message limit.
- * If truncated, adds "\n\n[message truncated]" at the end.
- */
-function truncateForSlack(text: string): string {
-	if (text.length <= SLACK_MAX_LENGTH) return text;
-	const suffix = "\n\n[message truncated]";
-	return text.slice(0, SLACK_MAX_LENGTH - suffix.length) + suffix;
-}
+// sendToTelegram moved to infra/slack/message-api.ts
 
 // ============================================================================
 // Types
@@ -101,7 +70,6 @@ export interface SlackContext {
 	respondInThread: (text: string) => Promise<void>;
 	setTyping: (isTyping: boolean) => Promise<void>;
 	uploadFile: (filePath: string, title?: string) => Promise<void>;
-	setWorking: (working: boolean) => Promise<void>;
 	deleteMessage: () => Promise<void>;
 	getAccumulatedText: () => string;
 }
@@ -174,49 +142,58 @@ class ChannelQueue {
 // ============================================================================
 
 export class SlackBot {
-	private socketClient: SocketModeClient;
-	private webClient: WebClient;
-	private handler: IrisHandler;
-	private workingDir: string;
-	private store: ChannelStore;
+	// ── infrastructure ─────────────────────────────────────────────────────────
+	private readonly socketClient: SocketModeClient;
+	private readonly webClient: WebClient;
+	/** Outbound message API — owns session route table and all chat.* calls. */
+	private readonly messageApi: SlackMessageApi;
+	/** User + channel identity cache. */
+	private readonly registry: SlackRegistry;
+	/** Channel mode configuration (loaded from channels.json). */
+	private readonly channelMode: ChannelModeConfig;
+
+	// ── state ──────────────────────────────────────────────────────────────────
+	private readonly handler: IrisHandler;
+	private readonly workingDir: string;
+	private readonly store: ChannelStore;
+	private readonly allowedChannels = new Set<string>();
+	private readonly queues = new Map<string, ChannelQueue>();
+
 	private botUserId: string | null = null;
-	private botId: string | null = null; // bot_id (different from user_id) — used to filter own messages in leads channels
-	private startupTs: string | null = null; // Messages older than this are just logged, not processed
+	private botId: string | null = null;
+	private startupTs: string | null = null;
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-	private users = new Map<string, SlackUser>();
-	private channels = new Map<string, SlackChannel>();
-	private queues = new Map<string, ChannelQueue>();
-	private allowedChannels = new Set<string>(); // If non-empty, only respond to these channel IDs
+	// Coalescing async write buffer — eliminates blocking appendFileSync calls.
+	private static readonly LOG_FLUSH_MS = 100;
+	private readonly logBuffers = new Map<string, string[]>();
+	private readonly logFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private readonly passthroughApiKey: string;
 
-	// Track Telegram context: channel (TELEGRAM) -> { chatId, messageId }
-	private telegramContexts = new Map<string, { chatId: string; messageId?: string }>();
+	// ── Telegram delegation (via messageApi) ──────────────────────────────────
 
-	// Channel modes loaded from workingDir/data/channels.json
-	private channelModes = new Map<string, "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin">();
-	private channelPassthroughUrls = new Map<string, string>(); // channel -> endpoint URL for passthrough mode
-	private channelRequireMention = new Set<string>(); // channels where top-level messages require @mention
-
-	// SESSION-<id> → real Slack { channel, threadTs } for routing postMessage/updateMessage
-	private sessionRoutes = new Map<string, { channel: string; threadTs: string }>();
-
-	/**
-	 * Store Telegram context for a channel. Called when processing Telegram events.
-	 */
 	setTelegramContext(channel: string, chatId: string, messageId?: string): void {
-		this.telegramContexts.set(channel, { chatId, messageId });
+		this.messageApi.setTelegramContext(channel, chatId, messageId);
 	}
 
 	/**
 	 * Clear Telegram context for a channel.
 	 */
 	clearTelegramContext(channel: string): void {
-		this.telegramContexts.delete(channel);
+		this.messageApi.clearTelegramContext(channel);
 	}
 
 	constructor(
 		handler: IrisHandler,
-		config: { appToken: string; botToken: string; workingDir: string; store: ChannelStore },
+		config: {
+			appToken: string;
+			botToken: string;
+			workingDir: string;
+			store: ChannelStore;
+			channelFilter?: string[];
+			telegramBridgeUrl?: string;
+			passthroughApiKey?: string;
+		},
 	) {
 		this.handler = handler;
 		this.workingDir = config.workingDir;
@@ -224,55 +201,48 @@ export class SlackBot {
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
 
-		// IRIS_SLACK_CHANNEL: comma-separated channel IDs this instance should respond to.
-		// If unset, responds to all channels (Iris herself). If set, ignores other channels.
-		const channelFilter = process.env.IRIS_SLACK_CHANNEL;
-		if (channelFilter) {
-			channelFilter.split(",").map((id) => id.trim()).filter(Boolean).forEach((id) => this.allowedChannels.add(id));
+		// Extracted infrastructure components
+		this.messageApi = new SlackMessageApi(
+			this.webClient,
+			config.telegramBridgeUrl ?? "http://localhost:3001",
+		);
+		this.registry = new SlackRegistry(this.webClient);
+		this.channelMode = new ChannelModeConfig();
+
+		this.passthroughApiKey = config.passthroughApiKey ?? "";
+
+		// Channel filter: if set, only respond to listed channel IDs
+		for (const id of config.channelFilter ?? []) {
+			this.allowedChannels.add(id);
+		}
+		if (this.allowedChannels.size > 0) {
 			log.logInfo(`Channel filter active: ${[...this.allowedChannels].join(", ")}`);
 		}
 	}
 
-	// ==========================================================================
-	// Channel mode helpers
-	// ==========================================================================
-
-	private loadChannelModes(): void {
-		const channelsPath = join(this.workingDir, "data", "channels.json");
-		if (!existsSync(channelsPath)) return;
+	private async handlePassthroughRequest(
+		channel: string,
+		threadTs: string,
+		text: string,
+		userName: string,
+		passthroughUrl: string,
+	): Promise<void> {
 		try {
-			const raw = JSON.parse(readFileSync(channelsPath, "utf-8")) as Record<string, { mode: string; url?: string; requireMentionForTopLevel?: boolean }>;
-			for (const [id, config] of Object.entries(raw)) {
-				if (config.mode === "thread" || config.mode === "interactive-thread" || config.mode === "passthrough" || config.mode === "leads" || config.mode === "dm" || config.mode === "admin") {
-					this.channelModes.set(id, config.mode);
-				}
-				if (config.mode === "passthrough" && config.url) {
-					this.channelPassthroughUrls.set(id, config.url);
-				}
-				if (config.requireMentionForTopLevel) {
-					this.channelRequireMention.add(id);
-				}
-			}
-			log.logInfo(`[channels] Loaded ${this.channelModes.size} channel mode entries`);
+			const apiKey = this.passthroughApiKey;
+			const senderId = `slack_${threadTs.replace(".", "")}`;
+			const body = JSON.stringify({ text, user: userName, sender_id: senderId });
+			const resp = await fetch(passthroughUrl, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
+				body,
+			});
+			const json = await resp.json() as { response?: string; text?: string; error?: string };
+			const reply = json.response || json.text || json.error || "(no response)";
+			await this.postInThread(channel, threadTs, reply);
 		} catch (err) {
-			log.logWarning("[channels] Failed to load channels.json", err instanceof Error ? err.message : String(err));
+			log.logWarning(`[${channel}] passthrough error`, err instanceof Error ? err.message : String(err));
+			await this.postInThread(channel, threadTs, "_Bot unavailable, please try again._");
 		}
-	}
-
-	/**
-	 * Get the configured mode for a channel.
-	 * Checks exact match first, then prefix wildcards (e.g. "D*").
-	 * Defaults to "dm" (non-admin unless explicitly configured).
-	 */
-	private getChannelMode(channelId: string): "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin" {
-		const exact = this.channelModes.get(channelId);
-		if (exact) return exact;
-		for (const [pattern, mode] of this.channelModes) {
-			if (pattern.endsWith("*") && channelId.startsWith(pattern.slice(0, -1))) {
-				return mode;
-			}
-		}
-		return "dm"; // default — non-admin unless explicitly configured
 	}
 
 	// ==========================================================================
@@ -332,9 +302,9 @@ export class SlackBot {
 		this.botUserId = auth.user_id as string;
 		this.botId = auth.bot_id as string | null;
 
-		this.loadChannelModes();
-		await Promise.all([this.fetchUsers(), this.fetchChannels()]);
-		log.logInfo(`Loaded ${this.channels.size} channels, ${this.users.size} users`);
+		// Delegate to extracted components
+		this.channelMode.load(this.workingDir);
+		await this.registry.fetchAll();
 
 		await this.backfillAllChannels();
 
@@ -342,12 +312,10 @@ export class SlackBot {
 		this.setupSocketWatchdog();
 		await this.socketClient.start();
 
-		// Record startup time - messages older than this are just logged, not processed
 		this.startupTs = (Date.now() / 1000).toFixed(6);
 
 		log.logConnected();
 
-		// Re-dispatch any runs that were interrupted mid-flight (e.g. service restart)
 		await this.resumeInterruptedRuns();
 	}
 
@@ -380,150 +348,77 @@ export class SlackBot {
 	}
 
 	getUser(userId: string): SlackUser | undefined {
-		return this.users.get(userId);
+		return this.registry.getUser(userId);
 	}
 
 	getChannel(channelId: string): SlackChannel | undefined {
-		return this.channels.get(channelId);
+		return this.registry.getChannel(channelId);
 	}
 
 	getAllUsers(): SlackUser[] {
-		return Array.from(this.users.values());
+		return this.registry.getAllUsers();
 	}
 
 	getAllChannels(): SlackChannel[] {
-		return Array.from(this.channels.values());
+		return this.registry.getAllChannels();
 	}
 
-	/** Virtual channels never touch the Slack API — they're internal routing channels. */
-	private isVirtualChannel(channel: string): boolean {
-		return channel.startsWith("WEBUI") || channel.startsWith("BRIDGE-") || channel.startsWith("ESCALATE-") || channel.startsWith("SELFHEAL-") || channel === "TELEGRAM";
-	}
+	// ── Outbound messaging — delegate entirely to SlackMessageApi ─────────────
 
 	async postMessage(channel: string, text: string): Promise<string> {
-		if (this.isVirtualChannel(channel)) {
-			// For Telegram, don't send intermediate messages - wait for finalizeMessage
-			return Date.now().toString();
-		}
-		if (channel.startsWith("SESSION-")) {
-			const route = this.sessionRoutes.get(channel);
-			if (!route) return Date.now().toString(); // API injection — no Slack thread to post to
-			const truncatedText = truncateForSlack(text);
-			const result = await this.webClient.chat.postMessage({
-				channel: route.channel,
-				thread_ts: route.threadTs,
-				text: truncatedText,
-			});
-			return result.ts as string;
-		}
-		const truncatedText = truncateForSlack(text);
-		const result = await this.webClient.chat.postMessage({ channel, text: truncatedText });
-		return result.ts as string;
+		return this.messageApi.postMessage(channel, text);
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
-		if (this.isVirtualChannel(channel)) return;
-		if (channel.startsWith("SESSION-")) {
-			const route = this.sessionRoutes.get(channel);
-			if (!route) return; // API injection — no Slack message to update
-			const truncatedText = truncateForSlack(text);
-			await this.webClient.chat.update({ channel: route.channel, ts, text: truncatedText });
-			return;
-		}
-		const truncatedText = truncateForSlack(text);
-		await this.webClient.chat.update({ channel, ts, text: truncatedText });
+		return this.messageApi.updateMessage(channel, ts, text);
 	}
 
-	/**
-	 * Finalize a message — called only for the final response, not intermediate updates.
-	 * For BRIDGE channels this resolves the waiting bridge request.
-	 * For TELEGRAM channel this sends the response via the bot bridge.
-	 * For Slack channels this is equivalent to updateMessage.
-	 */
 	async finalizeMessage(channel: string, ts: string, text: string): Promise<void> {
-		if (channel.startsWith("WEBUI") || channel.startsWith("ESCALATE-") || channel.startsWith("SELFHEAL-")) return;
-		if (channel.startsWith("BRIDGE-")) {
-			const { resolveBridgeRequest } = await import("./bridge.js");
-			const requestId = channel.slice("BRIDGE-".length);
-			resolveBridgeRequest(requestId, text);
-			return;
-		}
-		// Handle Telegram responses
-		if (channel === "TELEGRAM") {
-			const ctx = this.telegramContexts.get(channel);
-			if (ctx) {
-				await sendToTelegram(ctx.chatId, text, ctx.messageId);
-				this.clearTelegramContext(channel);
-			}
-			return;
-		}
-		if (channel.startsWith("SESSION-")) {
-			// Update the Slack thread message if there's a route; session request
-			// resolution happens in main.ts handleEvent after the run completes.
-			const route = this.sessionRoutes.get(channel);
-			if (route) {
-				const truncatedText = truncateForSlack(text);
-				await this.webClient.chat.update({ channel: route.channel, ts, text: truncatedText });
-			}
-			return;
-		}
-		const truncatedText = truncateForSlack(text);
-		await this.webClient.chat.update({ channel, ts, text: truncatedText });
+		return this.messageApi.finalizeMessage(channel, ts, text);
 	}
 
 	async deleteMessage(channel: string, ts: string): Promise<void> {
-		if (this.isVirtualChannel(channel)) return;
-		if (channel.startsWith("SESSION-")) {
-			const route = this.sessionRoutes.get(channel);
-			if (!route) return;
-			await this.webClient.chat.delete({ channel: route.channel, ts });
-			return;
-		}
-		await this.webClient.chat.delete({ channel, ts });
+		return this.messageApi.deleteMessage(channel, ts);
 	}
 
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
-		if (this.isVirtualChannel(channel)) return Date.now().toString();
-		if (channel.startsWith("SESSION-")) {
-			const route = this.sessionRoutes.get(channel);
-			if (!route) return Date.now().toString();
-			const truncatedText = truncateForSlack(text);
-			const result = await this.webClient.chat.postMessage({
-				channel: route.channel,
-				thread_ts: threadTs,
-				text: truncatedText,
-			});
-			return result.ts as string;
-		}
-		const truncatedText = truncateForSlack(text);
-		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: truncatedText });
-		return result.ts as string;
+		return this.messageApi.postInThread(channel, threadTs, text);
 	}
 
 	async uploadFile(channel: string, filePath: string, title?: string): Promise<void> {
-		if (this.isVirtualChannel(channel)) return;
-		const effectiveChannelId = channel.startsWith("SESSION-")
-			? this.sessionRoutes.get(channel)?.channel
-			: channel;
-		if (!effectiveChannelId) return; // SESSION- with no route
-		const fileName = title || basename(filePath);
-		const fileContent = readFileSync(filePath);
-		await this.webClient.files.uploadV2({
-			channel_id: effectiveChannelId,
-			file: fileContent,
-			filename: fileName,
-			title: fileName,
-		});
+		return this.messageApi.uploadFile(channel, filePath, title);
 	}
 
 	/**
-	 * Log a message to log.jsonl (SYNC)
-	 * This is the ONLY place messages are written to log.jsonl
+	 * Log a message to log.jsonl.
+	 * Lines are buffered for up to LOG_FLUSH_MS and flushed with a single async write,
+	 * keeping appendFileSync off the event loop entirely.
 	 */
 	logToFile(channel: string, entry: object): void {
+		let buf = this.logBuffers.get(channel);
+		if (!buf) {
+			buf = [];
+			this.logBuffers.set(channel, buf);
+		}
+		buf.push(`${JSON.stringify(entry)}\n`);
+
+		if (!this.logFlushTimers.has(channel)) {
+			const timer = setTimeout(() => this._flushLogBuffer(channel), SlackBot.LOG_FLUSH_MS);
+			timer.unref?.();
+			this.logFlushTimers.set(channel, timer);
+		}
+	}
+
+	private _flushLogBuffer(channel: string): void {
+		this.logFlushTimers.delete(channel);
+		const buf = this.logBuffers.get(channel);
+		if (!buf || buf.length === 0) return;
+		const lines = buf.splice(0); // drain atomically, reset in-place
 		const dir = join(this.workingDir, channel);
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-		appendFileSync(join(dir, "log.jsonl"), `${JSON.stringify(entry)}\n`);
+		appendFile(join(dir, "log.jsonl"), lines.join("")).catch((err) =>
+			log.logWarning("logToFile flush error", err instanceof Error ? err.message : String(err)),
+		);
 	}
 
 	/**
@@ -618,7 +513,7 @@ export class SlackBot {
 				return;
 			}
 
-			const channelMode = this.getChannelMode(e.channel);
+			const channelMode = this.channelMode.getMode(e.channel);
 
 			// Check for admin commands — only allowed in "admin" mode channels
 			const cmdText = slackEvent.text.toLowerCase().trim();
@@ -651,35 +546,17 @@ export class SlackBot {
 
 			// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs
 			if (channelMode === "passthrough") {
-				const passthroughUrl = this.channelPassthroughUrls.get(e.channel);
+				const passthroughUrl = this.channelMode.getPassthroughUrl(e.channel);
 				if (!passthroughUrl) {
 					log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
 					ack();
 					return;
 				}
 				const threadTs = e.thread_ts ?? e.ts;
-				const user = this.users.get(slackEvent.user);
+				const user = this.registry.getUser(slackEvent.user);
 				const userName = user?.displayName || user?.userName || slackEvent.user;
-				const senderId = `slack_${threadTs.replace(".", "")}`;
 				ack();
-				// Fire async — don't block the ack
-				(async () => {
-					try {
-						const apiKey = process.env.PASSTHROUGH_API_KEY ?? "";
-						const body = JSON.stringify({ text: slackEvent.text, user: userName, sender_id: senderId });
-						const resp = await fetch(passthroughUrl, {
-							method: "POST",
-							headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
-							body,
-						});
-						const json = await resp.json() as { response?: string; text?: string; error?: string };
-						const reply = json.response || json.text || json.error || "(no response)";
-						await this.postInThread(e.channel, threadTs, reply);
-					} catch (err) {
-						log.logWarning(`[${e.channel}] passthrough error`, err instanceof Error ? err.message : String(err));
-						await this.postInThread(e.channel, e.ts, "_Bot unavailable, please try again._");
-					}
-				})();
+				void this.handlePassthroughRequest(e.channel, threadTs, slackEvent.text, userName, passthroughUrl);
 				return;
 			}
 
@@ -690,8 +567,7 @@ export class SlackBot {
 					ack();
 					return;
 				}
-				const sessions = loadSessions(this.workingDir);
-				const session = findByThread(sessions, e.channel, e.thread_ts);
+				const session = findByThread(this.workingDir, e.channel, e.thread_ts);
 				if (!session) {
 					// Unrecognised thread — log only, no response
 					ack();
@@ -699,9 +575,9 @@ export class SlackBot {
 				}
 				// Rekey to SESSION-<id> and store the Slack route for postMessage routing
 				const sessionChannel = `SESSION-${session.sessionId}`;
-				this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
+				this.messageApi.setSessionRoute(sessionChannel,{ channel: e.channel, threadTs: e.thread_ts });
 				// Also log user message to the session directory
-				const user = this.users.get(slackEvent.user);
+				const user = this.registry.getUser(slackEvent.user);
 				this.logToFile(sessionChannel, {
 					date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
 					ts: slackEvent.ts,
@@ -718,10 +594,9 @@ export class SlackBot {
 			// Interactive-thread mode: top-level @mention creates a session;
 			// subsequent replies in the same thread continue it without needing @mention.
 			if (channelMode === "interactive-thread") {
-				const sessions = loadSessions(this.workingDir);
 				const threadTs = e.thread_ts ?? e.ts; // top-level: ts becomes the thread anchor
 
-				let session = findByThread(sessions, e.channel, threadTs);
+				let session = findByThread(this.workingDir, e.channel, threadTs);
 
 				if (!session) {
 					if (e.thread_ts) {
@@ -740,8 +615,8 @@ export class SlackBot {
 				}
 
 				const sessionChannel = `SESSION-${session.sessionId}`;
-				this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs });
-				const user = this.users.get(slackEvent.user);
+				this.messageApi.setSessionRoute(sessionChannel,{ channel: e.channel, threadTs });
+				const user = this.registry.getUser(slackEvent.user);
 				this.logToFile(sessionChannel, {
 					date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
 					ts: slackEvent.ts,
@@ -758,8 +633,8 @@ export class SlackBot {
 			// dm/admin mode: queue normally. Also handles rekeyed SESSION- events.
 			const queue = this.getQueue(slackEvent.channel);
 			if (queue.size() >= 5) {
-				if (slackEvent.channel.startsWith("SESSION-")) {
-					const route = this.sessionRoutes.get(slackEvent.channel);
+				if (parseChannelKind(slackEvent.channel).kind === "session") {
+					const route = this.messageApi.getSessionRoute(slackEvent.channel);
 					if (route) this.postInThread(route.channel, route.threadTs, "_Too many messages queued. Please wait._");
 				} else {
 					this.postMessage(slackEvent.channel, "_Too many messages queued. Say `stop` to cancel._");
@@ -793,7 +668,7 @@ export class SlackBot {
 				Array.isArray((e as any).files) &&
 				(e as any).files.some((f: any) => f.filetype === "email");
 
-			const channelModeForFilter = this.getChannelMode(e.channel);
+			const channelModeForFilter = this.channelMode.getMode(e.channel);
 			const isLeadsChannel = channelModeForFilter === "leads";
 
 			// Subtype filter — allow bot_message in leads channels (workflow/n8n/insta/email bots)
@@ -831,10 +706,6 @@ export class SlackBot {
 
 			const isDM = e.channel_type === "im";
 			const isBotMention = e.text?.includes(`<@${this.botUserId}>`);
-			// TEMP DEBUG: log channel_type so we can see what Slack sends for DMs
-			if (e.channel.startsWith("D")) {
-				log.logInfo(`[debug] DM channel=${e.channel} channel_type=${JSON.stringify(e.channel_type)} isDM=${isDM} text=${(e.text||"").substring(0,20)}`);
-			}
 
 			// Skip channel @mentions - already handled by app_mention event
 			if (!isDM && isBotMention) {
@@ -877,8 +748,7 @@ export class SlackBot {
 
 			// Only trigger processing for messages AFTER startup (not replayed old messages)
 			// Exception: "leads" mode channels process missed messages on restart
-			const channelMode = this.channelModes.get(e.channel);
-			if (this.startupTs && e.ts < this.startupTs && channelMode !== "leads") {
+			if (this.startupTs && e.ts < this.startupTs && this.channelMode.getMode(e.channel) !== "leads") {
 				log.logInfo(`[${e.channel}] Skipping old message (pre-startup): ${slackEvent.text.substring(0, 30)}`);
 				ack();
 				return;
@@ -892,7 +762,7 @@ export class SlackBot {
 
 			// Leads mode: top-level message (no thread) fires LLM without @mention needed
 			if (!isDM && !isBotMention && !e.thread_ts) {
-				const channelMode = this.getChannelMode(e.channel);
+				const channelMode = this.channelMode.getMode(e.channel);
 				if (channelMode === "leads") {
 					const queue = this.getQueue(e.channel);
 					queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
@@ -903,14 +773,13 @@ export class SlackBot {
 
 			// Session thread routing for thread-mode channels (non-DM, non-@mention)
 			if (!isDM && !isBotMention && e.thread_ts) {
-				const channelMode = this.getChannelMode(e.channel);
+				const channelMode = this.channelMode.getMode(e.channel);
 				if (channelMode === "thread") {
-					const sessions = loadSessions(this.workingDir);
-					const session = findByThread(sessions, e.channel, e.thread_ts);
+					const session = findByThread(this.workingDir, e.channel, e.thread_ts);
 					if (session) {
 						const sessionChannel = `SESSION-${session.sessionId}`;
-						this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
-						const user = this.users.get(slackEvent.user);
+						this.messageApi.setSessionRoute(sessionChannel,{ channel: e.channel, threadTs: e.thread_ts });
+						const user = this.registry.getUser(slackEvent.user);
 						this.logToFile(sessionChannel, {
 							date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
 							ts: slackEvent.ts,
@@ -933,13 +802,12 @@ export class SlackBot {
 					}
 				}
 				if (channelMode === "interactive-thread") {
-					const sessions = loadSessions(this.workingDir);
-					let session = findByThread(sessions, e.channel, e.thread_ts);
+					let session = findByThread(this.workingDir, e.channel, e.thread_ts);
 
 					if (!session) {
 						if (!e.thread_ts) {
 							// Top-level non-mention message — only create session if mention not required
-							if (this.channelRequireMention.has(e.channel)) {
+							if (this.channelMode.requiresMentionForTopLevel(e.channel)) {
 								// requireMentionForTopLevel: ignore, @mention via app_mention will create the session
 								ack();
 								return;
@@ -953,8 +821,11 @@ export class SlackBot {
 					}
 
 					const sessionChannel = `SESSION-${session.sessionId}`;
-					this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
-					const user = this.users.get(slackEvent.user);
+					// Use e.thread_ts ?? e.ts: for top-level messages e.thread_ts is undefined,
+					// and the message's own ts becomes the thread anchor for replies.
+					const sessionThreadTs = e.thread_ts ?? e.ts;
+					this.messageApi.setSessionRoute(sessionChannel,{ channel: e.channel, threadTs: sessionThreadTs });
+					const user = this.registry.getUser(slackEvent.user);
 					this.logToFile(sessionChannel, {
 						date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
 						ts: slackEvent.ts,
@@ -968,7 +839,7 @@ export class SlackBot {
 					slackEvent.channel = sessionChannel;
 					const sessionQueue = this.getQueue(sessionChannel);
 					if (sessionQueue.size() >= 5) {
-						this.postInThread(e.channel, e.thread_ts, "_Too many messages queued. Please wait._");
+						this.postInThread(e.channel, sessionThreadTs, "_Too many messages queued. Please wait._");
 					} else {
 						sessionQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
 					}
@@ -976,28 +847,12 @@ export class SlackBot {
 					return;
 				}
 				if (channelMode === "passthrough") {
-					const passthroughUrl = this.channelPassthroughUrls.get(e.channel);
+					const passthroughUrl = this.channelMode.getPassthroughUrl(e.channel);
 					if (passthroughUrl) {
-						const user = this.users.get(slackEvent.user);
+						const user = this.registry.getUser(slackEvent.user);
 						const userName = user?.displayName || user?.userName || slackEvent.user;
-						const senderId = `slack_${e.thread_ts.replace(".", "")}`;
 						ack();
-						(async () => {
-							try {
-								const apiKey = process.env.PASSTHROUGH_API_KEY ?? "";
-								const body = JSON.stringify({ text: slackEvent.text, user: userName, sender_id: senderId });
-								const resp = await fetch(passthroughUrl, {
-									method: "POST",
-									headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
-									body,
-								});
-								const json = await resp.json() as { response?: string; text?: string; error?: string };
-								const reply = json.response || json.text || json.error || "(no response)";
-								await this.postInThread(e.channel, e.thread_ts!, reply);
-							} catch (err) {
-								log.logWarning(`[${e.channel}] passthrough error`, err instanceof Error ? err.message : String(err));
-							}
-						})();
+						void this.handlePassthroughRequest(e.channel, e.thread_ts!, slackEvent.text, userName, passthroughUrl);
 						return;
 					}
 				}
@@ -1005,7 +860,7 @@ export class SlackBot {
 
 			// Only trigger handler for DMs
 			if (isDM) {
-				const channelMode = this.getChannelMode(e.channel);
+				const channelMode = this.channelMode.getMode(e.channel);
 				// Check for stop/compact/reset commands — only allowed in "admin" mode
 				const dmCmdText = slackEvent.text.toLowerCase().trim();
 				if (dmCmdText === "stop" || dmCmdText === "compact" || dmCmdText === "reset") {
@@ -1052,7 +907,7 @@ export class SlackBot {
 	 * Downloads attachments in background via store
 	 */
 	private logUserMessage(event: SlackEvent): Attachment[] {
-		const user = this.users.get(event.user);
+		const user = this.registry.getUser(event.user);
 		// Process attachments - queues downloads in background
 		const attachments = event.files ? this.store.processAttachments(event.channel, event.files, event.ts) : [];
 		this.logToFile(event.channel, {
@@ -1143,7 +998,7 @@ export class SlackBot {
 		// Log each message to log.jsonl
 		for (const msg of relevantMessages) {
 			const isIrisMessage = msg.user === this.botUserId;
-			const user = this.users.get(msg.user!);
+			const user = this.registry.getUser(msg.user!);
 			// Strip @mentions from text (same as live messages)
 			const text = (msg.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim();
 			// Process attachments - queues downloads in background
@@ -1170,7 +1025,8 @@ export class SlackBot {
 	 * A placeholder is any bot message matching the pattern: starts with "_" and ends with " ...".
 	 */
 	private async resumeInterruptedRuns(): Promise<void> {
-		for (const [channelId] of this.channels) {
+		for (const channel of this.registry.getAllChannels()) {
+			const channelId = channel.id;
 			const logPath = join(this.workingDir, channelId, "log.jsonl");
 			if (!existsSync(logPath)) continue;
 
@@ -1254,23 +1110,32 @@ export class SlackBot {
 
 		// Only backfill channels that already have a log.jsonl (Iris has interacted with them before)
 		const channelsToBackfill: Array<[string, SlackChannel]> = [];
-		for (const [channelId, channel] of this.channels) {
-			const logPath = join(this.workingDir, channelId, "log.jsonl");
+		for (const channel of this.registry.getAllChannels()) {
+			const logPath = join(this.workingDir, channel.id, "log.jsonl");
 			if (existsSync(logPath)) {
-				channelsToBackfill.push([channelId, channel]);
+				channelsToBackfill.push([channel.id, channel]);
 			}
 		}
 
 		log.logBackfillStart(channelsToBackfill.length);
 
+		const CONCURRENCY = 5;
 		let totalMessages = 0;
-		for (const [channelId, channel] of channelsToBackfill) {
-			try {
-				const count = await this.backfillChannel(channelId);
-				if (count > 0) log.logBackfillChannel(channel.name, count);
-				totalMessages += count;
-			} catch (error) {
-				log.logWarning(`Failed to backfill #${channel.name}`, String(error));
+
+		for (let i = 0; i < channelsToBackfill.length; i += CONCURRENCY) {
+			const batch = channelsToBackfill.slice(i, i + CONCURRENCY);
+			const results = await Promise.allSettled(
+				batch.map(([channelId]) => this.backfillChannel(channelId)),
+			);
+			for (let j = 0; j < results.length; j++) {
+				const [, channel] = batch[j];
+				const result = results[j];
+				if (result.status === "fulfilled") {
+					if (result.value > 0) log.logBackfillChannel(channel.name, result.value);
+					totalMessages += result.value;
+				} else {
+					log.logWarning(`Failed to backfill #${channel.name}`, String(result.reason));
+				}
 			}
 		}
 
@@ -1282,65 +1147,6 @@ export class SlackBot {
 	// Private - Fetch Users/Channels
 	// ==========================================================================
 
-	private async fetchUsers(): Promise<void> {
-		let cursor: string | undefined;
-		do {
-			const result = await this.webClient.users.list({ limit: 200, cursor });
-			const members = result.members as
-				| Array<{ id?: string; name?: string; real_name?: string; deleted?: boolean }>
-				| undefined;
-			if (members) {
-				for (const u of members) {
-					if (u.id && u.name && !u.deleted) {
-						this.users.set(u.id, { id: u.id, userName: u.name, displayName: u.real_name || u.name });
-					}
-				}
-			}
-			cursor = result.response_metadata?.next_cursor;
-		} while (cursor);
-	}
-
-	private async fetchChannels(): Promise<void> {
-		// Fetch public/private channels
-		let cursor: string | undefined;
-		do {
-			const result = await this.webClient.conversations.list({
-				types: "public_channel,private_channel",
-				exclude_archived: true,
-				limit: 200,
-				cursor,
-			});
-			const channels = result.channels as Array<{ id?: string; name?: string; is_member?: boolean }> | undefined;
-			if (channels) {
-				for (const c of channels) {
-					if (c.id && c.name && c.is_member) {
-						this.channels.set(c.id, { id: c.id, name: c.name });
-					}
-				}
-			}
-			cursor = result.response_metadata?.next_cursor;
-		} while (cursor);
-
-		// Also fetch DM channels (IMs)
-		cursor = undefined;
-		do {
-			const result = await this.webClient.conversations.list({
-				types: "im",
-				limit: 200,
-				cursor,
-			});
-			const ims = result.channels as Array<{ id?: string; user?: string }> | undefined;
-			if (ims) {
-				for (const im of ims) {
-					if (im.id) {
-						// Use user's name as channel name for DMs
-						const user = im.user ? this.users.get(im.user) : undefined;
-						const name = user ? `DM:${user.userName}` : `DM:${im.id}`;
-						this.channels.set(im.id, { id: im.id, name });
-					}
-				}
-			}
-			cursor = result.response_metadata?.next_cursor;
-		} while (cursor);
-	}
+	// fetchUsers() and fetchChannels() moved to infra/slack/registry.ts (SlackRegistry).
+	// Called via this.registry.fetchAll() in start().
 }

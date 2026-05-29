@@ -4,19 +4,21 @@ import { join, resolve } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { startApiServer } from "./api.js";
 import { startBridgeServer } from "./bridge.js";
+import { loadConfig } from "./config.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
+import { parseChannelKind } from "./channel-kind.js";
+import { SLACK_SPLIT_CHARS, splitIntoChunks } from "./slack-text.js";
 import { ChannelStore } from "./store.js";
 
 // ============================================================================
-// Config
+// Config — single env-read boundary for the whole process
 // ============================================================================
 
-const IRIS_SLACK_APP_TOKEN = process.env.IRIS_SLACK_APP_TOKEN ?? process.env.IRIS_SLACK_APP_TOKEN;
-const IRIS_SLACK_BOT_TOKEN = process.env.IRIS_SLACK_BOT_TOKEN ?? process.env.IRIS_SLACK_BOT_TOKEN;
+const config = loadConfig();
 
 interface ParsedArgs {
 	workingDir?: string;
@@ -35,11 +37,11 @@ function parseArgs(): ParsedArgs {
 	let workingDir: string | undefined;
 	let downloadChannelId: string | undefined;
 
-	// Iris: provider/model from env first, CLI flags override
-	let provider = process.env.IRIS_PROVIDER ?? "anthropic";
-	let model = process.env.IRIS_MODEL ?? "claude-sonnet-4-5";
-	let environment: "preview" | "prod" = (process.env.IRIS_ENV as "preview" | "prod") ?? "prod";
-	let apiPort = parseInt(process.env.IRIS_API_PORT ?? "0", 10);
+	// CLI flags override env-based config defaults
+	let provider = config.provider;
+	let model = config.model;
+	let environment = config.environment;
+	let apiPort = config.apiPort;
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -89,11 +91,11 @@ const parsedArgs = parseArgs();
 
 // Handle --download mode
 if (parsedArgs.downloadChannel) {
-	if (!IRIS_SLACK_BOT_TOKEN) {
-		console.error("Missing env: IRIS_SLACK_BOT_TOKEN");
+	if (!config.slack.botToken) {
+		console.error("Missing env: IRIS_SLACK_BOT_TOKEN (or set via config)");
 		process.exit(1);
 	}
-	await downloadChannel(parsedArgs.downloadChannel, IRIS_SLACK_BOT_TOKEN);
+	await downloadChannel(parsedArgs.downloadChannel, config.slack.botToken);
 	process.exit(0);
 }
 
@@ -115,7 +117,7 @@ const { workingDir, sandbox, provider, model, environment, apiPort } = {
 };
 
 // Slack is optional — sub-agents run bridge-only (no Slack connection needed)
-const SLACK_ENABLED = !!(IRIS_SLACK_APP_TOKEN && IRIS_SLACK_BOT_TOKEN);
+const SLACK_ENABLED = !!(config.slack.appToken && config.slack.botToken);
 
 await validateSandbox(sandbox);
 
@@ -140,7 +142,7 @@ function getState(channelId: string): ChannelState {
 		state = {
 			running: false,
 			runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model),
-			store: new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! }),
+			store: new ChannelStore({ workingDir, botToken: config.slack.botToken! }),
 			stopRequested: false,
 		};
 		channelStates.set(channelId, state);
@@ -152,35 +154,11 @@ function getState(channelId: string): ChannelState {
 // Create SlackContext adapter
 // ============================================================================
 
-// Slack recommends 4000 chars max for chat.update. We use 4000 as the split point.
-const SLACK_SPLIT_CHARS = 4000;
-
-/**
- * Split text into chunks at natural newline boundaries near maxChars.
- */
-function splitIntoChunks(text: string, maxChars: number): string[] {
-	if (text.length <= maxChars) return [text];
-	const chunks: string[] = [];
-	let remaining = text;
-	while (remaining.length > 0) {
-		if (remaining.length <= maxChars) {
-			chunks.push(remaining);
-			break;
-		}
-		const searchFrom = Math.floor(maxChars * 0.8);
-		const newlineIdx = remaining.lastIndexOf("\n", maxChars);
-		const cut = newlineIdx >= searchFrom ? newlineIdx + 1 : maxChars;
-		chunks.push(remaining.slice(0, cut).trimEnd());
-		remaining = remaining.slice(cut).trimStart();
-	}
-	return chunks;
-}
-
 function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
 	let messageTs: string | null = null;
 	const threadMessageTs: string[] = [];
 	let accumulatedText = "";
-	let isWorking = true;
+	const isSessionChannel = parseChannelKind(event.channel).kind === "session";
 	const workingIndicator = " ...";
 	let updatePromise = Promise.resolve();
 
@@ -204,12 +182,12 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		channels: slack.getAllChannels().map((c) => ({ id: c.id, name: c.name })),
 		users: slack.getAllUsers().map((u) => ({ id: u.id, userName: u.userName, displayName: u.displayName })),
 
-		// Accumulate text silently during streaming — thinking indicator stays visible.
-		// replaceMessage() posts the final clean result when generation is complete.
 		respond: async (text: string, shouldLog = true) => {
 			updatePromise = updatePromise.then(async () => {
 				try {
-					accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+					if (isSessionChannel) {
+						accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+					}
 					if (shouldLog && messageTs) {
 						slack.logBotResponse(event.channel, text, messageTs);
 					}
@@ -253,6 +231,11 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 					if (messageTs) {
 						const ts = await slack.postInThread(event.channel, messageTs, text);
 						threadMessageTs.push(ts);
+					} else {
+						// No thread anchor yet (setTyping failed) — create the main message now
+						// so subsequent respondInThread calls thread off it correctly.
+						log.logWarning("Slack respondInThread: no messageTs, posting as new message", text.substring(0, 80));
+						messageTs = await slack.postMessage(event.channel, text);
 					}
 				} catch (err) {
 					log.logWarning("Slack respondInThread error", err instanceof Error ? err.message : String(err));
@@ -279,11 +262,6 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 
 		uploadFile: async (filePath: string, title?: string) => {
 			await slack.uploadFile(event.channel, filePath, title);
-		},
-
-		setWorking: async (working: boolean) => {
-			// No-op — thinking indicator is managed by setTyping/replaceMessage.
-			isWorking = working;
 		},
 
 		deleteMessage: async () => {
@@ -379,15 +357,13 @@ const handler: IrisHandler = {
 
 			// Run the agent
 			await ctx.setTyping(true);
-			await ctx.setWorking(true);
 			const result = await state.runner.run(ctx as any, state.store);
-			await ctx.setWorking(false);
 
 			// Resolve pending session API request (POST /sessions/:id/message bridge pattern)
-			if (event.channel.startsWith("SESSION-")) {
-				const sessionId = event.channel.slice("SESSION-".length);
+			const channelKind = parseChannelKind(event.channel);
+			if (channelKind.kind === "session") {
 				const { resolveSessionRequest } = await import("./sessions.js");
-				resolveSessionRequest(sessionId, ctx.getAccumulatedText());
+				resolveSessionRequest(channelKind.sessionId, ctx.getAccumulatedText());
 			}
 
 			if (result.stopReason === "aborted" && state.stopRequested) {
@@ -430,20 +406,21 @@ let botRef: SlackBotClass | null = null;
 startApiServer(effectiveApiPort, workingDir, channelStates, () => botRef);
 
 // Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
-const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
-if (bridgePort > 0) {
-	startBridgeServer(bridgePort, workingDir);
+if (config.bridgePort > 0) {
+	startBridgeServer(config.bridgePort, workingDir);
 }
 
 if (SLACK_ENABLED) {
-	// Shared store for attachment downloads (also used per-channel in getState)
-	const sharedStore = new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! });
+	const sharedStore = new ChannelStore({ workingDir, botToken: config.slack.botToken! });
 
 	const bot = new SlackBotClass(handler, {
-		appToken: IRIS_SLACK_APP_TOKEN,
-		botToken: IRIS_SLACK_BOT_TOKEN,
+		appToken: config.slack.appToken!,
+		botToken: config.slack.botToken!,
 		workingDir,
 		store: sharedStore,
+		channelFilter: config.slack.channelFilter,
+		telegramBridgeUrl: config.telegramBridgeUrl,
+		passthroughApiKey: config.passthroughApiKey,
 	});
 	botRef = bot;
 

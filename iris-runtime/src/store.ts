@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync } from "fs";
 import { appendFile, writeFile } from "fs/promises";
 import { join } from "path";
 import * as log from "./log.js";
@@ -30,11 +30,15 @@ interface PendingDownload {
 	url: string;
 }
 
+// Maximum concurrent attachment downloads — enough to saturate a typical link
+// without overwhelming the Slack CDN rate limit.
+const MAX_CONCURRENT_DOWNLOADS = 3;
+
 export class ChannelStore {
 	private workingDir: string;
 	private botToken: string;
 	private pendingDownloads: PendingDownload[] = [];
-	private isDownloading = false;
+	private activeDownloads = 0;
 	// Track recently logged message timestamps to prevent duplicates
 	// Key: "channelId:ts", automatically cleaned up after 60 seconds
 	private recentlyLogged = new Map<string, number>();
@@ -159,22 +163,25 @@ export class ChannelStore {
 	}
 
 	/**
-	 * Get the timestamp of the last logged message for a channel
-	 * Returns null if no log exists
+	 * Get the timestamp of the last logged message for a channel.
+	 * Reads only the final 4 KB of the file instead of the full content —
+	 * O(1) regardless of log size.
 	 */
 	getLastTimestamp(channelId: string): string | null {
 		const logPath = join(this.workingDir, channelId, "log.jsonl");
-		if (!existsSync(logPath)) {
-			return null;
-		}
-
+		if (!existsSync(logPath)) return null;
 		try {
-			const content = readFileSync(logPath, "utf-8");
-			const lines = content.trim().split("\n");
-			if (lines.length === 0 || lines[0] === "") {
-				return null;
-			}
-			const lastLine = lines[lines.length - 1];
+			const fd = openSync(logPath, "r");
+			const { size } = fstatSync(fd);
+			if (size === 0) { closeSync(fd); return null; }
+			const readSize = Math.min(size, 4096);
+			const buf = Buffer.allocUnsafe(readSize);
+			readSync(fd, buf, 0, readSize, size - readSize);
+			closeSync(fd);
+			// Find the last complete JSON line in the tail
+			const tail = buf.toString("utf-8");
+			const lastLine = tail.split("\n").filter((l) => l.trim()).pop();
+			if (!lastLine) return null;
 			const message = JSON.parse(lastLine) as LoggedMessage;
 			return message.ts;
 		} catch {
@@ -183,27 +190,25 @@ export class ChannelStore {
 	}
 
 	/**
-	 * Process the download queue in the background
+	 * Drain the download queue with up to MAX_CONCURRENT_DOWNLOADS parallel fetches.
+	 * Each completed download immediately picks up the next queued item, so throughput
+	 * stays at MAX_CONCURRENT_DOWNLOADS as long as the queue is non-empty.
 	 */
-	private async processDownloadQueue(): Promise<void> {
-		if (this.isDownloading || this.pendingDownloads.length === 0) return;
-
-		this.isDownloading = true;
-
-		while (this.pendingDownloads.length > 0) {
-			const item = this.pendingDownloads.shift();
-			if (!item) break;
-
-			try {
-				await this.downloadAttachment(item.localPath, item.url);
-				// Success - could add success logging here if we have context
-			} catch (error) {
-				const errorMsg = error instanceof Error ? error.message : String(error);
-				log.logWarning(`Failed to download attachment`, `${item.localPath}: ${errorMsg}`);
-			}
+	private processDownloadQueue(): void {
+		while (this.activeDownloads < MAX_CONCURRENT_DOWNLOADS && this.pendingDownloads.length > 0) {
+			const item = this.pendingDownloads.shift()!;
+			this.activeDownloads++;
+			this.downloadAttachment(item.localPath, item.url)
+				.catch((err) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					log.logWarning("Failed to download attachment", `${item.localPath}: ${msg}`);
+				})
+				.finally(() => {
+					this.activeDownloads--;
+					// Re-enter the drainer — picks up any items added while this was in-flight.
+					this.processDownloadQueue();
+				});
 		}
-
-		this.isDownloading = false;
 	}
 
 	/**

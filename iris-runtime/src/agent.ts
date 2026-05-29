@@ -5,26 +5,30 @@ import {
 	AuthStorage,
 	convertToLlm,
 	createExtensionRuntime,
-	formatSkillsForPrompt,
-	loadSkillsFromDir,
 	ModelRegistry,
 	type ResourceLoader,
 	SessionManager,
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
-import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
+import { dirname, join } from "path";
+import type { AgentRegistry } from "./bridge.js";
+import { parseChannelKind } from "./channel-kind.js";
 import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
+import {
+	buildSystemPrompt,
+	formatConstitution,
+	getMemory,
+	loadIrisSkills,
+} from "./infra/agent/system-prompt.js";
 import * as log from "./log.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
+import { SLACK_MAX_CHARS, splitIntoChunks } from "./slack-text.js";
 import type { ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
-
-// Model is now configurable via getOrCreateRunner() — no longer hardcoded here.
 
 export interface PendingMessage {
 	userName: string;
@@ -46,18 +50,6 @@ export interface AgentRunner {
 	reset(): void;
 }
 
-async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
-	const key = await authStorage.getApiKey("anthropic");
-	if (!key) {
-		throw new Error(
-			"No API key found for anthropic.\n\n" +
-				"Set an API key environment variable, or use /login with Anthropic and link to auth.json from " +
-				join(homedir(), ".pi", "iris", "auth.json"),
-		);
-	}
-	return key;
-}
-
 const IMAGE_MIME_TYPES: Record<string, string> = {
 	jpg: "image/jpeg",
 	jpeg: "image/jpeg",
@@ -70,306 +62,8 @@ function getImageMimeType(filename: string): string | undefined {
 	return IMAGE_MIME_TYPES[filename.toLowerCase().split(".").pop() || ""];
 }
 
-/**
- * Load the Iris constitution from CONSTITUTION.md in the workspace.
- * This is a read-only, append-only system prompt section that Iris cannot overwrite.
- * Returns empty string if no constitution file exists.
- */
-function loadConstitution(workspaceDir: string): string {
-	const constitutionPath = join(workspaceDir, "CONSTITUTION.md");
-	if (!existsSync(constitutionPath)) return "";
-	try {
-		const content = readFileSync(constitutionPath, "utf-8").trim();
-		if (!content) return "";
-		// Inject today's date so agents can reason about relative dates
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-		const today = new Date().toLocaleDateString(undefined, {
-			weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: tz
-		});
-		const dateInjection = `\n\n> **Today's date:** ${today}`;
-		return `## Constitution (read-only — set by operators, not editable by Iris)\n${content}${dateInjection}`;
-	} catch (error) {
-		log.logWarning("Failed to read CONSTITUTION.md", `${constitutionPath}: ${error}`);
-		return "";
-	}
-}
-
-function getMemory(channelDir: string): string {
-	const parts: string[] = [];
-
-	// Read workspace-level memory (shared across all channels)
-	const workspaceMemoryPath = join(channelDir, "..", "MEMORY.md");
-	if (existsSync(workspaceMemoryPath)) {
-		try {
-			const content = readFileSync(workspaceMemoryPath, "utf-8").trim();
-			if (content) {
-				parts.push(`### Global Workspace Memory\n${content}`);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read workspace memory", `${workspaceMemoryPath}: ${error}`);
-		}
-	}
-
-	// Read channel-specific memory
-	const channelMemoryPath = join(channelDir, "MEMORY.md");
-	if (existsSync(channelMemoryPath)) {
-		try {
-			const content = readFileSync(channelMemoryPath, "utf-8").trim();
-			if (content) {
-				parts.push(`### Channel-Specific Memory\n${content}`);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read channel memory", `${channelMemoryPath}: ${error}`);
-		}
-	}
-
-	if (parts.length === 0) {
-		return "(no working memory yet)";
-	}
-
-	return parts.join("\n\n");
-}
-
-function loadIrisSkills(channelDir: string, workspacePath: string): Skill[] {
-	const skillMap = new Map<string, Skill>();
-
-	// channelDir is the host path (e.g., /Users/.../data/C0A34FL8PMH)
-	// hostWorkspacePath is the parent directory on host
-	// workspacePath is the container path (e.g., /workspace)
-	const hostWorkspacePath = join(channelDir, "..");
-
-	// Helper to translate host paths to container paths
-	const translatePath = (hostPath: string): string => {
-		if (hostPath.startsWith(hostWorkspacePath)) {
-			return workspacePath + hostPath.slice(hostWorkspacePath.length);
-		}
-		return hostPath;
-	};
-
-	// Load workspace-level skills (global)
-	const workspaceSkillsDir = join(hostWorkspacePath, "skills");
-	for (const skill of loadSkillsFromDir({ dir: workspaceSkillsDir, source: "workspace" }).skills) {
-		// Translate paths to container paths for system prompt
-		skill.filePath = translatePath(skill.filePath);
-		skill.baseDir = translatePath(skill.baseDir);
-		skillMap.set(skill.name, skill);
-	}
-
-	// Load channel-specific skills (override workspace skills on collision)
-	const channelSkillsDir = join(channelDir, "skills");
-	for (const skill of loadSkillsFromDir({ dir: channelSkillsDir, source: "channel" }).skills) {
-		skill.filePath = translatePath(skill.filePath);
-		skill.baseDir = translatePath(skill.baseDir);
-		skillMap.set(skill.name, skill);
-	}
-
-	return Array.from(skillMap.values());
-}
-
-function buildSystemPrompt(
-	workspacePath: string,
-	channelId: string,
-	memory: string,
-	constitution: string,
-	sandboxConfig: SandboxConfig,
-	channels: ChannelInfo[],
-	users: UserInfo[],
-	skills: Skill[],
-	agents: AgentRegistry = {},
-): string {
-	const channelPath = `${workspacePath}/${channelId}`;
-	const isDocker = sandboxConfig.type === "docker";
-
-	// Format channel mappings
-	const channelMappings =
-		channels.length > 0 ? channels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
-
-	// Format user mappings
-	const userMappings =
-		users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
-
-	const envDescription = isDocker
-		? `You are running inside a Docker container (Alpine Linux).
-- Bash working directory: / (use cd or absolute paths)
-- Install tools with: apk add <package>
-- Your changes persist across sessions`
-		: `You are running directly on the host machine.
-- Bash working directory: ${process.cwd()}
-- Be careful with system modifications`;
-
-	const constitutionSection = constitution ? `\n\n${constitution}` : "";
-
-	return `You are Iris, a Slack-connected orchestrator for specialized sub-agents. Be concise. No emojis.${constitutionSection}
-
-## Context
-- For the current date/time, use: date
-- You have access to previous conversation context including tool results from prior turns.
-- For older history beyond your context, search log.jsonl (contains user messages and your final responses, but not tool results).
-
-## Slack Formatting (mrkdwn, NOT Markdown)
-Bold: *text*, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: <url|text>
-Do NOT use **double asterisks** or [markdown](links).
-
-## Slack IDs
-Channels: ${channelMappings}
-
-Users: ${userMappings}
-
-When mentioning users, use <@username> format (e.g., <@mario>).
-
-## Environment
-${envDescription}
-
-## Workspace Layout
-${workspacePath}/
-├── MEMORY.md                    # Global memory (all channels)
-├── skills/                      # Global CLI tools you create
-└── ${channelId}/                # This channel
-    ├── MEMORY.md                # Channel-specific memory
-    ├── log.jsonl                # Message history (no tool results)
-    ├── attachments/             # User-shared files
-    ├── scratch/                 # Your working directory
-    └── skills/                  # Channel-specific tools
-
-## Skills (Custom CLI Tools)
-You can create reusable CLI tools for recurring tasks (email, APIs, data processing, etc.).
-
-### Creating Skills
-Store in \`${workspacePath}/skills/<name>/\` (global) or \`${channelPath}/skills/<name>/\` (channel-specific).
-Each skill directory needs a \`SKILL.md\` with YAML frontmatter:
-
-\`\`\`markdown
----
-name: skill-name
-description: Short description of what this skill does
----
-
-# Skill Name
-
-Usage instructions, examples, etc.
-Scripts are in: {baseDir}/
-\`\`\`
-
-\`name\` and \`description\` are required. Use \`{baseDir}\` as placeholder for the skill's directory path.
-
-### Available Skills
-${skills.length > 0 ? formatSkillsForPrompt(skills) : "(no skills installed yet)"}
-
-## Sub-Agents
-${Object.keys(agents).length > 0
-	? `Specialized sub-agents you can delegate to via their bridge HTTP API. Route requests based on *intent* — no @mention required from the user. When a user's message clearly matches a sub-agent's domain, call its bridge via bash and return its response.
-
-${Object.entries(agents).map(([name, entry]) => `### ${name}
-Description: ${entry.description ?? "(no description)"}
-Bridge: \`curl -s -X POST ${entry.bridge_url}/bridge -H 'Content-Type: application/json' -d '{"text":"<query>","user":"<username>"}'  | jq -r '.text'\``).join("\n\n")}
-
-Only delegate when the user's intent clearly matches a sub-agent's domain. Handle general questions yourself.`
-	: "(no sub-agents configured)"}
-
-## Events
-You can schedule events that wake you up at specific times or when external things happen. Events are JSON files in \`${workspacePath}/events/\`.
-
-### Event Types
-
-**Immediate** - Triggers as soon as harness sees the file. Use in scripts/webhooks to signal external events.
-\`\`\`json
-{"type": "immediate", "channelId": "${channelId}", "text": "New GitHub issue opened"}
-\`\`\`
-
-**One-shot** - Triggers once at a specific time. Use for reminders.
-\`\`\`json
-{"type": "one-shot", "channelId": "${channelId}", "text": "Remind Mario about dentist", "at": "2025-12-15T09:00:00+01:00"}
-\`\`\`
-
-**Periodic** - Triggers on a cron schedule. Use for recurring tasks.
-\`\`\`json
-{"type": "periodic", "channelId": "${channelId}", "text": "Check inbox and summarize", "schedule": "0 9 * * 1-5", "timezone": "${Intl.DateTimeFormat().resolvedOptions().timeZone}"}
-\`\`\`
-
-### Cron Format
-\`minute hour day-of-month month day-of-week\`
-- \`0 9 * * *\` = daily at 9:00
-- \`0 9 * * 1-5\` = weekdays at 9:00
-- \`30 14 * * 1\` = Mondays at 14:30
-- \`0 0 1 * *\` = first of each month at midnight
-
-### Timezones
-All \`at\` timestamps must include offset (e.g., \`+01:00\`). Periodic events use IANA timezone names. The harness runs in ${Intl.DateTimeFormat().resolvedOptions().timeZone}. When users mention times without timezone, assume ${Intl.DateTimeFormat().resolvedOptions().timeZone}.
-
-### Creating Events
-Use unique filenames to avoid overwriting existing events. Include a timestamp or random suffix:
-\`\`\`bash
-cat > ${workspacePath}/events/dentist-reminder-$(date +%s).json << 'EOF'
-{"type": "one-shot", "channelId": "${channelId}", "text": "Dentist tomorrow", "at": "2025-12-14T09:00:00+01:00"}
-EOF
-\`\`\`
-Or check if file exists first before creating.
-
-### Managing Events
-- List: \`ls ${workspacePath}/events/\`
-- View: \`cat ${workspacePath}/events/foo.json\`
-- Delete/cancel: \`rm ${workspacePath}/events/foo.json\`
-
-### When Events Trigger
-You receive a message like:
-\`\`\`
-[EVENT:dentist-reminder.json:one-shot:2025-12-14T09:00:00+01:00] Dentist tomorrow
-\`\`\`
-Immediate and one-shot events auto-delete after triggering. Periodic events persist until you delete them.
-
-### Silent Completion
-For periodic events where there's nothing to report, respond with just \`[SILENT]\` (no other text). This deletes the status message and posts nothing to Slack. Use this to avoid spamming the channel when periodic checks find nothing actionable.
-
-### Debouncing
-When writing programs that create immediate events (email watchers, webhook handlers, etc.), always debounce. If 50 emails arrive in a minute, don't create 50 immediate events. Instead collect events over a window and create ONE immediate event summarizing what happened, or just signal "new activity, check inbox" rather than per-item events. Or simpler: use a periodic event to check for new items every N minutes instead of immediate events.
-
-### Limits
-Maximum 5 events can be queued. Don't create excessive immediate or periodic events.
-
-## Memory
-Write to MEMORY.md files to persist context across conversations.
-- Global (${workspacePath}/MEMORY.md): skills, preferences, project info
-- Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
-Update when you learn something important or when asked to remember something.
-
-### Current Memory
-${memory}
-
-## System Configuration Log
-Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
-- Installed packages (apk add, npm install, pip install)
-- Environment variables set
-- Config files modified (~/.gitconfig, cron jobs, etc.)
-- Skill dependencies installed
-
-Update this file whenever you modify the environment. On fresh container, read it first to restore your setup.
-
-## Log Queries (for older history)
-Format: \`{"date":"...","ts":"...","user":"...","userName":"...","text":"...","isBot":false}\`
-The log contains user messages and your final responses (not tool calls/results).
-${isDocker ? "Install jq: apk add jq" : ""}
-
-\`\`\`bash
-# Recent messages
-tail -30 log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text}'
-
-# Search for specific topic
-grep -i "topic" log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text}'
-
-# Messages from specific user
-grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text}'
-\`\`\`
-
-## Tools
-- bash: Run shell commands (primary tool). Install packages as needed.
-- read: Read files
-- write: Create/overwrite files
-- edit: Surgical file edits
-- attach: Share files to Slack
-
-Each tool requires a "label" parameter (shown to user).
-`;
-}
+// buildSystemPrompt, formatConstitution, getMemory, loadIrisSkills
+// live in infra/agent/system-prompt.ts — imported above.
 
 function truncate(text: string, maxLen: number): string {
 	if (text.length <= maxLen) return text;
@@ -453,10 +147,533 @@ export function getOrCreateRunner(
 	return runner;
 }
 
-/**
- * Create a new AgentRunner for a channel.
- * Sets up the session and subscribes to events once.
- */
+interface MtimeCache<T> { value: T; mtime: number }
+
+type RunQueue = {
+	enqueue(fn: () => Promise<void>, errorContext: string): void;
+	enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog?: boolean): void;
+};
+
+class Runner implements AgentRunner {
+	// ── stable (set in constructor, never reassigned) ──────────────────────────
+	private readonly channelId: string;
+	private readonly channelDir: string;
+	private readonly workspaceDir: string;
+	private readonly workspacePath: string;
+	private readonly sandboxConfig: SandboxConfig;
+	private readonly contextFile: string;
+	private readonly executor: ReturnType<typeof createExecutor>;
+	private readonly model: ReturnType<typeof getModel>;
+	private readonly getApiKey: () => Promise<string>;
+	private readonly sessionManager: SessionManager;
+	private readonly settingsManager: ReturnType<typeof createIrisSettingsManager>;
+	private readonly agent: Agent;
+	private readonly session: AgentSession;
+
+	// ── mtime caches ──────────────────────────────────────────────────────────
+	private constitutionCache: MtimeCache<string> | null = null;
+	private agentRegistryCache: MtimeCache<AgentRegistry> | null = null;
+	// Skills rarely change; cache and invalidate only when the skills dirs are modified.
+	private skillsCache: MtimeCache<Skill[]> | null = null;
+	// Memory changes when the agent writes MEMORY.md; cache and invalidate on mtime.
+	private memoryCache: MtimeCache<string> | null = null;
+
+	// ── per-run state (null/reset between runs) ───────────────────────────────
+	private runCtx: SlackContext | null = null;
+	private runLogCtx: { channelId: string; userName?: string; channelName?: string } | null = null;
+	private runQueue: RunQueue | null = null;
+	private readonly pendingTools = new Map<string, { toolName: string; args: unknown; startTime: number }>();
+	private totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	private stopReason = "stop";
+	private errorMessage: string | undefined;
+
+	constructor(
+		sandboxConfig: SandboxConfig,
+		channelId: string,
+		channelDir: string,
+		provider: string,
+		modelId: string,
+	) {
+		this.channelId = channelId;
+		this.channelDir = channelDir;
+		this.executor = createExecutor(sandboxConfig, channelId);
+		this.workspaceDir = dirname(channelDir);
+		this.workspacePath = this.executor.getWorkspacePath(this.workspaceDir);
+		this.sandboxConfig = sandboxConfig;
+
+		const tools = createIrisTools(this.executor);
+
+		const authStorage = AuthStorage.create(join(homedir(), ".pi", "iris", "auth.json"));
+		const workspaceModelsJson = join(this.workspaceDir, "models.json");
+		const modelRegistry = ModelRegistry.create(
+			authStorage,
+			existsSync(workspaceModelsJson) ? workspaceModelsJson : undefined,
+		);
+
+		this.model = (() => {
+			const found = modelRegistry.find(provider, modelId);
+			if (found) {
+				log.logInfo(`[${channelId}] Using model from registry: ${provider}/${modelId}`);
+				return found;
+			}
+			log.logWarning(`[${channelId}] Model ${provider}/${modelId} not in registry, trying built-in getModel()`);
+			try {
+				return getModel(provider as Parameters<typeof getModel>[0], modelId as Parameters<typeof getModel>[1]);
+			} catch {
+				throw new Error(
+					`Model '${provider}/${modelId}' not found in registry or built-ins. ` +
+					`Check models.json at ${workspaceModelsJson} or use a known provider.`,
+				);
+			}
+		})();
+
+		this.getApiKey = async (): Promise<string> => {
+			const auth = await modelRegistry.getApiKeyAndHeaders(this.model);
+			if (auth.ok && auth.apiKey) return auth.apiKey;
+			const envFallback = process.env[`${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`];
+			if (envFallback) return envFallback;
+			throw new Error(
+				`No API key found for provider '${provider}'. ` +
+				`Set ${provider.toUpperCase().replace(/-/g, "_")}_API_KEY env var or configure auth.`,
+			);
+		};
+
+		const memory = getMemory(channelDir);
+		const constitution = this.getCachedConstitution();
+		const skills = loadIrisSkills(channelDir, this.workspacePath);
+		const agents = this.getCachedAgentRegistry();
+		const systemPrompt = buildSystemPrompt({
+			workspacePath: this.workspacePath,
+			channelId,
+			memory,
+			constitution,
+			sandboxConfig,
+			channels: [],
+			users: [],
+			skills,
+			agents,
+		});
+
+		this.contextFile = join(channelDir, "context.jsonl");
+		this.sessionManager = SessionManager.open(this.contextFile, channelDir);
+		this.settingsManager = createIrisSettingsManager(join(channelDir, ".."));
+
+		this.agent = new Agent({
+			initialState: { systemPrompt, model: this.model, thinkingLevel: "off", tools },
+			convertToLlm,
+			getApiKey: this.getApiKey,
+		});
+
+		const loadedSession = this.sessionManager.buildSessionContext();
+		if (loadedSession.messages.length > 0) {
+			this.agent.state.messages = loadedSession.messages;
+			log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
+		}
+
+		const resourceLoader: ResourceLoader = {
+			getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+			getSkills: () => ({ skills: [], diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getSystemPrompt: () => systemPrompt,
+			getAppendSystemPrompt: () => [],
+			extendResources: () => {},
+			reload: async () => {},
+		};
+
+		this.session = new AgentSession({
+			agent: this.agent,
+			sessionManager: this.sessionManager,
+			settingsManager: this.settingsManager,
+			cwd: process.cwd(),
+			modelRegistry,
+			resourceLoader,
+			baseToolsOverride: Object.fromEntries(tools.map((t) => [t.name, t])),
+		});
+
+		this.setupEventSubscription();
+	}
+
+	// ── private helpers ────────────────────────────────────────────────────────
+
+	private getCachedConstitution(): string {
+		const path = join(this.workspaceDir, "CONSTITUTION.md");
+		try {
+			const mtime = statSync(path).mtimeMs;
+			if (this.constitutionCache && this.constitutionCache.mtime === mtime) {
+				return formatConstitution(this.constitutionCache.value);
+			}
+			const content = readFileSync(path, "utf-8").trim();
+			if (!content) return "";
+			this.constitutionCache = { value: content, mtime };
+			return formatConstitution(content);
+		} catch {
+			return "";
+		}
+	}
+
+	private getCachedAgentRegistry(): AgentRegistry {
+		const path = join(this.workspaceDir, "agents.json");
+		try {
+			const mtime = statSync(path).mtimeMs;
+			if (this.agentRegistryCache && this.agentRegistryCache.mtime === mtime) return this.agentRegistryCache.value;
+			const value = JSON.parse(readFileSync(path, "utf-8")) as AgentRegistry;
+			this.agentRegistryCache = { value, mtime };
+			return value;
+		} catch {
+			return {};
+		}
+	}
+
+	private getCachedSkills(): Skill[] {
+		// Invalidate when either skills directory is touched (new skill added/removed).
+		const workspaceDir = join(this.workspaceDir, "skills");
+		const channelDir = join(this.channelDir, "skills");
+		let mtime = 0;
+		try { mtime = Math.max(mtime, statSync(workspaceDir).mtimeMs); } catch { /* dir absent */ }
+		try { mtime = Math.max(mtime, statSync(channelDir).mtimeMs); } catch { /* dir absent */ }
+		if (this.skillsCache && this.skillsCache.mtime === mtime) return this.skillsCache.value;
+		const value = loadIrisSkills(this.channelDir, this.workspacePath);
+		this.skillsCache = { value, mtime };
+		return value;
+	}
+
+	private getCachedMemory(): string {
+		// Invalidate when either MEMORY.md file is modified by the agent.
+		const workspaceMem = join(this.workspaceDir, "MEMORY.md");
+		const channelMem = join(this.channelDir, "MEMORY.md");
+		let mtime = 0;
+		try { mtime = Math.max(mtime, statSync(workspaceMem).mtimeMs); } catch { /* absent */ }
+		try { mtime = Math.max(mtime, statSync(channelMem).mtimeMs); } catch { /* absent */ }
+		if (this.memoryCache && this.memoryCache.mtime === mtime) return this.memoryCache.value;
+		const value = getMemory(this.channelDir);
+		this.memoryCache = { value, mtime };
+		return value;
+	}
+
+	private async doCompact(): Promise<{ tokensBefore: number } | null> {
+		try {
+			const result = await this.session.compact();
+			const reloaded = this.sessionManager.buildSessionContext();
+			if (reloaded.messages.length > 0) this.agent.state.messages = reloaded.messages;
+			return result ? { tokensBefore: result.tokensBefore } : null;
+		} catch (err) {
+			log.logWarning(`[${this.channelId}] compact() failed`, err instanceof Error ? err.message : String(err));
+			return null;
+		}
+	}
+
+	private setupEventSubscription(): void {
+		this.session.subscribe(async (event) => {
+			if (!this.runCtx || !this.runLogCtx || !this.runQueue) return;
+
+			const ctx = this.runCtx;
+			const logCtx = this.runLogCtx;
+			const queue = this.runQueue;
+			const pendingTools = this.pendingTools;
+			const isSessionChannel = parseChannelKind(this.channelId).kind === "session";
+
+			if (event.type === "tool_execution_start") {
+				const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
+				const label = (agentEvent.args as { label?: string }).label || agentEvent.toolName;
+				pendingTools.set(agentEvent.toolCallId, { toolName: agentEvent.toolName, args: agentEvent.args, startTime: Date.now() });
+				log.logToolStart(logCtx, agentEvent.toolName, label, agentEvent.args as Record<string, unknown>);
+				if (!isSessionChannel) queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
+
+			} else if (event.type === "tool_execution_end") {
+				const agentEvent = event as AgentEvent & { type: "tool_execution_end" };
+				const resultStr = extractToolResultText(agentEvent.result);
+				const pending = pendingTools.get(agentEvent.toolCallId);
+				pendingTools.delete(agentEvent.toolCallId);
+				const durationMs = pending ? Date.now() - pending.startTime : 0;
+
+				if (agentEvent.isError) log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
+				else log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
+
+				const label = pending?.args ? (pending.args as { label?: string }).label : undefined;
+				const argsFormatted = pending ? formatToolArgsForSlack(agentEvent.toolName, pending.args as Record<string, unknown>) : "(args not found)";
+				const duration = (durationMs / 1000).toFixed(1);
+				let threadMessage = `*${agentEvent.isError ? "✗" : "✓"} ${agentEvent.toolName}*`;
+				if (label) threadMessage += `: ${label}`;
+				threadMessage += ` (${duration}s)\n`;
+				if (argsFormatted) threadMessage += `\`\`\`\n${argsFormatted}\n\`\`\`\n`;
+				threadMessage += `*Result:*\n\`\`\`\n${resultStr}\n\`\`\``;
+				queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+				if (agentEvent.isError && !isSessionChannel) queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
+
+			} else if (event.type === "message_start") {
+				const agentEvent = event as AgentEvent & { type: "message_start" };
+				if (agentEvent.message.role === "assistant") log.logResponseStart(logCtx);
+
+			} else if (event.type === "message_end") {
+				const agentEvent = event as AgentEvent & { type: "message_end" };
+				if (agentEvent.message.role === "assistant") {
+					const assistantMsg = agentEvent.message as any;
+					if (assistantMsg.stopReason) this.stopReason = assistantMsg.stopReason;
+					if (assistantMsg.errorMessage) this.errorMessage = assistantMsg.errorMessage;
+					if (assistantMsg.usage) {
+						this.totalUsage.input += assistantMsg.usage.input;
+						this.totalUsage.output += assistantMsg.usage.output;
+						this.totalUsage.cacheRead += assistantMsg.usage.cacheRead;
+						this.totalUsage.cacheWrite += assistantMsg.usage.cacheWrite;
+						this.totalUsage.cost.input += assistantMsg.usage.cost.input;
+						this.totalUsage.cost.output += assistantMsg.usage.cost.output;
+						this.totalUsage.cost.cacheRead += assistantMsg.usage.cost.cacheRead;
+						this.totalUsage.cost.cacheWrite += assistantMsg.usage.cost.cacheWrite;
+						this.totalUsage.cost.total += assistantMsg.usage.cost.total;
+					}
+					const thinkingParts: string[] = [];
+					const textParts: string[] = [];
+					for (const part of agentEvent.message.content) {
+						if (part.type === "thinking") thinkingParts.push((part as any).thinking);
+						else if (part.type === "text") textParts.push((part as any).text);
+					}
+					for (const thinking of thinkingParts) {
+						log.logThinking(logCtx, thinking);
+						if (!isSessionChannel) {
+							queue.enqueueMessage(`_${thinking}_`, "main", "thinking main");
+							queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
+						}
+					}
+					const text = textParts.join("\n");
+					if (text.trim()) {
+						log.logResponse(logCtx, text);
+						queue.enqueueMessage(text, "main", "response main");
+					}
+				}
+
+			} else if (event.type === "compaction_start") {
+				log.logInfo(`Compaction started (reason: ${event.reason})`);
+				if (!isSessionChannel) queue.enqueue(() => ctx.respond("_Compacting context..._", false), "compaction start");
+
+			} else if (event.type === "compaction_end") {
+				if (event.result) log.logInfo(`Compaction complete: ${event.result.tokensBefore} tokens compacted`);
+				else if (event.aborted) log.logInfo("Compaction aborted");
+
+			} else if (event.type === "auto_retry_start") {
+				const retryEvent = event as any;
+				log.logWarning(`Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})`, retryEvent.errorMessage);
+				if (!isSessionChannel) queue.enqueue(() => ctx.respond(`_Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})..._`, false), "retry");
+			}
+		});
+	}
+
+	// ── AgentRunner ────────────────────────────────────────────────────────────
+
+	async run(
+		ctx: SlackContext,
+		_store: ChannelStore,
+		_pendingMessages?: PendingMessage[],
+	): Promise<{ stopReason: string; errorMessage?: string }> {
+		await mkdir(this.channelDir, { recursive: true });
+
+		const syncedCount = syncLogToSessionManager(this.sessionManager, this.channelDir, ctx.message.ts);
+		if (syncedCount > 0) log.logInfo(`[${this.channelId}] Synced ${syncedCount} messages from log.jsonl`);
+
+		const reloadedSession = this.sessionManager.buildSessionContext();
+		if (reloadedSession.messages.length > 0) {
+			this.agent.state.messages = reloadedSession.messages;
+			log.logInfo(`[${this.channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
+		}
+
+		// All four inputs are mtime-cached — only re-read when files actually change.
+		const memory = this.getCachedMemory();
+		const constitution = this.getCachedConstitution();
+		let skills = this.getCachedSkills();
+		if (parseChannelKind(this.channelId).kind === "session") {
+			skills = skills.filter((s) => s.name !== "spawn-agent");
+		}
+		const agents = this.getCachedAgentRegistry();
+		const systemPrompt = buildSystemPrompt({
+			workspacePath: this.workspacePath,
+			channelId: this.channelId,
+			memory,
+			constitution,
+			sandboxConfig: this.sandboxConfig,
+			channels: ctx.channels,
+			users: ctx.users,
+			skills,
+			agents,
+		});
+		this.session.agent.state.systemPrompt = systemPrompt;
+
+		setUploadFunction(async (filePath: string, title?: string) => {
+			const hostPath = translateToHostPath(filePath, this.channelDir, this.workspacePath, this.channelId);
+			await ctx.uploadFile(hostPath, title);
+		});
+
+		// Reset per-run state
+		this.runCtx = ctx;
+		this.runLogCtx = { channelId: ctx.message.channel, userName: ctx.message.userName, channelName: ctx.channelName };
+		this.pendingTools.clear();
+		this.totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+		this.stopReason = "stop";
+		this.errorMessage = undefined;
+
+		// Per-run queue — captures ctx and queueChain for this run
+		let queueChain = Promise.resolve();
+		const queue: RunQueue = {
+			enqueue: (fn, errorContext) => {
+				queueChain = queueChain.then(async () => {
+					try {
+						await fn();
+					} catch (err) {
+						const errMsg = err instanceof Error ? err.message : String(err);
+						log.logWarning(`Slack API error (${errorContext})`, errMsg);
+						try { await ctx.respondInThread(`_Error: ${errMsg}_`); } catch { /* ignore */ }
+					}
+				});
+			},
+			enqueueMessage: (text, target, errorContext, doLog = true) => {
+				for (const part of splitIntoChunks(text, SLACK_MAX_CHARS)) {
+					queue.enqueue(() => (target === "main" ? ctx.respond(part, doLog) : ctx.respondInThread(part)), errorContext);
+				}
+			},
+		};
+		this.runQueue = queue;
+
+		log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
+		log.logInfo(`Channels: ${ctx.channels.length}, Users: ${ctx.users.length}`);
+
+		const now = new Date();
+		const pad = (n: number) => n.toString().padStart(2, "0");
+		const offset = -now.getTimezoneOffset();
+		const offsetSign = offset >= 0 ? "+" : "-";
+		const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
+		const offsetMins = pad(Math.abs(offset) % 60);
+		const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
+		let userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
+
+		const imageAttachments: ImageContent[] = [];
+		const nonImagePaths: string[] = [];
+		for (const a of ctx.message.attachments || []) {
+			const fullPath = `${this.workspacePath}/${a.local}`;
+			const mimeType = getImageMimeType(a.local);
+			if (mimeType && existsSync(fullPath)) {
+				try {
+					imageAttachments.push({ type: "image", mimeType, data: readFileSync(fullPath).toString("base64") });
+				} catch {
+					nonImagePaths.push(fullPath);
+				}
+			} else {
+				nonImagePaths.push(fullPath);
+			}
+		}
+		if (nonImagePaths.length > 0) userMessage += `\n\n<slack_attachments>\n${nonImagePaths.join("\n")}\n</slack_attachments>`;
+
+		// Fire-and-forget debug dump — never block the LLM hot path.
+		// Compact JSON (no null,2) is ~40% smaller and serialises 3× faster on large contexts.
+		writeFile(
+			join(this.channelDir, "last_prompt.jsonl"),
+			JSON.stringify({ systemPrompt, messages: this.session.messages, newUserMessage: userMessage, imageAttachmentCount: imageAttachments.length }),
+		).catch(() => { /* debug dump — ignore write errors */ });
+
+		const LLM_TIMEOUT_MS = (Number(process.env.IRIS_LLM_TIMEOUT_SECS) || 300) * 1000;
+		let llmTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+		const llmTimeout = new Promise<never>((_, reject) => {
+			llmTimeoutHandle = setTimeout(() => {
+				log.logWarning(`[${this.channelId}] LLM timeout after ${LLM_TIMEOUT_MS / 1000}s — aborting run`);
+				this.session.agent.abort();
+				reject(new Error(`LLM response timeout after ${LLM_TIMEOUT_MS / 1000}s`));
+			}, LLM_TIMEOUT_MS);
+		});
+		try {
+			await Promise.race([
+				this.session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined),
+				llmTimeout,
+			]);
+		} catch (err) {
+			const errMsg = err instanceof Error ? err.message : String(err);
+			if (errMsg.includes("timeout")) {
+				queue.enqueue(() => ctx.replaceMessage("_Timed out waiting for LLM response. Please try again._"), "timeout");
+			} else {
+				throw err;
+			}
+		} finally {
+			clearTimeout(llmTimeoutHandle);
+		}
+
+		await queueChain;
+
+		if (this.stopReason === "error" && this.errorMessage) {
+			try {
+				await ctx.replaceMessage("_Sorry, something went wrong_");
+				await ctx.respondInThread(`_Error: ${this.errorMessage}_`);
+			} catch (err) {
+				log.logWarning("Failed to post error message", err instanceof Error ? err.message : String(err));
+			}
+		} else {
+			const lastAssistant = this.session.messages.filter((m) => m.role === "assistant").pop();
+			const finalText = lastAssistant?.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n") || "";
+
+			if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
+				try {
+					await ctx.deleteMessage();
+					log.logInfo("Silent response - deleted message and thread");
+				} catch (err) {
+					log.logWarning("Failed to delete message for silent response", err instanceof Error ? err.message : String(err));
+				}
+			} else if (finalText.trim()) {
+				try {
+					await ctx.replaceMessage(finalText);
+				} catch (err) {
+					log.logWarning("Failed to replace message with final text", err instanceof Error ? err.message : String(err));
+				}
+			}
+		}
+
+		const contextWindow = this.model.contextWindow || 200000;
+		const lastAssistantMsg = this.session.messages.slice().reverse().find((m) => m.role === "assistant" && (m as any).stopReason !== "aborted") as any;
+		const contextTokens = lastAssistantMsg
+			? (lastAssistantMsg.usage.input ?? 0) + (lastAssistantMsg.usage.output ?? 0) + (lastAssistantMsg.usage.cacheRead ?? 0) + (lastAssistantMsg.usage.cacheWrite ?? 0)
+			: 0;
+
+		if (this.totalUsage.cost.total > 0) {
+			const summary = log.logUsageSummary(this.runLogCtx!, this.totalUsage, contextTokens, contextWindow);
+			queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
+			await queueChain;
+		}
+
+		if (contextTokens > 0 && contextTokens / contextWindow >= 0.7 && this.stopReason !== "aborted" && this.stopReason !== "error") {
+			const pct = Math.round((contextTokens / contextWindow) * 100);
+			log.logInfo(`[${this.channelId}] Auto-compacting: ${contextTokens}/${contextWindow} tokens (${pct}%)`);
+			const compactResult = await this.doCompact();
+			if (compactResult) {
+				await ctx.respondInThread(`_Context auto-compacted (${pct}% full — ${compactResult.tokensBefore.toLocaleString()} tokens summarised)_`);
+			}
+		}
+
+		this.runCtx = null;
+		this.runLogCtx = null;
+		this.runQueue = null;
+
+		return { stopReason: this.stopReason, errorMessage: this.errorMessage };
+	}
+
+	abort(): void {
+		this.session.abort();
+	}
+
+	async compact(): Promise<{ tokensBefore: number } | null> {
+		return this.doCompact();
+	}
+
+	reset(): void {
+		this.agent.reset();
+		void releaseExecutor(this.executor);
+		try {
+			writeFileSync(this.contextFile, "");
+			log.logInfo(`[${this.channelId}] Context reset — cleared ${this.contextFile}`);
+		} catch (err) {
+			log.logWarning(`[${this.channelId}] Failed to clear context file`, err instanceof Error ? err.message : String(err));
+		}
+	}
+}
+
 function createRunner(
 	sandboxConfig: SandboxConfig,
 	channelId: string,
@@ -464,579 +681,7 @@ function createRunner(
 	provider: string,
 	modelId: string,
 ): AgentRunner {
-	const executor = createExecutor(sandboxConfig, channelId);
-	const workspaceDir = channelDir.replace(`/${channelId}`, "");
-	const workspacePath = executor.getWorkspacePath(workspaceDir);
-
-	// Create tools
-	const tools = createIrisTools(executor);
-
-	// Create AuthStorage and ModelRegistry early so we can resolve custom providers.
-	// models.json from the workspace is passed so Foundry/custom providers are loaded.
-	// Auth stored outside workspace so agent can't access it.
-	const authStorage = AuthStorage.create(join(homedir(), ".pi", "iris", "auth.json"));
-	const workspaceModelsJson = join(workspaceDir, "models.json");
-	const modelRegistry = ModelRegistry.create(
-		authStorage,
-		existsSync(workspaceModelsJson) ? workspaceModelsJson : undefined,
-	);
-
-	// Resolve model from registry (handles built-in providers and custom providers from models.json).
-	// Fall back to getModel() for built-in-only providers if registry doesn't find it.
-	const model = (() => {
-		const found = modelRegistry.find(provider, modelId);
-		if (found) {
-			log.logInfo(`[${channelId}] Using model from registry: ${provider}/${modelId}`);
-			return found;
-		}
-		log.logWarning(`[${channelId}] Model ${provider}/${modelId} not in registry, trying built-in getModel()`);
-		try {
-			return getModel(provider as Parameters<typeof getModel>[0], modelId as Parameters<typeof getModel>[1]);
-		} catch {
-			throw new Error(
-				`Model '${provider}/${modelId}' not found in registry or built-ins. ` +
-					`Check models.json at ${workspaceModelsJson} or use a known provider.`,
-			);
-		}
-	})();
-
-	// getApiKey: ModelRegistry handles env var lookup + auth storage for any provider
-	const getApiKey = async (): Promise<string> => {
-		const auth = await modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok && auth.apiKey) return auth.apiKey;
-		// Fallback env var: FOUNDRY_E2_KEY, ANTHROPIC_API_KEY, etc.
-		const envFallback = process.env[`${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`];
-		if (envFallback) return envFallback;
-		throw new Error(
-			`No API key found for provider '${provider}'. ` +
-				`Set ${provider.toUpperCase().replace(/-/g, "_")}_API_KEY env var or configure auth.`,
-		);
-	};
-
-	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
-	const memory = getMemory(channelDir);
-	const constitution = loadConstitution(workspaceDir);
-	const skills = loadIrisSkills(channelDir, workspacePath);
-	const agents = loadAgentRegistry(workspaceDir);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, constitution, sandboxConfig, [], [], skills, agents);
-
-	// Create session manager and settings manager
-	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
-	const contextFile = join(channelDir, "context.jsonl");
-	const sessionManager = SessionManager.open(contextFile, channelDir);
-	const settingsManager = createIrisSettingsManager(join(channelDir, ".."));
-
-	// Create agent
-	const agent = new Agent({
-		initialState: {
-			systemPrompt,
-			model,
-			thinkingLevel: "off",
-			tools,
-		},
-		convertToLlm,
-		getApiKey,
-	});
-
-	// Load existing messages
-	const loadedSession = sessionManager.buildSessionContext();
-	if (loadedSession.messages.length > 0) {
-		agent.state.messages = loadedSession.messages;
-		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
-	}
-
-	const resourceLoader: ResourceLoader = {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => systemPrompt,
-		getAppendSystemPrompt: () => [],
-		extendResources: () => {},
-		reload: async () => {},
-	};
-
-	const baseToolsOverride = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-
-	// Create AgentSession wrapper
-	const session = new AgentSession({
-		agent,
-		sessionManager,
-		settingsManager,
-		cwd: process.cwd(),
-		modelRegistry,
-		resourceLoader,
-		baseToolsOverride,
-	});
-
-	// Mutable per-run state - event handler references this
-	const runState = {
-		ctx: null as SlackContext | null,
-		logCtx: null as { channelId: string; userName?: string; channelName?: string } | null,
-		queue: null as {
-			enqueue(fn: () => Promise<void>, errorContext: string): void;
-			enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog?: boolean): void;
-		} | null,
-		pendingTools: new Map<string, { toolName: string; args: unknown; startTime: number }>(),
-		totalUsage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		errorMessage: undefined as string | undefined,
-	};
-
-	// Subscribe to events ONCE
-	session.subscribe(async (event) => {
-		// Skip if no active run
-		if (!runState.ctx || !runState.logCtx || !runState.queue) return;
-
-		const { ctx, logCtx, queue, pendingTools } = runState;
-		const isSessionChannel = channelId.startsWith("SESSION-");
-
-		if (event.type === "tool_execution_start") {
-			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
-			const args = agentEvent.args as { label?: string };
-			const label = args.label || agentEvent.toolName;
-
-			pendingTools.set(agentEvent.toolCallId, {
-				toolName: agentEvent.toolName,
-				args: agentEvent.args,
-				startTime: Date.now(),
-			});
-
-			log.logToolStart(logCtx, agentEvent.toolName, label, agentEvent.args as Record<string, unknown>);
-			if (!isSessionChannel) {
-				queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
-			}
-		} else if (event.type === "tool_execution_end") {
-			const agentEvent = event as AgentEvent & { type: "tool_execution_end" };
-			const resultStr = extractToolResultText(agentEvent.result);
-			const pending = pendingTools.get(agentEvent.toolCallId);
-			pendingTools.delete(agentEvent.toolCallId);
-
-			const durationMs = pending ? Date.now() - pending.startTime : 0;
-
-			if (agentEvent.isError) {
-				log.logToolError(logCtx, agentEvent.toolName, durationMs, resultStr);
-			} else {
-				log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
-			}
-
-			// Post args + result to thread
-			const label = pending?.args ? (pending.args as { label?: string }).label : undefined;
-			const argsFormatted = pending
-				? formatToolArgsForSlack(agentEvent.toolName, pending.args as Record<string, unknown>)
-				: "(args not found)";
-			const duration = (durationMs / 1000).toFixed(1);
-			let threadMessage = `*${agentEvent.isError ? "✗" : "✓"} ${agentEvent.toolName}*`;
-			if (label) threadMessage += `: ${label}`;
-			threadMessage += ` (${duration}s)\n`;
-			if (argsFormatted) threadMessage += `\`\`\`\n${argsFormatted}\n\`\`\`\n`;
-			threadMessage += `*Result:*\n\`\`\`\n${resultStr}\n\`\`\``;
-
-			queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
-
-			if (agentEvent.isError && !isSessionChannel) {
-				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
-			}
-		} else if (event.type === "message_start") {
-			const agentEvent = event as AgentEvent & { type: "message_start" };
-			if (agentEvent.message.role === "assistant") {
-				log.logResponseStart(logCtx);
-			}
-		} else if (event.type === "message_end") {
-			const agentEvent = event as AgentEvent & { type: "message_end" };
-			if (agentEvent.message.role === "assistant") {
-				const assistantMsg = agentEvent.message as any;
-
-				if (assistantMsg.stopReason) {
-					runState.stopReason = assistantMsg.stopReason;
-				}
-				if (assistantMsg.errorMessage) {
-					runState.errorMessage = assistantMsg.errorMessage;
-				}
-
-				if (assistantMsg.usage) {
-					runState.totalUsage.input += assistantMsg.usage.input;
-					runState.totalUsage.output += assistantMsg.usage.output;
-					runState.totalUsage.cacheRead += assistantMsg.usage.cacheRead;
-					runState.totalUsage.cacheWrite += assistantMsg.usage.cacheWrite;
-					runState.totalUsage.cost.input += assistantMsg.usage.cost.input;
-					runState.totalUsage.cost.output += assistantMsg.usage.cost.output;
-					runState.totalUsage.cost.cacheRead += assistantMsg.usage.cost.cacheRead;
-					runState.totalUsage.cost.cacheWrite += assistantMsg.usage.cost.cacheWrite;
-					runState.totalUsage.cost.total += assistantMsg.usage.cost.total;
-				}
-
-				const content = agentEvent.message.content;
-				const thinkingParts: string[] = [];
-				const textParts: string[] = [];
-				for (const part of content) {
-					if (part.type === "thinking") {
-						thinkingParts.push((part as any).thinking);
-					} else if (part.type === "text") {
-						textParts.push((part as any).text);
-					}
-				}
-
-				const text = textParts.join("\n");
-
-				for (const thinking of thinkingParts) {
-					log.logThinking(logCtx, thinking);
-					if (!isSessionChannel) {
-						queue.enqueueMessage(`_${thinking}_`, "main", "thinking main");
-						queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
-					}
-				}
-
-				if (text.trim()) {
-					log.logResponse(logCtx, text);
-					queue.enqueueMessage(text, "main", "response main");
-					// Thread posting handled by replaceMessage() at end of generation
-				}
-			}
-		} else if (event.type === "compaction_start") {
-			log.logInfo(`Compaction started (reason: ${event.reason})`);
-			if (!isSessionChannel) {
-				queue.enqueue(() => ctx.respond("_Compacting context..._", false), "compaction start");
-			}
-		} else if (event.type === "compaction_end") {
-			if (event.result) {
-				log.logInfo(`Compaction complete: ${event.result.tokensBefore} tokens compacted`);
-			} else if (event.aborted) {
-				log.logInfo("Compaction aborted");
-			}
-		} else if (event.type === "auto_retry_start") {
-			const retryEvent = event as any;
-			log.logWarning(`Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})`, retryEvent.errorMessage);
-			if (!isSessionChannel) {
-				queue.enqueue(
-					() => ctx.respond(`_Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})..._`, false),
-					"retry",
-				);
-			}
-		}
-	});
-
-	// Slack message limit
-	const SLACK_MAX_LENGTH = 40000;
-	const splitForSlack = (text: string): string[] => {
-		if (text.length <= SLACK_MAX_LENGTH) return [text];
-		const parts: string[] = [];
-		let remaining = text;
-		let partNum = 1;
-		while (remaining.length > 0) {
-			const chunk = remaining.substring(0, SLACK_MAX_LENGTH - 50);
-			remaining = remaining.substring(SLACK_MAX_LENGTH - 50);
-			const suffix = remaining.length > 0 ? `\n_(continued ${partNum}...)_` : "";
-			parts.push(chunk + suffix);
-			partNum++;
-		}
-		return parts;
-	};
-
-	async function doCompact(): Promise<{ tokensBefore: number } | null> {
-		try {
-			const result = await session.compact();
-			const reloaded = sessionManager.buildSessionContext();
-			if (reloaded.messages.length > 0) {
-				agent.state.messages = reloaded.messages;
-			}
-			return result ? { tokensBefore: result.tokensBefore } : null;
-		} catch (err) {
-			log.logWarning(`[${channelId}] compact() failed`, err instanceof Error ? err.message : String(err));
-			return null;
-		}
-	}
-
-	return {
-		async run(
-			ctx: SlackContext,
-			_store: ChannelStore,
-			_pendingMessages?: PendingMessage[],
-		): Promise<{ stopReason: string; errorMessage?: string }> {
-			// Ensure channel directory exists
-			await mkdir(channelDir, { recursive: true });
-
-			// Sync messages from log.jsonl that arrived while we were offline or busy
-			// Exclude the current message (it will be added via prompt())
-			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
-			if (syncedCount > 0) {
-				log.logInfo(`[${channelId}] Synced ${syncedCount} messages from log.jsonl`);
-			}
-
-			// Reload messages from context.jsonl
-			// This picks up any messages synced above
-			const reloadedSession = sessionManager.buildSessionContext();
-			if (reloadedSession.messages.length > 0) {
-				agent.state.messages = reloadedSession.messages;
-				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
-			}
-
-			// Update system prompt with fresh memory, constitution, channel/user info, and skills
-			const memory = getMemory(channelDir);
-			const constitution = loadConstitution(workspaceDir);
-			let skills = loadIrisSkills(channelDir, workspacePath);
-			// SESSION- channels are non-admin (thread mode) — no agent spawning allowed
-			if (channelId.startsWith("SESSION-")) {
-				skills = skills.filter((s) => s.name !== "spawn-agent");
-			}
-			const agents = loadAgentRegistry(workspaceDir);
-			const systemPrompt = buildSystemPrompt(
-				workspacePath,
-				channelId,
-				memory,
-				constitution,
-				sandboxConfig,
-				ctx.channels,
-				ctx.users,
-				skills,
-				agents,
-			);
-			session.agent.state.systemPrompt = systemPrompt;
-
-			// Set up file upload function
-			setUploadFunction(async (filePath: string, title?: string) => {
-				const hostPath = translateToHostPath(filePath, channelDir, workspacePath, channelId);
-				await ctx.uploadFile(hostPath, title);
-			});
-
-			// Reset per-run state
-			runState.ctx = ctx;
-			runState.logCtx = {
-				channelId: ctx.message.channel,
-				userName: ctx.message.userName,
-				channelName: ctx.channelName,
-			};
-			runState.pendingTools.clear();
-			runState.totalUsage = {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			};
-			runState.stopReason = "stop";
-			runState.errorMessage = undefined;
-
-			// Create queue for this run
-			let queueChain = Promise.resolve();
-			runState.queue = {
-				enqueue(fn: () => Promise<void>, errorContext: string): void {
-					queueChain = queueChain.then(async () => {
-						try {
-							await fn();
-						} catch (err) {
-							const errMsg = err instanceof Error ? err.message : String(err);
-							log.logWarning(`Slack API error (${errorContext})`, errMsg);
-							try {
-								await ctx.respondInThread(`_Error: ${errMsg}_`);
-							} catch {
-								// Ignore
-							}
-						}
-					});
-				},
-				enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog = true): void {
-					const parts = splitForSlack(text);
-					for (const part of parts) {
-						this.enqueue(
-							() => (target === "main" ? ctx.respond(part, doLog) : ctx.respondInThread(part)),
-							errorContext,
-						);
-					}
-				},
-			};
-
-			// Log context info
-			log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
-			log.logInfo(`Channels: ${ctx.channels.length}, Users: ${ctx.users.length}`);
-
-			// Build user message with timestamp and username prefix
-			// Format: "[YYYY-MM-DD HH:MM:SS+HH:MM] [username]: message" so LLM knows when and who
-			const now = new Date();
-			const pad = (n: number) => n.toString().padStart(2, "0");
-			const offset = -now.getTimezoneOffset();
-			const offsetSign = offset >= 0 ? "+" : "-";
-			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
-			const offsetMins = pad(Math.abs(offset) % 60);
-			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
-			let userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
-
-			const imageAttachments: ImageContent[] = [];
-			const nonImagePaths: string[] = [];
-
-			for (const a of ctx.message.attachments || []) {
-				const fullPath = `${workspacePath}/${a.local}`;
-				const mimeType = getImageMimeType(a.local);
-
-				if (mimeType && existsSync(fullPath)) {
-					try {
-						imageAttachments.push({
-							type: "image",
-							mimeType,
-							data: readFileSync(fullPath).toString("base64"),
-						});
-					} catch {
-						nonImagePaths.push(fullPath);
-					}
-				} else {
-					nonImagePaths.push(fullPath);
-				}
-			}
-
-			if (nonImagePaths.length > 0) {
-				userMessage += `\n\n<slack_attachments>\n${nonImagePaths.join("\n")}\n</slack_attachments>`;
-			}
-
-			// Debug: write context to last_prompt.jsonl
-			const debugContext = {
-				systemPrompt,
-				messages: session.messages,
-				newUserMessage: userMessage,
-				imageAttachmentCount: imageAttachments.length,
-			};
-			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
-
-			// Wrap prompt with a timeout — if the LLM API hangs, abort after LLM_TIMEOUT_MS
-			const LLM_TIMEOUT_MS = (Number(process.env.IRIS_LLM_TIMEOUT_SECS) || 300) * 1000;
-			let llmTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
-			const llmTimeout = new Promise<never>((_, reject) => {
-				llmTimeoutHandle = setTimeout(() => {
-					log.logWarning(`[${channelId}] LLM timeout after ${LLM_TIMEOUT_MS / 1000}s — aborting run`);
-					session.agent.abort();
-					reject(new Error(`LLM response timeout after ${LLM_TIMEOUT_MS / 1000}s`));
-				}, LLM_TIMEOUT_MS);
-			});
-			try {
-				await Promise.race([
-					session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined),
-					llmTimeout,
-				]);
-			} catch (err) {
-				const errMsg = err instanceof Error ? err.message : String(err);
-				if (errMsg.includes("timeout")) {
-					runState.queue.enqueue(() => ctx.replaceMessage("_Timed out waiting for LLM response. Please try again._"), "timeout");
-				} else {
-					throw err;
-				}
-			} finally {
-				clearTimeout(llmTimeoutHandle);
-			}
-
-			// Wait for queued messages
-			await queueChain;
-
-			// Handle error case - update main message and post error to thread
-			if (runState.stopReason === "error" && runState.errorMessage) {
-				try {
-					await ctx.replaceMessage("_Sorry, something went wrong_");
-					await ctx.respondInThread(`_Error: ${runState.errorMessage}_`);
-				} catch (err) {
-					const errMsg = err instanceof Error ? err.message : String(err);
-					log.logWarning("Failed to post error message", errMsg);
-				}
-			} else {
-				// Final message update
-				const messages = session.messages;
-				const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
-				const finalText =
-					lastAssistant?.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n") || "";
-
-				// Check for [SILENT] marker - delete message and thread instead of posting
-				if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
-					try {
-						await ctx.deleteMessage();
-						log.logInfo("Silent response - deleted message and thread");
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						log.logWarning("Failed to delete message for silent response", errMsg);
-					}
-				} else if (finalText.trim()) {
-					try {
-						// Pass full text — replaceMessage() handles splitting into chunks
-						await ctx.replaceMessage(finalText);
-					} catch (err) {
-						const errMsg = err instanceof Error ? err.message : String(err);
-						log.logWarning("Failed to replace message with final text", errMsg);
-					}
-				}
-			}
-
-			// Log usage summary with context info
-			const contextWindow = model.contextWindow || 200000;
-			const messages = session.messages;
-			const lastAssistantMessage = messages
-				.slice()
-				.reverse()
-				.find((m) => m.role === "assistant" && (m as any).stopReason !== "aborted") as any;
-			const contextTokens = lastAssistantMessage
-				? (lastAssistantMessage.usage.input ?? 0) +
-					(lastAssistantMessage.usage.output ?? 0) +
-					(lastAssistantMessage.usage.cacheRead ?? 0) +
-					(lastAssistantMessage.usage.cacheWrite ?? 0)
-				: 0;
-
-			if (runState.totalUsage.cost.total > 0) {
-				const summary = log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
-				runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
-				await queueChain;
-			}
-
-			// Auto-compact if context is >= 70% full and run completed normally
-			if (
-				contextTokens > 0 &&
-				contextTokens / contextWindow >= 0.7 &&
-				runState.stopReason !== "aborted" &&
-				runState.stopReason !== "error"
-			) {
-				const pct = Math.round((contextTokens / contextWindow) * 100);
-				log.logInfo(`[${channelId}] Auto-compacting: ${contextTokens}/${contextWindow} tokens (${pct}%)`);
-				const compactResult = await doCompact();
-				if (compactResult) {
-					await ctx.respondInThread(
-						`_Context auto-compacted (${pct}% full — ${compactResult.tokensBefore.toLocaleString()} tokens summarised)_`
-					);
-				}
-			}
-
-			// Clear run state
-			runState.ctx = null;
-			runState.logCtx = null;
-			runState.queue = null;
-
-			return { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
-		},
-
-		abort(): void {
-			session.abort();
-		},
-
-		async compact(): Promise<{ tokensBefore: number } | null> {
-			return doCompact();
-		},
-
-		reset(): void {
-			agent.reset();
-			// Release VM if this is a pool-mode session (next exec will boot a fresh one)
-			void releaseExecutor(executor);
-			// Truncate the context file so future loads start fresh
-			try {
-				writeFileSync(contextFile, "");
-				log.logInfo(`[${channelId}] Context reset — cleared ${contextFile}`);
-			} catch (err) {
-				log.logWarning(`[${channelId}] Failed to clear context file`, err instanceof Error ? err.message : String(err));
-			}
-		},
-	};
+	return new Runner(sandboxConfig, channelId, channelDir, provider, modelId);
 }
 
 /**

@@ -1,0 +1,130 @@
+version: "3.9"
+
+# Local development stack for Iris.
+# Run: docker compose up -d
+# Stop: docker compose down
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB:       iris
+      POSTGRES_USER:     iris
+      POSTGRES_PASSWORD: iris_dev_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./iris-runtime/src/infra/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iris -d iris"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Redis Insight (GUI) ───────────────────────────────────────────────────────
+  redis-insight:
+    image: redislabs/redisinsight:latest
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - tools
+
+  # ── Prometheus ────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheusdata:/prometheus
+    ports:
+      - "9090:9090"
+    profiles:
+      - monitoring
+
+  # ── Grafana ───────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+  # ── Iris Runtime ──────────────────────────────────────────────────────────────
+  iris:
+    build:
+      context: ./iris-runtime
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV:               production
+      DATABASE_URL:           postgres://iris:iris_dev_password@postgres:5432/iris
+      REDIS_URL:              redis://redis:6379
+      IRIS_SLACK_APP_TOKEN:   ${IRIS_SLACK_APP_TOKEN}
+      IRIS_SLACK_BOT_TOKEN:   ${IRIS_SLACK_BOT_TOKEN}
+      IRIS_PROVIDER:          ${IRIS_PROVIDER:-anthropic}
+      IRIS_MODEL:             ${IRIS_MODEL:-claude-sonnet-4-5}
+      IRIS_API_PORT:          "3000"
+      HEALTH_PORT:            "9000"
+      LOG_LEVEL:              info
+      SERVICE_NAME:           iris-runtime
+    volumes:
+      - irisdata:/iris/data
+    ports:
+      - "3000:3000"   # internal API
+      - "9000:9000"   # health + metrics
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pgdata:
+  redisdata:
+  prometheusdata:
+  grafanadata:
+  irisdata:

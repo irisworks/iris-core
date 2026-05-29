@@ -228,8 +228,7 @@ export function startApiServer(
 					json(res, 400, { error: "from and text are required" });
 					return;
 				}
-				const sessions = loadSessions(workingDir);
-				const session = findByEmail(sessions, body.from);
+				const session = findByEmail(workingDir, body.from);
 				if (!session) {
 					json(res, 404, { error: "no session found for this email" });
 					return;
