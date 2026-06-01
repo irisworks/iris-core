@@ -6,31 +6,6 @@ import * as log from "./log.js";
 import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
 import type { Attachment, ChannelStore } from "./store.js";
 
-// Telegram bot bridge endpoint
-const TELEGRAM_BRIDGE_URL = process.env.TELEGRAM_BRIDGE_URL || "http://localhost:3001";
-
-/**
- * Send a response back to Telegram via the bot bridge.
- * Returns the sent text or null if Telegram is not available.
- */
-async function sendToTelegram(chatId: string, text: string, replyTo?: string): Promise<boolean> {
-	try {
-		const response = await fetch(`${TELEGRAM_BRIDGE_URL}/send`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				chatId,
-				text,
-				replyTo,
-			}),
-		});
-		return response.ok;
-	} catch (err) {
-		log.logWarning("[telegram] Failed to send response:", String(err));
-		return false;
-	}
-}
-
 // Slack has a 40,000 character limit for message text
 const SLACK_MAX_LENGTH = 40000;
 
@@ -189,9 +164,6 @@ export class SlackBot {
 	private queues = new Map<string, ChannelQueue>();
 	private allowedChannels = new Set<string>(); // If non-empty, only respond to these channel IDs
 
-	// Track Telegram context: channel (TELEGRAM) -> { chatId, messageId }
-	private telegramContexts = new Map<string, { chatId: string; messageId?: string }>();
-
 	// Channel modes loaded from workingDir/data/channels.json
 	private channelModes = new Map<string, "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin">();
 	private channelPassthroughUrls = new Map<string, string>(); // channel -> endpoint URL for passthrough mode
@@ -199,20 +171,6 @@ export class SlackBot {
 
 	// SESSION-<id> → real Slack { channel, threadTs } for routing postMessage/updateMessage
 	private sessionRoutes = new Map<string, { channel: string; threadTs: string }>();
-
-	/**
-	 * Store Telegram context for a channel. Called when processing Telegram events.
-	 */
-	setTelegramContext(channel: string, chatId: string, messageId?: string): void {
-		this.telegramContexts.set(channel, { chatId, messageId });
-	}
-
-	/**
-	 * Clear Telegram context for a channel.
-	 */
-	clearTelegramContext(channel: string): void {
-		this.telegramContexts.delete(channel);
-	}
 
 	constructor(
 		handler: IrisHandler,
@@ -397,12 +355,11 @@ export class SlackBot {
 
 	/** Virtual channels never touch the Slack API — they're internal routing channels. */
 	private isVirtualChannel(channel: string): boolean {
-		return channel.startsWith("WEBUI") || channel.startsWith("BRIDGE-") || channel.startsWith("ESCALATE-") || channel.startsWith("SELFHEAL-") || channel === "TELEGRAM";
+		return channel.startsWith("WEBUI") || channel.startsWith("BRIDGE-") || channel.startsWith("ESCALATE-") || channel.startsWith("SELFHEAL-");
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
 		if (this.isVirtualChannel(channel)) {
-			// For Telegram, don't send intermediate messages - wait for finalizeMessage
 			return Date.now().toString();
 		}
 		if (channel.startsWith("SESSION-")) {
@@ -446,15 +403,6 @@ export class SlackBot {
 			const { resolveBridgeRequest } = await import("./bridge.js");
 			const requestId = channel.slice("BRIDGE-".length);
 			resolveBridgeRequest(requestId, text);
-			return;
-		}
-		// Handle Telegram responses
-		if (channel === "TELEGRAM") {
-			const ctx = this.telegramContexts.get(channel);
-			if (ctx) {
-				await sendToTelegram(ctx.chatId, text, ctx.messageId);
-				this.clearTelegramContext(channel);
-			}
 			return;
 		}
 		if (channel.startsWith("SESSION-")) {

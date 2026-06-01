@@ -9,6 +9,7 @@ import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
+import { TelegramBot, type IrisTelegramHandler, type TelegramEvent } from "./telegram.js";
 import { ChannelStore } from "./store.js";
 
 // ============================================================================
@@ -17,6 +18,7 @@ import { ChannelStore } from "./store.js";
 
 const IRIS_SLACK_APP_TOKEN = process.env.IRIS_SLACK_APP_TOKEN ?? process.env.IRIS_SLACK_APP_TOKEN;
 const IRIS_SLACK_BOT_TOKEN = process.env.IRIS_SLACK_BOT_TOKEN ?? process.env.IRIS_SLACK_BOT_TOKEN;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 interface ParsedArgs {
 	workingDir?: string;
@@ -27,6 +29,7 @@ interface ParsedArgs {
 	model: string;
 	environment: "preview" | "prod";
 	apiPort: number;
+	transport: "slack" | "telegram";
 }
 
 function parseArgs(): ParsedArgs {
@@ -40,6 +43,7 @@ function parseArgs(): ParsedArgs {
 	let model = process.env.IRIS_MODEL ?? "claude-sonnet-4-5";
 	let environment: "preview" | "prod" = (process.env.IRIS_ENV as "preview" | "prod") ?? "prod";
 	let apiPort = parseInt(process.env.IRIS_API_PORT ?? "0", 10);
+	let transport: "slack" | "telegram" = (process.env.IRIS_TRANSPORT as "slack" | "telegram") ?? "slack";
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -69,6 +73,12 @@ function parseArgs(): ParsedArgs {
 			apiPort = parseInt(arg.slice("--api-port=".length), 10);
 		} else if (arg === "--api-port") {
 			apiPort = parseInt(args[++i] || "0", 10);
+		} else if (arg.startsWith("--transport=")) {
+			const t = arg.slice("--transport=".length);
+			transport = t === "telegram" ? "telegram" : "slack";
+		} else if (arg === "--transport") {
+			const t = args[++i] || "slack";
+			transport = t === "telegram" ? "telegram" : "slack";
 		} else if (!arg.startsWith("-")) {
 			workingDir = arg;
 		}
@@ -82,6 +92,7 @@ function parseArgs(): ParsedArgs {
 		model,
 		environment,
 		apiPort,
+		transport,
 	};
 }
 
@@ -99,19 +110,20 @@ if (parsedArgs.downloadChannel) {
 
 // Normal bot mode - require working dir
 if (!parsedArgs.workingDir) {
-	console.error("Usage: iris-runtime [--sandbox=host|docker:<name>] [--provider <p>] [--model <m>] [--environment preview|prod] [--api-port <port>] <working-directory>");
+	console.error("Usage: iris-runtime [--sandbox=host|docker:<name>] [--transport=slack|telegram] [--provider <p>] [--model <m>] [--environment preview|prod] [--api-port <port>] <working-directory>");
 	console.error("       iris-runtime --download <channel-id>");
-	console.error("Env vars: IRIS_PROVIDER, IRIS_MODEL, IRIS_ENV, IRIS_API_PORT");
+	console.error("Env vars: IRIS_PROVIDER, IRIS_MODEL, IRIS_ENV, IRIS_API_PORT, IRIS_TRANSPORT, TELEGRAM_BOT_TOKEN");
 	process.exit(1);
 }
 
-const { workingDir, sandbox, provider, model, environment, apiPort } = {
+const { workingDir, sandbox, provider, model, environment, apiPort, transport } = {
 	workingDir: parsedArgs.workingDir,
 	sandbox: parsedArgs.sandbox,
 	provider: parsedArgs.provider,
 	model: parsedArgs.model,
 	environment: parsedArgs.environment,
 	apiPort: parsedArgs.apiPort,
+	transport: parsedArgs.transport,
 };
 
 // Slack is optional — sub-agents run bridge-only (no Slack connection needed)
@@ -407,6 +419,188 @@ const handler: IrisHandler = {
 };
 
 // ============================================================================
+// Telegram context adapter
+// ============================================================================
+
+function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: ChannelState) {
+	let messageId: string | null = null;
+	const extraMessageIds: string[] = [];
+	let accumulatedText = "";
+	let updatePromise = Promise.resolve();
+
+	return {
+		message: {
+			text: event.text,
+			rawText: event.text,
+			user: event.user,
+			channel: event.channel,
+			ts: event.ts,
+			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
+		},
+		channelName: bot.getChatName(event.channel),
+		store: state.store,
+		channels: bot.getAllChats(),
+		users: [],
+
+		respond: async (text: string, shouldLog = true) => {
+			updatePromise = updatePromise.then(async () => {
+				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+				if (shouldLog && messageId) {
+					bot.logBotResponse(event.channel, text, messageId);
+				}
+			});
+			await updatePromise;
+		},
+
+		replaceMessage: async (text: string) => {
+			updatePromise = updatePromise.then(async () => {
+				try {
+					if (messageId) {
+						await bot.finalizeMessage(event.channel, messageId, text);
+					} else {
+						messageId = await bot.postMessage(event.channel, text);
+					}
+				} catch (err) {
+					log.logWarning("Telegram replaceMessage error", err instanceof Error ? err.message : String(err));
+				}
+			});
+			await updatePromise;
+		},
+
+		respondInThread: async (text: string) => {
+			updatePromise = updatePromise.then(async () => {
+				try {
+					const id = await bot.postInThread(event.channel, messageId ?? event.ts, text);
+					extraMessageIds.push(id);
+				} catch (err) {
+					log.logWarning("Telegram respondInThread error", err instanceof Error ? err.message : String(err));
+				}
+			});
+			await updatePromise;
+		},
+
+		setTyping: async (isTyping: boolean) => {
+			if (isTyping && !messageId) {
+				updatePromise = updatePromise.then(async () => {
+					try {
+						if (!messageId) {
+							messageId = await bot.postMessage(event.channel, "_Thinking..._");
+						}
+					} catch (err) {
+						log.logWarning("Telegram setTyping error", err instanceof Error ? err.message : String(err));
+					}
+				});
+				await updatePromise;
+			}
+		},
+
+		uploadFile: async (filePath: string, title?: string) => {
+			await bot.uploadFile(event.channel, filePath, title);
+		},
+
+		setWorking: async (_working: boolean) => {},
+
+		deleteMessage: async () => {
+			updatePromise = updatePromise.then(async () => {
+				for (let i = extraMessageIds.length - 1; i >= 0; i--) {
+					try { await bot.deleteMessage(event.channel, extraMessageIds[i]); } catch {}
+				}
+				extraMessageIds.length = 0;
+				if (messageId) {
+					await bot.deleteMessage(event.channel, messageId);
+					messageId = null;
+				}
+			});
+			await updatePromise;
+		},
+
+		getAccumulatedText: () => accumulatedText,
+	};
+}
+
+// ============================================================================
+// Telegram handler
+// ============================================================================
+
+const telegramHandler: IrisTelegramHandler = {
+	isRunning(channelId: string): boolean {
+		return channelStates.get(channelId)?.running ?? false;
+	},
+
+	async handleStop(channelId: string, bot: TelegramBot): Promise<void> {
+		const state = channelStates.get(channelId);
+		if (state?.running) {
+			state.stopRequested = true;
+			state.runner.abort();
+			await bot.postMessage(channelId, "_Stopping..._");
+		} else {
+			await bot.postMessage(channelId, "_Nothing running_");
+		}
+	},
+
+	async handleCompact(channelId: string, bot: TelegramBot): Promise<void> {
+		if (telegramHandler.isRunning(channelId)) {
+			await bot.postMessage(channelId, "_Can't compact while running — send /stop first_");
+			return;
+		}
+		const state = getState(channelId);
+		const ts = await bot.postMessage(channelId, "_Compacting context..._");
+		try {
+			const result = await state.runner.compact();
+			if (result) {
+				await bot.updateMessage(channelId, ts, `_Compacted: ${result.tokensBefore.toLocaleString()} tokens summarised_`);
+			} else {
+				await bot.updateMessage(channelId, ts, "_Compaction complete_");
+			}
+		} catch (err) {
+			const errMsg = err instanceof Error ? err.message : String(err);
+			await bot.updateMessage(channelId, ts, `_Compaction failed: ${errMsg}_`);
+		}
+	},
+
+	async handleReset(channelId: string, bot: TelegramBot): Promise<void> {
+		const state = getState(channelId);
+		if (state.running) {
+			state.stopRequested = true;
+			state.runner.abort();
+		}
+		state.runner.reset();
+		state.running = false;
+		await bot.postMessage(channelId, "_Context cleared — starting fresh_");
+	},
+
+	async handleEvent(event: TelegramEvent, bot: TelegramBot, isEvent?: boolean): Promise<void> {
+		const state = getState(event.channel);
+		state.running = true;
+		state.stopRequested = false;
+
+		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
+
+		try {
+			const ctx = createTelegramContext(event, bot, state);
+			await ctx.setTyping(true);
+			await ctx.setWorking(true);
+			const result = await state.runner.run(ctx as any, state.store);
+			await ctx.setWorking(false);
+
+			if (event.channel.startsWith("SESSION-")) {
+				const sessionId = event.channel.slice("SESSION-".length);
+				const { resolveSessionRequest } = await import("./sessions.js");
+				resolveSessionRequest(sessionId, ctx.getAccumulatedText());
+			}
+
+			if (result.stopReason === "aborted" && state.stopRequested) {
+				await bot.postMessage(event.channel, "_Stopped_");
+			}
+		} catch (err) {
+			log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
+		} finally {
+			state.running = false;
+		}
+	},
+};
+
+// ============================================================================
 // Start
 // ============================================================================
 
@@ -426,8 +620,8 @@ log.logInfo(`iris-runtime: provider=${provider} model=${model} environment=${env
 // Start internal API server (default port 3000, always-on for sub-agent escalation)
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
 // botRef is set after bot construction below; the closure captures it by reference
-let botRef: SlackBotClass | null = null;
-startApiServer(effectiveApiPort, workingDir, channelStates, () => botRef);
+let botRef: SlackBotClass | TelegramBot | null = null;
+startApiServer(effectiveApiPort, workingDir, channelStates, () => botRef as any);
 
 // Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
 const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
@@ -435,7 +629,23 @@ if (bridgePort > 0) {
 	startBridgeServer(bridgePort, workingDir);
 }
 
-if (SLACK_ENABLED) {
+if (transport === "telegram") {
+	if (!TELEGRAM_BOT_TOKEN) {
+		console.error("Missing env: TELEGRAM_BOT_TOKEN");
+		process.exit(1);
+	}
+
+	const tgBot = new TelegramBot(telegramHandler, { token: TELEGRAM_BOT_TOKEN, workingDir });
+	botRef = tgBot;
+
+	const eventsWatcher = createEventsWatcher(workingDir, tgBot as any);
+	eventsWatcher.start();
+
+	process.on("SIGINT", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); tgBot.stop(); process.exit(0); });
+	process.on("SIGTERM", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); tgBot.stop(); process.exit(0); });
+
+	await tgBot.start();
+} else if (SLACK_ENABLED) {
 	// Shared store for attachment downloads (also used per-channel in getState)
 	const sharedStore = new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! });
 
@@ -466,7 +676,7 @@ if (SLACK_ENABLED) {
 
 	bot.start();
 } else {
-	// Bridge-only mode — no Slack connection, events watcher only
+	// Bridge-only mode — no Slack tokens and no Telegram transport
 	log.logInfo("Slack tokens not set — running in bridge-only mode (events watcher + bridge server)");
 
 	// Create a minimal stub bot for the events watcher and session injection

@@ -341,11 +341,6 @@ export class EventsWatcher {
 			ts: Date.now().toString(),
 		};
 
-		// For Telegram events, extract and store chat context for response routing
-		if (event.channelId === "TELEGRAM") {
-			this.setTelegramContextFromFile(filename, event.channelId);
-		}
-
 		// Enqueue for processing
 		const enqueued = this.slack.enqueueEvent(syntheticEvent);
 
@@ -378,22 +373,6 @@ export class EventsWatcher {
 		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 
-	/**
-	 * Extract Telegram chat context from event file and store it for response routing.
-	 */
-	private setTelegramContextFromFile(filename: string, channel: string): void {
-		try {
-			const filePath = join(this.eventsDir, filename);
-			const content = readFileSync(filePath, "utf-8");
-			const data = JSON.parse(content);
-			if (data.telegramChatId) {
-				this.slack.setTelegramContext(channel, data.telegramChatId, data.telegramMessageId);
-				log.logInfo(`[telegram] Context stored for ${channel}: chatId=${data.telegramChatId}`);
-			}
-		} catch (err) {
-			log.logWarning(`[telegram] Failed to extract context from ${filename}:`, String(err));
-		}
-	}
 }
 
 /**
