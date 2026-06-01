@@ -91,6 +91,8 @@ Pick the path that matches your environment — one command does everything:
 | **No Azure** | [Option 1](#option-1--no-azure-no-firecracker) — simplest | [Option 3](#option-3--no-azure-with-firecracker) |
 | **Azure Key Vault** | [Option 2](#option-2--azure-key-vault-no-firecracker) | [Option 4](#option-4--azure-key-vault--firecracker-full-production) — full production |
 
+All options prompt for both Slack and Telegram tokens during setup — answer `Y` to whichever you want. See [Telegram Setup](#telegram-setup) for details.
+
 All four paths start the same way:
 
 ```bash
@@ -186,6 +188,15 @@ bash bootstrap.sh --setup --no-keyvault
 [iris-bootstrap] Slack App token (xapp-...):
 [iris-bootstrap] Slack Bot token (xoxb-...):
 
+[iris-bootstrap] Set up Telegram integration? [Y/n]
+  ┌─ Telegram Bot Setup ──────────────────────────────────────────┐
+  │  1. Open Telegram and message @BotFather                     │
+  │  2. Send /newbot → name it → username ending in 'bot'        │
+  │  5. Copy the token (looks like 7123456789:AAFxyz...)          │
+  └───────────────────────────────────────────────────────────────┘
+[iris-bootstrap] Press Enter when your bot is created and token is ready...
+[iris-bootstrap] Telegram Bot Token:
+
 [iris-bootstrap] Add GitHub token for repo access? [Y/n]
 [iris-bootstrap] Set up email sending (Resend.com)? [y/N]
 [iris-bootstrap] Set up public domain (e.g. iris.example.com)? [y/N]
@@ -213,69 +224,6 @@ bash bootstrap.sh --setup --no-keyvault
 sudo systemctl status iris
 ```
 Then in Slack: `@iris what model are you?`
-
----
-
-## Telegram Setup
-
-Iris can use Telegram instead of (or in addition to) Slack. No workspace invite needed — any Telegram user can message the bot directly.
-
-**Step 1 — Create a bot via @BotFather**
-
-1. Open Telegram and message `@BotFather`
-2. Send `/newbot`
-3. Enter a display name (e.g. `Iris`)
-4. Enter a username ending in `bot` (e.g. `iris_mybot`)
-5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
-
-**Step 2 — Add the token to `/iris/.env`**
-
-```bash
-echo "TELEGRAM_BOT_TOKEN=7123456789:AAFxyz..." >> /iris/.env
-```
-
-Or if using Azure Key Vault:
-
-```bash
-KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)
-az keyvault secret set --vault-name "$KV" --name "TELEGRAM-BOT-TOKEN" --value "7123456789:AAFxyz..."
-```
-
-**Step 3 — Start Iris with the Telegram transport**
-
-```bash
-# /iris/.env or the systemd drop-in:
-IRIS_TRANSPORT=telegram
-
-# Or via CLI flag:
-node dist/main.js /iris/data --transport=telegram --sandbox=host
-```
-
-Restart the service to pick up the change:
-
-```bash
-sudo systemctl restart iris
-```
-
-**Session mapping**
-
-| Telegram context | Iris channel ID |
-|---|---|
-| DM with bot | `tg-{chat_id}` |
-| Group chat (no topics) | `tg-{chat_id}` |
-| Group with topics | `tg-{chat_id}-{thread_id}` |
-
-**Bot commands**
-
-| Command | Action |
-|---|---|
-| `/reset` | Clear conversation history |
-| `/compact` | Summarise context to save tokens |
-| `/stop` | Abort a running response |
-
-**Running Slack and Telegram side by side**
-
-Start two separate service instances pointing at the same `workingDir` — one with `--transport=slack`, one with `--transport=telegram`. Each user gets their own isolated channel directory; both share the same Iris brain and skills.
 
 ---
 
@@ -481,6 +429,72 @@ Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
   Terraform:   iris-tfstate-rg / iristfstatemyhostname
   VM logs:     journalctl -u iris-fc-public-sandbox -f
   Test:        @iris run: uname -a
+```
+
+---
+
+## Telegram Setup
+
+Iris can use Telegram instead of (or in addition to) Slack. No workspace invite needed — any Telegram user can message the bot directly.
+
+> **Bootstrap handles this automatically.** During `bash bootstrap.sh --setup`, you will be prompted:
+> ```
+> [iris-bootstrap] Set up Telegram integration? [Y/n]
+> ```
+> Answer `Y`, follow the on-screen instructions, paste your token — bootstrap writes it to `/iris/.env` and sets `IRIS_TRANSPORT` automatically. The steps below are for manual or post-install setup only.
+
+**Step 1 — Create a bot via @BotFather**
+
+1. Open Telegram and message `@BotFather`
+2. Send `/newbot`
+3. Enter a display name (e.g. `Iris`)
+4. Enter a username ending in `bot` (e.g. `iris_mybot`)
+5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
+
+**Step 2 — Add the token to `/iris/.env`**
+
+```bash
+echo "TELEGRAM_BOT_TOKEN=7123456789:AAFxyz..." >> /iris/.env
+echo "IRIS_TRANSPORT=telegram" >> /iris/.env
+```
+
+Or if using Azure Key Vault:
+
+```bash
+KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)
+az keyvault secret set --vault-name "$KV" --name "TELEGRAM-BOT-TOKEN" --value "7123456789:AAFxyz..."
+```
+
+**Step 3 — Restart the service**
+
+```bash
+sudo systemctl restart iris
+```
+
+**Session mapping**
+
+| Telegram context | Iris channel ID |
+|---|---|
+| DM with bot | `tg-{chat_id}` |
+| Group chat (no topics) | `tg-{chat_id}` |
+| Group with topics | `tg-{chat_id}-{thread_id}` |
+
+**Bot commands**
+
+| Command | Action |
+|---|---|
+| `/reset` | Clear conversation history |
+| `/compact` | Summarise context to save tokens |
+| `/stop` | Abort a running response |
+
+**Running Slack and Telegram side by side**
+
+Start two separate service instances pointing at the same `workingDir` — one with `--transport=slack`, one with `--transport=telegram`. Each user gets their own isolated channel directory; both share the same Iris brain and skills.
+
+```bash
+# iris-slack.service  → --transport=slack
+# iris-telegram.service → --transport=telegram
+# Both point to the same /iris/data working directory
 ```
 
 ---
