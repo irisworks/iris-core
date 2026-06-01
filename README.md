@@ -429,7 +429,15 @@ Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
 
 ## Telegram Setup
 
-Iris supports Telegram natively. Get a bot token from `@BotFather` on Telegram (`/newbot`), then:
+Iris supports Telegram natively. Get a bot token from `@BotFather` on Telegram, then:
+
+**Step 1 — Create a bot via @BotFather**
+
+1. Open Telegram and message `@BotFather`
+2. Send `/newbot`
+3. Enter a display name (e.g. `Iris`)
+4. Enter a username ending in `bot` (e.g. `iris_mybot`)
+5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
 
 **During bootstrap (automatic):**
 ```
