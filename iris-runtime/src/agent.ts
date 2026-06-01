@@ -903,30 +903,48 @@ function createRunner(
 			};
 			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
 
-			// Wrap prompt with a timeout — if the LLM API hangs, abort after LLM_TIMEOUT_MS
-			const LLM_TIMEOUT_MS = (Number(process.env.IRIS_LLM_TIMEOUT_SECS) || 300) * 1000;
-			let llmTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
-			const llmTimeout = new Promise<never>((_, reject) => {
-				llmTimeoutHandle = setTimeout(() => {
-					log.logWarning(`[${channelId}] LLM timeout after ${LLM_TIMEOUT_MS / 1000}s — aborting run`);
-					session.agent.abort();
-					reject(new Error(`LLM response timeout after ${LLM_TIMEOUT_MS / 1000}s`));
-				}, LLM_TIMEOUT_MS);
-			});
-			try {
-				await Promise.race([
-					session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined),
-					llmTimeout,
-				]);
-			} catch (err) {
-				const errMsg = err instanceof Error ? err.message : String(err);
-				if (errMsg.includes("timeout")) {
-					runState.queue.enqueue(() => ctx.replaceMessage("_Timed out waiting for LLM response. Please try again._"), "timeout");
-				} else {
-					throw err;
+			// Retry loop with per-call timeout and exponential backoff for rate-limit / transient errors
+			const LLM_TIMEOUT_MS = (Number(process.env.IRIS_LLM_TIMEOUT_SECS) || 90) * 1000;
+			const MAX_RETRIES = Number(process.env.IRIS_LLM_MAX_RETRIES) || 3;
+			const RETRY_BASE_MS = Number(process.env.IRIS_LLM_RETRY_BASE_MS) || 2000;
+			const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+			let lastError: Error | undefined;
+			for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+				let llmTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+				const llmTimeout = new Promise<never>((_, reject) => {
+					llmTimeoutHandle = setTimeout(() => {
+						log.logWarning(`[${channelId}] LLM timeout after ${LLM_TIMEOUT_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})`);
+						session.agent.abort();
+						reject(new Error(`LLM response timeout after ${LLM_TIMEOUT_MS / 1000}s`));
+					}, LLM_TIMEOUT_MS);
+				});
+				try {
+					await Promise.race([
+						session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined),
+						llmTimeout,
+					]);
+					lastError = undefined;
+					break; // success
+				} catch (err) {
+					lastError = err instanceof Error ? err : new Error(String(err));
+					const msg = lastError.message.toLowerCase();
+					const isRetryable = msg.includes("timeout") || msg.includes("429") || msg.includes("econnreset") || msg.includes("fetch failed") || msg.includes("rate limit") || msg.includes("throttled");
+					if (!isRetryable || attempt === MAX_RETRIES) {
+						throw lastError; // final failure — will be caught below
+					}
+					const delay = RETRY_BASE_MS * (2 ** (attempt - 1)) + Math.random() * 1000;
+					log.logWarning(`[${channelId}] LLM attempt ${attempt} failed, retrying in ${Math.round(delay)}ms: ${lastError.message}`);
+					if (!channelId.startsWith("SESSION-")) {
+						await ctx.replaceMessage(`_Retrying (${attempt}/${MAX_RETRIES})..._`);
+					}
+					await sleep(delay);
+				} finally {
+					clearTimeout(llmTimeoutHandle);
 				}
-			} finally {
-				clearTimeout(llmTimeoutHandle);
+			}
+			if (lastError) {
+				throw lastError;
 			}
 
 			// Wait for queued messages
