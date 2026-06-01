@@ -443,17 +443,21 @@ Iris can use Telegram instead of (or in addition to) Slack. No workspace invite 
 
 **Step 2 — Add the token to `/iris/.env`**
 
-```bash
-echo "TELEGRAM_BOT_TOKEN=7123456789:AAFxyz..." >> /iris/.env
-echo "IRIS_TRANSPORT=telegram" >> /iris/.env
+Open `/iris/.env` and add:
+
+```
+TELEGRAM_BOT_TOKEN=7123456789:AAFxyz...
+IRIS_TRANSPORT=telegram
 ```
 
-Or if using Azure Key Vault:
+If using Azure Key Vault, store the token there instead:
 
 ```bash
 KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)
 az keyvault secret set --vault-name "$KV" --name "TELEGRAM-BOT-TOKEN" --value "7123456789:AAFxyz..."
 ```
+
+Then set `IRIS_TRANSPORT=telegram` in `/iris/.env`.
 
 **Step 3 — Restart the service**
 
