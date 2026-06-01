@@ -1003,6 +1003,25 @@ if ! sudo systemctl is-active --quiet iris; then
   die "iris.service failed to start. Check logs above."
 fi
 
+# Docker sub-agents service (calls agents/start-all.sh on boot)
+sudo tee /etc/systemd/system/iris-agents.service > /dev/null << UNIT
+[Unit]
+Description=Iris Docker Sub-Agents
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash ${REPO_DIR}/agents/start-all.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable iris-agents
+log "✓ iris-agents.service installed and enabled"
+
 # ────────────────────────────────────────────────────────────
 # 11. Provision Firecracker sandbox VM
 # ────────────────────────────────────────────────────────────
@@ -1189,6 +1208,9 @@ PYEOF
 
   sudo mkdir -p /etc/systemd/system/iris.service.d
   sudo tee /etc/systemd/system/iris.service.d/sandbox.conf > /dev/null << DROPIN
+[Unit]
+After=iris-fc-public-sandbox.service
+
 [Service]
 ExecStart=
 ExecStart=${NODE_BIN} --require ${DOTENV_CONFIG} ${IRIS_RUNTIME_BIN} ${SANDBOX_FLAG} ${IRIS_DIR}/data

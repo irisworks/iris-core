@@ -101,6 +101,29 @@ Then run the single command for your chosen path below.
 
 ---
 
+## Managing the Iris Service
+
+Once installed, use these commands to control the iris service manually:
+
+```bash
+# Stop iris (graceful shutdown — stays stopped until you start it again)
+sudo systemctl stop iris
+
+# Start iris
+sudo systemctl start iris
+
+# Restart iris (stop + start in one step)
+sudo systemctl restart iris
+```
+
+> **Note:** If `start` silently does nothing, the built JS may be missing. Rebuild first:
+> ```bash
+> cd /iris/repo/iris-runtime && npm install && npm run build
+> sudo systemctl start iris
+> ```
+
+---
+
 ## Option 1 — No Azure, No Firecracker
 
 Iris runs on your VM and executes commands directly on the host. No Azure account, no KVM needed.

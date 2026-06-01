@@ -152,6 +152,30 @@ function getState(channelId: string): ChannelState {
 // Create SlackContext adapter
 // ============================================================================
 
+// Slack recommends 4000 chars max for chat.update. We use 4000 as the split point.
+const SLACK_SPLIT_CHARS = 4000;
+
+/**
+ * Split text into chunks at natural newline boundaries near maxChars.
+ */
+function splitIntoChunks(text: string, maxChars: number): string[] {
+	if (text.length <= maxChars) return [text];
+	const chunks: string[] = [];
+	let remaining = text;
+	while (remaining.length > 0) {
+		if (remaining.length <= maxChars) {
+			chunks.push(remaining);
+			break;
+		}
+		const searchFrom = Math.floor(maxChars * 0.8);
+		const newlineIdx = remaining.lastIndexOf("\n", maxChars);
+		const cut = newlineIdx >= searchFrom ? newlineIdx + 1 : maxChars;
+		chunks.push(remaining.slice(0, cut).trimEnd());
+		remaining = remaining.slice(cut).trimStart();
+	}
+	return chunks;
+}
+
 function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
 	let messageTs: string | null = null;
 	const threadMessageTs: string[] = [];
@@ -180,28 +204,12 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		channels: slack.getAllChannels().map((c) => ({ id: c.id, name: c.name })),
 		users: slack.getAllUsers().map((u) => ({ id: u.id, userName: u.userName, displayName: u.displayName })),
 
+		// Accumulate text silently during streaming — thinking indicator stays visible.
+		// replaceMessage() posts the final clean result when generation is complete.
 		respond: async (text: string, shouldLog = true) => {
 			updatePromise = updatePromise.then(async () => {
 				try {
 					accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-
-					// Truncate to stay under Slack's 40K byte limit (not char limit — emoji/CJK are multi-byte)
-					const MAX_BYTES = 24000;
-					const truncationNote = "\n\n_(message truncated, ask me to elaborate on specific parts)_";
-					while (Buffer.byteLength(accumulatedText, "utf8") > MAX_BYTES) {
-						// Trim by slicing chars until under limit
-						accumulatedText = accumulatedText.substring(0, Math.floor(accumulatedText.length * 0.8));
-						accumulatedText = accumulatedText + truncationNote;
-					}
-
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-
-					if (messageTs) {
-						await slack.updateMessage(event.channel, messageTs, displayText);
-					} else {
-						messageTs = await slack.postMessage(event.channel, displayText);
-					}
-
 					if (shouldLog && messageTs) {
 						slack.logBotResponse(event.channel, text, messageTs);
 					}
@@ -212,25 +220,25 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			await updatePromise;
 		},
 
+		// Called when generation is complete with the full final text.
+		// Splits into chunks and posts in order: chunk 1 replaces the thinking message,
+		// chunks 2+ are posted as thread replies below — correct reading order guaranteed.
 		replaceMessage: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
 				try {
-					// Replace the accumulated text entirely, with truncation
-					const MAX_BYTES = 24000;
-					const truncationNote = "\n\n_(message truncated, ask me to elaborate on specific parts)_";
-					accumulatedText = text;
-					while (Buffer.byteLength(accumulatedText, "utf8") > MAX_BYTES) {
-						accumulatedText = accumulatedText.substring(0, Math.floor(accumulatedText.length * 0.8));
-						accumulatedText = accumulatedText + truncationNote;
+					const chunks = splitIntoChunks(text, SLACK_SPLIT_CHARS);
+
+					// Replace thinking indicator with first chunk
+					if (messageTs) {
+						await slack.finalizeMessage(event.channel, messageTs, chunks[0]);
+					} else {
+						messageTs = await slack.postMessage(event.channel, chunks[0]);
 					}
 
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-
-					if (messageTs) {
-						// finalizeMessage resolves bridge requests; equivalent to updateMessage for Slack
-						await slack.finalizeMessage(event.channel, messageTs, displayText);
-					} else {
-						messageTs = await slack.postMessage(event.channel, displayText);
+					// Post remaining chunks as thread replies in order
+					for (let i = 1; i < chunks.length; i++) {
+						const ts = await slack.postInThread(event.channel, messageTs!, chunks[i]);
+						threadMessageTs.push(ts);
 					}
 				} catch (err) {
 					log.logWarning("Slack replaceMessage error", err instanceof Error ? err.message : String(err));
@@ -243,14 +251,7 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 			updatePromise = updatePromise.then(async () => {
 				try {
 					if (messageTs) {
-						// Truncate thread messages if too long (20K limit for safety)
-						const MAX_THREAD_LENGTH = 20000;
-						let threadText = text;
-						if (threadText.length > MAX_THREAD_LENGTH) {
-							threadText = `${threadText.substring(0, MAX_THREAD_LENGTH - 50)}\n\n_(truncated)_`;
-						}
-
-						const ts = await slack.postInThread(event.channel, messageTs, threadText);
+						const ts = await slack.postInThread(event.channel, messageTs, text);
 						threadMessageTs.push(ts);
 					}
 				} catch (err) {
@@ -265,8 +266,8 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 				updatePromise = updatePromise.then(async () => {
 					try {
 						if (!messageTs) {
-							accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
-							messageTs = await slack.postMessage(event.channel, accumulatedText + workingIndicator);
+							const label = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
+							messageTs = await slack.postMessage(event.channel, label + workingIndicator);
 						}
 					} catch (err) {
 						log.logWarning("Slack setTyping error", err instanceof Error ? err.message : String(err));
@@ -281,18 +282,8 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		},
 
 		setWorking: async (working: boolean) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					isWorking = working;
-					if (messageTs) {
-						const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-						await slack.updateMessage(event.channel, messageTs, displayText);
-					}
-				} catch (err) {
-					log.logWarning("Slack setWorking error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
+			// No-op — thinking indicator is managed by setTyping/replaceMessage.
+			isWorking = working;
 		},
 
 		deleteMessage: async () => {
