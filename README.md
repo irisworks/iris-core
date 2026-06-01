@@ -429,49 +429,23 @@ Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
 
 ## Telegram Setup
 
-Iris can use Telegram instead of (or in addition to) Slack. No workspace invite needed — any Telegram user can message the bot directly.
+Iris supports Telegram natively. Get a bot token from `@BotFather` on Telegram (`/newbot`), then:
 
-> **Bootstrap handles this automatically.** During `bash bootstrap.sh --setup`, you will be asked `Set up Telegram integration?` — answer `Y` and paste your token. Bootstrap writes it to `/iris/.env` and sets `IRIS_TRANSPORT` for you. The steps below are for manual or post-install setup only.
-
-**Step 1 — Create a bot via @BotFather**
-
-1. Open Telegram and message `@BotFather`
-2. Send `/newbot`
-3. Enter a display name (e.g. `Iris`)
-4. Enter a username ending in `bot` (e.g. `iris_mybot`)
-5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
-
-**Step 2 — Add the token to `/iris/.env`**
-
-Open `/iris/.env` and add:
-
+**During bootstrap (automatic):**
 ```
-TELEGRAM_BOT_TOKEN=7123456789:AAFxyz...
+[iris-bootstrap] Set up Telegram integration? [Y/n]
+[iris-bootstrap] Telegram Bot Token: ****
+```
+Bootstrap writes the token to `/iris/.env` and sets `IRIS_TRANSPORT` automatically.
+
+**Post-install (manual):**
+
+Add to `/iris/.env`:
+```
+TELEGRAM_BOT_TOKEN=<your-token>
 IRIS_TRANSPORT=telegram
 ```
-
-If using Azure Key Vault, store the token there instead:
-
-```bash
-KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)
-az keyvault secret set --vault-name "$KV" --name "TELEGRAM-BOT-TOKEN" --value "7123456789:AAFxyz..."
-```
-
-Then set `IRIS_TRANSPORT=telegram` in `/iris/.env`.
-
-**Step 3 — Restart the service**
-
-```bash
-sudo systemctl restart iris
-```
-
-**Session mapping**
-
-| Telegram context | Iris channel ID |
-|---|---|
-| DM with bot | `tg-{chat_id}` |
-| Group chat (no topics) | `tg-{chat_id}` |
-| Group with topics | `tg-{chat_id}-{thread_id}` |
+Then `sudo systemctl restart iris`.
 
 **Bot commands**
 
@@ -481,15 +455,13 @@ sudo systemctl restart iris
 | `/compact` | Summarise context to save tokens |
 | `/stop` | Abort a running response |
 
-**Running Slack and Telegram side by side**
+**Session mapping**
 
-Start two separate service instances pointing at the same `workingDir` — one with `--transport=slack`, one with `--transport=telegram`. Each user gets their own isolated channel directory; both share the same Iris brain and skills.
-
-```bash
-# iris-slack.service  → --transport=slack
-# iris-telegram.service → --transport=telegram
-# Both point to the same /iris/data working directory
-```
+| Chat type | Channel ID |
+|---|---|
+| DM | `tg-{chat_id}` |
+| Group | `tg-{chat_id}` |
+| Group with topics | `tg-{chat_id}-{thread_id}` |
 
 ---
 
