@@ -1,6 +1,6 @@
 # Iris Core
 
-Iris is an always-on AI orchestrator that runs on a cloud VM, listens on Slack, and manages a fleet of specialized sub-agents. Each sub-agent runs in an isolated Firecracker microVM — lightweight virtual machines with their own Linux kernel, booting in ~125ms.
+Iris is an always-on AI orchestrator that runs on a cloud VM, listens on Slack or Telegram, and manages a fleet of specialized sub-agents. Each sub-agent runs in an isolated Firecracker microVM — lightweight virtual machines with their own Linux kernel, booting in ~125ms.
 
 This repository is the source of truth for Iris's constitution, runtime, infrastructure, skills, and sub-agent scaffolding.
 
@@ -20,7 +20,7 @@ This repository is the source of truth for Iris's constitution, runtime, infrast
 ## Architecture
 
 ```
-You (Slack)
+You (Slack or Telegram)
 └── Iris  (Azure VM, systemd service)
     ├── iris-runtime
     ├── CONSTITUTION.md       read-only operator rules, injected every prompt
@@ -74,11 +74,13 @@ Implemented and verified:
 - `agents/newsletter` — newsletter sub-agent scaffold
 - Bootstrap script with interactive first-time setup (Key Vault or `.env` path)
 - Live runtime confirmed on `foundry-e2/Kimi-K2.5`; Slack smoke test passed
+- Native Telegram transport (`--transport=telegram`) — long polling, DMs, groups, topic threads, file downloads, `/reset` `/compact` `/stop` commands
 
 Still pending:
 
 - Phase 4 internal HTTP API for sub-agent communication
 - Phase 5 hardening and full resurrection test
+- Simultaneous Slack + Telegram in a single process (currently requires two separate service instances)
 
 ## Setup
 
@@ -211,6 +213,69 @@ bash bootstrap.sh --setup --no-keyvault
 sudo systemctl status iris
 ```
 Then in Slack: `@iris what model are you?`
+
+---
+
+## Telegram Setup
+
+Iris can use Telegram instead of (or in addition to) Slack. No workspace invite needed — any Telegram user can message the bot directly.
+
+**Step 1 — Create a bot via @BotFather**
+
+1. Open Telegram and message `@BotFather`
+2. Send `/newbot`
+3. Enter a display name (e.g. `Iris`)
+4. Enter a username ending in `bot` (e.g. `iris_mybot`)
+5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
+
+**Step 2 — Add the token to `/iris/.env`**
+
+```bash
+echo "TELEGRAM_BOT_TOKEN=7123456789:AAFxyz..." >> /iris/.env
+```
+
+Or if using Azure Key Vault:
+
+```bash
+KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)
+az keyvault secret set --vault-name "$KV" --name "TELEGRAM-BOT-TOKEN" --value "7123456789:AAFxyz..."
+```
+
+**Step 3 — Start Iris with the Telegram transport**
+
+```bash
+# /iris/.env or the systemd drop-in:
+IRIS_TRANSPORT=telegram
+
+# Or via CLI flag:
+node dist/main.js /iris/data --transport=telegram --sandbox=host
+```
+
+Restart the service to pick up the change:
+
+```bash
+sudo systemctl restart iris
+```
+
+**Session mapping**
+
+| Telegram context | Iris channel ID |
+|---|---|
+| DM with bot | `tg-{chat_id}` |
+| Group chat (no topics) | `tg-{chat_id}` |
+| Group with topics | `tg-{chat_id}-{thread_id}` |
+
+**Bot commands**
+
+| Command | Action |
+|---|---|
+| `/reset` | Clear conversation history |
+| `/compact` | Summarise context to save tokens |
+| `/stop` | Abort a running response |
+
+**Running Slack and Telegram side by side**
+
+Start two separate service instances pointing at the same `workingDir` — one with `--transport=slack`, one with `--transport=telegram`. Each user gets their own isolated channel directory; both share the same Iris brain and skills.
 
 ---
 
@@ -435,6 +500,7 @@ IRIS_PROVIDER=foundry-e2
 IRIS_MODEL=Kimi-K2.5
 IRIS_ENV=prod          # preview | prod
 IRIS_API_PORT=3001     # 0 = disabled (default)
+IRIS_TRANSPORT=slack   # slack (default) | telegram
 ```
 
 Supported providers out of the box (configure in `data/models.json`):
@@ -484,6 +550,7 @@ Run `bash bootstrap.sh --setup --no-keyvault` and the script will prompt for all
 Optional secrets (all providers):
 
 - `ANTHROPIC-API-KEY` / `OPENAI-API-KEY` / `RESEND-API-KEY`
+- `TELEGRAM-BOT-TOKEN` — required when `IRIS_TRANSPORT=telegram`
 
 ---
 
@@ -500,8 +567,10 @@ irisflow/
 │   └── models.json.template        # template — bootstrap generates models.json from this
 ├── iris-runtime/                   # @iris-core/runtime — fork of pi-mom
 │   └── src/
-│       ├── main.ts                 # --provider, --model, --sandbox flags
+│       ├── main.ts                 # --provider, --model, --sandbox, --transport flags
 │       ├── agent.ts                # configurable model, constitution loading
+│       ├── slack.ts                # Slack Socket Mode transport
+│       ├── telegram.ts             # Telegram Bot API transport (long polling)
 │       ├── sandbox.ts              # HostExecutor, DockerExecutor, FirecrackerExecutor, pool
 │       ├── vm-manager.ts           # VmManager — on-demand Firecracker pool
 │       ├── api.ts                  # internal HTTP API stub
