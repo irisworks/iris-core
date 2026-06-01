@@ -449,6 +449,29 @@ prompt_secrets() {
     log "Skipping Slack — you can add IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN to /iris/.env later."
   fi
 
+  # ── Telegram ──
+  echo ""
+  TELEGRAM_BOT_TOKEN=""
+  if confirm "Set up Telegram integration?"; then
+    echo ""
+    echo "  ┌─ Telegram Bot Setup ──────────────────────────────────────────┐"
+    echo "  │                                                               │"
+    echo "  │  1. Open Telegram and message @BotFather                     │"
+    echo "  │  2. Send /newbot                                              │"
+    echo "  │  3. Enter a display name (e.g. Iris)                         │"
+    echo "  │  4. Enter a username ending in 'bot' (e.g. iris_mybot)       │"
+    echo "  │  5. Copy the token BotFather gives you                       │"
+    echo "  │     Looks like: 7123456789:AAFxyz...                         │"
+    echo "  │                                                               │"
+    echo "  └───────────────────────────────────────────────────────────────┘"
+    echo ""
+    read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
+    TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
+    [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
+  else
+    log "Skipping Telegram — you can add TELEGRAM_BOT_TOKEN to /iris/.env later."
+  fi
+
   # ── GitHub token ──
   GITHUB_TOKEN=""
   if confirm "Add GitHub token for repo access?"; then
@@ -505,6 +528,7 @@ AWS_REGION=""
 AWS_PROFILE=""
 SLACK_APP_TOKEN=""
 SLACK_BOT_TOKEN=""
+TELEGRAM_BOT_TOKEN=""
 GITHUB_TOKEN=""
 RESEND_API_KEY=""
 LLM_API_KEY=""
@@ -589,10 +613,11 @@ if [[ "$NO_KEYVAULT" == false ]]; then
                       seed_secret "AWS-REGION"            "${AWS_REGION_INPUT:-us-east-1}"
                       seed_secret "AWS-PROFILE"           "${AWS_PROFILE_INPUT:-}" ;;
     esac
-    seed_secret "SLACK-APP-TOKEN" "$SLACK_APP_TOKEN"
-    seed_secret "SLACK-BOT-TOKEN" "$SLACK_BOT_TOKEN"
-    seed_secret "GITHUB-TOKEN"    "$GITHUB_TOKEN"
-    seed_secret "RESEND-API-KEY"  "$RESEND_API_KEY"
+    seed_secret "SLACK-APP-TOKEN"    "$SLACK_APP_TOKEN"
+    seed_secret "SLACK-BOT-TOKEN"    "$SLACK_BOT_TOKEN"
+    [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && seed_secret "TELEGRAM-BOT-TOKEN" "$TELEGRAM_BOT_TOKEN"
+    seed_secret "GITHUB-TOKEN"       "$GITHUB_TOKEN"
+    seed_secret "RESEND-API-KEY"     "$RESEND_API_KEY"
     log "✓ Secrets seeded."
   else
     # Restore mode — defaults only
@@ -835,6 +860,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   GITHUB_TOKEN=$(fetch_secret "GITHUB-TOKEN")
   SLACK_APP_TOKEN=$(fetch_secret "SLACK-APP-TOKEN")
   SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
+  TELEGRAM_BOT_TOKEN=$(fetch_secret "TELEGRAM-BOT-TOKEN")
   RESEND_API_KEY=$(fetch_secret "RESEND-API-KEY")
   AWS_ACCESS_KEY_ID=$(fetch_secret "AWS-ACCESS-KEY-ID")
   AWS_SECRET_ACCESS_KEY=$(fetch_secret "AWS-SECRET-ACCESS-KEY")
@@ -933,6 +959,13 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo ""
   echo "IRIS_SLACK_APP_TOKEN=$(e "${SLACK_APP_TOKEN:-}")"
   echo "IRIS_SLACK_BOT_TOKEN=$(e "${SLACK_BOT_TOKEN:-}")"
+  echo "TELEGRAM_BOT_TOKEN=$(e "${TELEGRAM_BOT_TOKEN:-}")"
+  # Set transport: telegram if only Telegram token set, slack otherwise
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -z "${SLACK_APP_TOKEN:-}" ]]; then
+    echo "IRIS_TRANSPORT=telegram"
+  else
+    echo "IRIS_TRANSPORT=slack"
+  fi
   echo ""
   echo "GITHUB_TOKEN=$(e "${GITHUB_TOKEN:-}")"
   echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"
