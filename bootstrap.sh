@@ -453,19 +453,6 @@ prompt_secrets() {
   echo ""
   TELEGRAM_BOT_TOKEN=""
   if confirm "Set up Telegram integration?"; then
-    echo ""
-    echo "  ┌─ Telegram Bot Setup ──────────────────────────────────────────┐"
-    echo "  │                                                               │"
-    echo "  │  1. Open Telegram and message @BotFather                     │"
-    echo "  │  2. Send /newbot                                              │"
-    echo "  │  3. Enter a display name (e.g. Iris)                         │"
-    echo "  │  4. Enter a username ending in 'bot' (e.g. iris_mybot)       │"
-    echo "  │  5. Copy the token BotFather gives you                       │"
-    echo "  │     Looks like: 7123456789:AAFxyz...                         │"
-    echo "  │                                                               │"
-    echo "  └───────────────────────────────────────────────────────────────┘"
-    echo ""
-    read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
     TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
     [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
   else
