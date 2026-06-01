@@ -189,12 +189,6 @@ bash bootstrap.sh --setup --no-keyvault
 [iris-bootstrap] Slack Bot token (xoxb-...):
 
 [iris-bootstrap] Set up Telegram integration? [Y/n]
-  ┌─ Telegram Bot Setup ──────────────────────────────────────────┐
-  │  1. Open Telegram and message @BotFather                     │
-  │  2. Send /newbot → name it → username ending in 'bot'        │
-  │  5. Copy the token (looks like 7123456789:AAFxyz...)          │
-  └───────────────────────────────────────────────────────────────┘
-[iris-bootstrap] Press Enter when your bot is created and token is ready...
 [iris-bootstrap] Telegram Bot Token:
 
 [iris-bootstrap] Add GitHub token for repo access? [Y/n]
@@ -437,11 +431,7 @@ Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
 
 Iris can use Telegram instead of (or in addition to) Slack. No workspace invite needed — any Telegram user can message the bot directly.
 
-> **Bootstrap handles this automatically.** During `bash bootstrap.sh --setup`, you will be prompted:
-> ```
-> [iris-bootstrap] Set up Telegram integration? [Y/n]
-> ```
-> Answer `Y`, follow the on-screen instructions, paste your token — bootstrap writes it to `/iris/.env` and sets `IRIS_TRANSPORT` automatically. The steps below are for manual or post-install setup only.
+> **Bootstrap handles this automatically.** During `bash bootstrap.sh --setup`, you will be asked `Set up Telegram integration?` — answer `Y` and paste your token. Bootstrap writes it to `/iris/.env` and sets `IRIS_TRANSPORT` for you. The steps below are for manual or post-install setup only.
 
 **Step 1 — Create a bot via @BotFather**
 
