@@ -947,12 +947,6 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "IRIS_SLACK_APP_TOKEN=$(e "${SLACK_APP_TOKEN:-}")"
   echo "IRIS_SLACK_BOT_TOKEN=$(e "${SLACK_BOT_TOKEN:-}")"
   echo "TELEGRAM_BOT_TOKEN=$(e "${TELEGRAM_BOT_TOKEN:-}")"
-  # Set transport: telegram if only Telegram token set, slack otherwise
-  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -z "${SLACK_APP_TOKEN:-}" ]]; then
-    echo "IRIS_TRANSPORT=telegram"
-  else
-    echo "IRIS_TRANSPORT=slack"
-  fi
   echo ""
   echo "GITHUB_TOKEN=$(e "${GITHUB_TOKEN:-}")"
   echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"

@@ -29,7 +29,6 @@ interface ParsedArgs {
 	model: string;
 	environment: "preview" | "prod";
 	apiPort: number;
-	transport: "slack" | "telegram";
 }
 
 function parseArgs(): ParsedArgs {
@@ -43,7 +42,6 @@ function parseArgs(): ParsedArgs {
 	let model = process.env.IRIS_MODEL ?? "claude-sonnet-4-5";
 	let environment: "preview" | "prod" = (process.env.IRIS_ENV as "preview" | "prod") ?? "prod";
 	let apiPort = parseInt(process.env.IRIS_API_PORT ?? "0", 10);
-	let transport: "slack" | "telegram" = (process.env.IRIS_TRANSPORT as "slack" | "telegram") ?? "slack";
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -73,12 +71,6 @@ function parseArgs(): ParsedArgs {
 			apiPort = parseInt(arg.slice("--api-port=".length), 10);
 		} else if (arg === "--api-port") {
 			apiPort = parseInt(args[++i] || "0", 10);
-		} else if (arg.startsWith("--transport=")) {
-			const t = arg.slice("--transport=".length);
-			transport = t === "telegram" ? "telegram" : "slack";
-		} else if (arg === "--transport") {
-			const t = args[++i] || "slack";
-			transport = t === "telegram" ? "telegram" : "slack";
 		} else if (!arg.startsWith("-")) {
 			workingDir = arg;
 		}
@@ -92,7 +84,6 @@ function parseArgs(): ParsedArgs {
 		model,
 		environment,
 		apiPort,
-		transport,
 	};
 }
 
@@ -110,20 +101,19 @@ if (parsedArgs.downloadChannel) {
 
 // Normal bot mode - require working dir
 if (!parsedArgs.workingDir) {
-	console.error("Usage: iris-runtime [--sandbox=host|docker:<name>] [--transport=slack|telegram] [--provider <p>] [--model <m>] [--environment preview|prod] [--api-port <port>] <working-directory>");
+	console.error("Usage: iris-runtime [--sandbox=host|docker:<name>] [--provider <p>] [--model <m>] [--environment preview|prod] [--api-port <port>] <working-directory>");
 	console.error("       iris-runtime --download <channel-id>");
-	console.error("Env vars: IRIS_PROVIDER, IRIS_MODEL, IRIS_ENV, IRIS_API_PORT, IRIS_TRANSPORT, TELEGRAM_BOT_TOKEN");
+	console.error("Env vars: IRIS_PROVIDER, IRIS_MODEL, IRIS_ENV, IRIS_API_PORT, TELEGRAM_BOT_TOKEN, IRIS_SLACK_APP_TOKEN, IRIS_SLACK_BOT_TOKEN");
 	process.exit(1);
 }
 
-const { workingDir, sandbox, provider, model, environment, apiPort, transport } = {
+const { workingDir, sandbox, provider, model, environment, apiPort } = {
 	workingDir: parsedArgs.workingDir,
 	sandbox: parsedArgs.sandbox,
 	provider: parsedArgs.provider,
 	model: parsedArgs.model,
 	environment: parsedArgs.environment,
 	apiPort: parsedArgs.apiPort,
-	transport: parsedArgs.transport,
 };
 
 // Slack is optional — sub-agents run bridge-only (no Slack connection needed)
@@ -629,92 +619,68 @@ if (bridgePort > 0) {
 	startBridgeServer(bridgePort, workingDir);
 }
 
-if (transport === "telegram") {
-	if (!TELEGRAM_BOT_TOKEN) {
-		console.error("Missing env: TELEGRAM_BOT_TOKEN");
-		process.exit(1);
-	}
+const eventsWatcherBot = SLACK_ENABLED
+	? (() => {
+		const sharedStore = new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! });
+		const bot = new SlackBotClass(handler, {
+			appToken: IRIS_SLACK_APP_TOKEN,
+			botToken: IRIS_SLACK_BOT_TOKEN,
+			workingDir,
+			store: sharedStore,
+		});
+		botRef = bot;
+		bot.start();
+		return bot;
+	})()
+	: (() => {
+		// Bridge-only stub — used when no Slack tokens but events watcher still needs a bot
+		const stubBot = {
+			getUser: () => undefined,
+			getChannel: () => undefined,
+			getAllChannels: () => [],
+			getAllUsers: () => [],
+			postMessage: async () => Date.now().toString(),
+			updateMessage: async () => {},
+			finalizeMessage: async () => {},
+			deleteMessage: async () => {},
+			postInThread: async () => Date.now().toString(),
+			uploadFile: async () => {},
+			logBotResponse: () => {},
+			logToFile: () => {},
+			resetSessionContext: () => {},
+			enqueueEvent: (event: any) => handler.handleEvent(event, stubBot as any),
+			injectSessionMessage: async (sessionId: string, user: string, text: string) => {
+				const { registerSessionRequest } = await import("./sessions.js");
+				const channelId = `SESSION-${sessionId}`;
+				const ts = (Date.now() / 1000).toFixed(6);
+				const responsePromise = registerSessionRequest(sessionId, 90_000);
+				const slackEvent = { type: "mention" as const, channel: channelId, user, text, ts, attachments: [] };
+				handler.handleEvent(slackEvent, stubBot as any);
+				return responsePromise;
+			},
+		} as any;
+		botRef = stubBot;
+		log.logInfo("Slack tokens not set — running in bridge-only mode");
+		return stubBot;
+	})();
 
+if (TELEGRAM_BOT_TOKEN) {
 	const tgBot = new TelegramBot(telegramHandler, { token: TELEGRAM_BOT_TOKEN, workingDir });
-	botRef = tgBot;
-
-	const eventsWatcher = createEventsWatcher(workingDir, tgBot as any);
-	eventsWatcher.start();
-
-	process.on("SIGINT", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); tgBot.stop(); process.exit(0); });
-	process.on("SIGTERM", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); tgBot.stop(); process.exit(0); });
-
+	// Use tgBot as botRef only if Slack is not available (API server prefers Slack)
+	if (!SLACK_ENABLED) botRef = tgBot;
 	await tgBot.start();
-} else if (SLACK_ENABLED) {
-	// Shared store for attachment downloads (also used per-channel in getState)
-	const sharedStore = new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! });
-
-	const bot = new SlackBotClass(handler, {
-		appToken: IRIS_SLACK_APP_TOKEN,
-		botToken: IRIS_SLACK_BOT_TOKEN,
-		workingDir,
-		store: sharedStore,
-	});
-	botRef = bot;
-
-	// Start events watcher
-	const eventsWatcher = createEventsWatcher(workingDir, bot);
-	eventsWatcher.start();
-
-	// Handle shutdown
-	process.on("SIGINT", () => {
-		log.logInfo("Shutting down...");
-		eventsWatcher.stop();
-		process.exit(0);
-	});
-
-	process.on("SIGTERM", () => {
-		log.logInfo("Shutting down...");
-		eventsWatcher.stop();
-		process.exit(0);
-	});
-
-	bot.start();
+	process.on("SIGINT", () => { tgBot.stop(); });
+	process.on("SIGTERM", () => { tgBot.stop(); });
 } else {
-	// Bridge-only mode — no Slack tokens and no Telegram transport
-	log.logInfo("Slack tokens not set — running in bridge-only mode (events watcher + bridge server)");
+	log.logInfo("Telegram token not set — Telegram transport disabled");
+}
 
-	// Create a minimal stub bot for the events watcher and session injection
-	const stubBot = {
-		getUser: () => undefined,
-		getChannel: () => undefined,
-		getAllChannels: () => [],
-		getAllUsers: () => [],
-		postMessage: async () => Date.now().toString(),
-		updateMessage: async () => {},
-		finalizeMessage: async () => {},
-		deleteMessage: async () => {},
-		postInThread: async () => Date.now().toString(),
-		uploadFile: async () => {},
-		logBotResponse: () => {},
-		logToFile: () => {},
-		resetSessionContext: () => {},
-		enqueueEvent: (event: any) => handler.handleEvent(event, stubBot as any),
-		injectSessionMessage: async (sessionId: string, user: string, text: string) => {
-			// Re-use the same logic as SlackBot.injectSessionMessage
-			const { registerSessionRequest } = await import("./sessions.js");
-			const channelId = `SESSION-${sessionId}`;
-			const ts = (Date.now() / 1000).toFixed(6);
-			const responsePromise = registerSessionRequest(sessionId, 90_000);
-			const slackEvent = { type: "mention" as const, channel: channelId, user, text, ts, attachments: [] };
-			handler.handleEvent(slackEvent, stubBot as any);
-			return responsePromise;
-		},
-	} as any;
-
-	// Wire botRef so the API server's injectSessionMessage works
-	botRef = stubBot;
-
-	const eventsWatcher = createEventsWatcher(workingDir, stubBot);
-	eventsWatcher.start();
-
-	process.on("SIGINT", () => { eventsWatcher.stop(); process.exit(0); });
-	process.on("SIGTERM", () => { eventsWatcher.stop(); process.exit(0); });
-
+if (!SLACK_ENABLED && !TELEGRAM_BOT_TOKEN) {
 	log.logInfo("⚡️ Bridge-only mode active");
 }
+
+const eventsWatcher = createEventsWatcher(workingDir, eventsWatcherBot);
+eventsWatcher.start();
+
+process.on("SIGINT", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); process.exit(0); });
+process.on("SIGTERM", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); process.exit(0); });
