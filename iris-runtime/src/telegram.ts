@@ -379,7 +379,7 @@ export class TelegramBot {
 	// File download
 	// ==========================================================================
 
-	async downloadFile(fileId: string, channelId: string, fileName: string): Promise<Attachment | null> {
+	async downloadFile(fileId: string, channelId: string, fileName: string, messageId: string): Promise<Attachment | null> {
 		try {
 			const fileInfo = (await this.call("getFile", { file_id: fileId })) as { file_path?: string };
 			if (!fileInfo.file_path) return null;
@@ -391,7 +391,8 @@ export class TelegramBot {
 			const dir = join(resolveChannelDir(this.workingDir, channelId), "attachments");
 			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-			const localFileName = `${Date.now()}_${fileName}`;
+			// Use message_id as prefix so attachments are directly linked to their message
+			const localFileName = `msg${messageId}_${fileName}`;
 			const localRelPath = `${resolveChannelPath(channelId)}/attachments/${localFileName}`;
 			const absPath = join(this.workingDir, localRelPath);
 
@@ -637,7 +638,7 @@ export class TelegramBot {
 		// Download attachments (synchronous in poll loop — acceptable for file size Telegram allows)
 		const attachments: Attachment[] = [];
 		for (const file of files) {
-			const att = await this.downloadFile(file.fileId, channelId, file.name);
+			const att = await this.downloadFile(file.fileId, channelId, file.name, String(msg.message_id));
 			if (att) attachments.push(att);
 		}
 
