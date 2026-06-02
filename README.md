@@ -478,16 +478,10 @@ Claim state is saved to disk — persists across restarts.
 
 **Reclaiming** (e.g. changed Telegram account):
 
-If you need to transfer ownership to a different Telegram account, add this to `/iris/.env`:
-
-```
-IRIS_TELEGRAM_FORCE_RECLAIM=true
-```
-
-Then restart Iris:
+If you need to transfer ownership to a different Telegram account, run this single command:
 
 ```bash
-sudo systemctl restart iris
+echo "IRIS_TELEGRAM_FORCE_RECLAIM=true" >> /iris/.env && sudo systemctl restart iris
 ```
 
 The previous owner is cleared and a new claim token is printed to the terminal:
