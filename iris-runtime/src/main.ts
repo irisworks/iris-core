@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { startApiServer } from "./api.js";
@@ -10,7 +11,7 @@ import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
 import { TelegramBot, type IrisTelegramHandler, type TelegramEvent } from "./telegram.js";
-import { ChannelStore } from "./store.js";
+import { ChannelStore, resolveChannelDir } from "./store.js";
 
 // ============================================================================
 // Config
@@ -135,10 +136,53 @@ interface ChannelState {
 
 const channelStates = new Map<string, ChannelState>();
 
+// ============================================================================
+// Migration — move flat channel dirs into slack/ and telegram/ subdirectories
+// ============================================================================
+
+function migrateChannelDirs(dir: string): void {
+	if (!existsSync(dir)) return;
+	const entries = readdirSync(dir, { withFileTypes: true });
+	let migrated = 0;
+
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const name = entry.name;
+
+		// Skip already-structured dirs and special dirs
+		if (
+			name === "slack" || name === "telegram" || name === "data" ||
+			name === "events" || name === "sessions" ||
+			name.startsWith("SESSION-") || name.startsWith("BRIDGE-") ||
+			name.startsWith("ESCALATE-") || name.startsWith("SELFHEAL-") ||
+			name.startsWith("WEBUI")
+		) continue;
+
+		let destSubdir: string | null = null;
+		if (name.startsWith("tg-")) destSubdir = "telegram";
+		else if (/^[CDGW]/.test(name)) destSubdir = "slack";
+
+		if (!destSubdir) continue;
+
+		const src = join(dir, name);
+		const destDir = join(dir, destSubdir);
+		const dest = join(destDir, name);
+
+		if (!existsSync(dest)) {
+			if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+			renameSync(src, dest);
+			log.logInfo(`[migrate] ${name} → ${destSubdir}/${name}`);
+			migrated++;
+		}
+	}
+
+	if (migrated > 0) log.logInfo(`[migrate] Moved ${migrated} channel director${migrated === 1 ? "y" : "ies"} to transport subdirectories`);
+}
+
 function getState(channelId: string): ChannelState {
 	let state = channelStates.get(channelId);
 	if (!state) {
-		const channelDir = join(workingDir, channelId);
+		const channelDir = resolveChannelDir(workingDir, channelId);
 		state = {
 			running: false,
 			runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model),
@@ -606,6 +650,9 @@ if (sandbox.type === "host") {
 }
 log.logStartup(workingDir, sandboxLabel);
 log.logInfo(`iris-runtime: provider=${provider} model=${model} environment=${environment}`);
+
+// Migrate flat channel dirs to slack/ and telegram/ subdirectories
+migrateChannelDirs(workingDir);
 
 // Start internal API server (default port 3000, always-on for sub-agent escalation)
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;

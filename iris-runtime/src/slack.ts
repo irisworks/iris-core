@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "./log.js";
 import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
-import type { Attachment, ChannelStore } from "./store.js";
+import { resolveChannelDir, type Attachment, type ChannelStore } from "./store.js";
 
 // Slack has a 40,000 character limit for message text
 const SLACK_MAX_LENGTH = 40000;
@@ -469,7 +469,7 @@ export class SlackBot {
 	 * This is the ONLY place messages are written to log.jsonl
 	 */
 	logToFile(channel: string, entry: object): void {
-		const dir = join(this.workingDir, channel);
+		const dir = resolveChannelDir(this.workingDir, channel);
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 		appendFileSync(join(dir, "log.jsonl"), `${JSON.stringify(entry)}\n`);
 	}
@@ -1021,7 +1021,7 @@ export class SlackBot {
 	// ==========================================================================
 
 	private getExistingTimestamps(channelId: string): Set<string> {
-		const logPath = join(this.workingDir, channelId, "log.jsonl");
+		const logPath = join(resolveChannelDir(this.workingDir, channelId), "log.jsonl");
 		const timestamps = new Set<string>();
 		if (!existsSync(logPath)) return timestamps;
 
@@ -1119,7 +1119,7 @@ export class SlackBot {
 	 */
 	private async resumeInterruptedRuns(): Promise<void> {
 		for (const [channelId] of this.channels) {
-			const logPath = join(this.workingDir, channelId, "log.jsonl");
+			const logPath = join(resolveChannelDir(this.workingDir, channelId), "log.jsonl");
 			if (!existsSync(logPath)) continue;
 
 			let entries: Array<{ ts: string; user: string; text: string; isBot: boolean }>;
@@ -1203,7 +1203,7 @@ export class SlackBot {
 		// Only backfill channels that already have a log.jsonl (Iris has interacted with them before)
 		const channelsToBackfill: Array<[string, SlackChannel]> = [];
 		for (const [channelId, channel] of this.channels) {
-			const logPath = join(this.workingDir, channelId, "log.jsonl");
+			const logPath = join(resolveChannelDir(this.workingDir, channelId), "log.jsonl");
 			if (existsSync(logPath)) {
 				channelsToBackfill.push([channelId, channel]);
 			}

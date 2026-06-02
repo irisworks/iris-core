@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { basename, join } from "path";
 import * as log from "./log.js";
 import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
-import type { Attachment } from "./store.js";
+import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
 
 // ============================================================================
 // Constants
@@ -385,11 +385,11 @@ export class TelegramBot {
 			const response = await fetch(url);
 			if (!response.ok) return null;
 
-			const dir = join(this.workingDir, channelId, "attachments");
+			const dir = join(resolveChannelDir(this.workingDir, channelId), "attachments");
 			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
 			const localFileName = `${Date.now()}_${fileName}`;
-			const localRelPath = join(channelId, "attachments", localFileName);
+			const localRelPath = `${resolveChannelPath(channelId)}/attachments/${localFileName}`;
 			const absPath = join(this.workingDir, localRelPath);
 
 			const buffer = await response.arrayBuffer();
@@ -407,7 +407,7 @@ export class TelegramBot {
 	// ==========================================================================
 
 	logToFile(channelId: string, entry: object): void {
-		const dir = join(this.workingDir, channelId);
+		const dir = resolveChannelDir(this.workingDir, channelId);
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 		appendFileSync(join(dir, "log.jsonl"), `${JSON.stringify(entry)}\n`);
 	}
