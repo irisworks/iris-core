@@ -3,6 +3,7 @@ import { basename, join } from "path";
 import * as log from "./log.js";
 import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
+import { TelegramClaimManager } from "./telegram-claim.js";
 
 // ============================================================================
 // Constants
@@ -215,12 +216,14 @@ export class TelegramBot {
 	private running = false;
 	private offset = 0;
 	private chatNames = new Map<string, string>();
+	readonly claim: TelegramClaimManager;
 
 	constructor(
 		handler: IrisTelegramHandler,
 		config: { token: string; workingDir: string },
 	) {
 		this.token = config.token;
+		this.claim = new TelegramClaimManager(config.workingDir);
 		this.handler = handler;
 		this.workingDir = config.workingDir;
 	}
@@ -569,7 +572,27 @@ export class TelegramBot {
 			String(chatId);
 		this.chatNames.set(channelId, chatName);
 
-		const text = msg.text ?? msg.caption ?? "";
+		const text = (msg.text ?? msg.caption ?? "").trim();
+
+		// ==========================================================================
+		// Claim gate — bot must be claimed before it processes any messages
+		// ==========================================================================
+
+		if (!this.claim.isClaimed()) {
+			// Only accept a claim token — ignore everything else
+			const result = this.claim.tryClaimWith(chatId, text);
+			if (result === "claimed") {
+				log.logInfo(`[telegram] Bot claimed by chat_id ${chatId}`);
+				await this.postMessage(channelId, "✅ Bot claimed. You're all set — start chatting!");
+			} else if (result === "expired") {
+				await this.postMessage(channelId, "❌ Token expired. Restart Iris to get a new one.");
+			}
+			// Invalid token or no pending token — silently ignore
+			return;
+		}
+
+		// Bot is claimed — only the owner gets through
+		if (!this.claim.isOwner(chatId)) return;
 
 		// Handle bot commands
 		if (text.startsWith("/")) {

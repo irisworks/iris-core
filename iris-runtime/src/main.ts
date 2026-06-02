@@ -716,6 +716,24 @@ if (TELEGRAM_BOT_TOKEN) {
 	// Use tgBot as botRef only if Slack is not available (API server prefers Slack)
 	if (!SLACK_ENABLED) botRef = tgBot;
 	await tgBot.start();
+
+	// Force reclaim — reset owner so a new user can claim
+	if (process.env.IRIS_TELEGRAM_FORCE_RECLAIM === "true") {
+		tgBot.claim.reset();
+		log.logInfo("[telegram] Force reclaim — previous owner cleared.");
+	}
+
+	// If bot is unclaimed, generate a claim token and print it to the terminal
+	if (!tgBot.claim.isClaimed()) {
+		const token = tgBot.claim.generateToken();
+		log.logInfo("[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:");
+		log.logInfo("");
+		log.logInfo(`    ${token}`);
+		log.logInfo("");
+		log.logInfo("[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.");
+		log.logInfo("[telegram] To force re-claim later, set IRIS_TELEGRAM_FORCE_RECLAIM=true and restart.");
+	}
+
 	process.on("SIGINT", () => { tgBot.stop(); });
 	process.on("SIGTERM", () => { tgBot.stop(); });
 } else {
