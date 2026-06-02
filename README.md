@@ -478,12 +478,24 @@ Claim state is saved to disk — persists across restarts.
 
 **Reclaiming** (e.g. changed Telegram account):
 
-```bash
-# In /iris/.env
+If you need to transfer ownership to a different Telegram account, add this to `/iris/.env`:
+
+```
 IRIS_TELEGRAM_FORCE_RECLAIM=true
 ```
 
-Restart Iris — new token is printed. Claim it from your new account. Remove the env var after.
+Restart Iris — the previous owner is cleared and a new claim token is printed to the terminal:
+
+```
+[telegram] Force reclaim — previous owner cleared.
+[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:
+
+    a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+
+[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.
+```
+
+Send that token from your new Telegram account to the bot — it replies ✅ and the new account becomes the owner. Once claimed, remove `IRIS_TELEGRAM_FORCE_RECLAIM` from `/iris/.env`.
 
 ---
 
