@@ -445,17 +445,12 @@ Iris supports Telegram natively. The bot is private by design — it ignores all
 
 **Step 2 — Add the token**
 
-During bootstrap (automatic):
+During bootstrap you will be asked:
 ```
 [iris-bootstrap] Set up Telegram integration? [Y/n]
 [iris-bootstrap] Telegram Bot Token: ****
 ```
-
-Post-install (manual) — add to `/iris/.env`:
-```
-TELEGRAM_BOT_TOKEN=<your-token>
-```
-Then `sudo systemctl restart iris`.
+Bootstrap writes it to `/iris/.env` automatically.
 
 ---
 
