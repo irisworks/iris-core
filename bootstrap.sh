@@ -1264,6 +1264,22 @@ if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
 else
   log "  Slack:     not configured (add tokens to /iris/.env and restart)"
 fi
+if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  # Wait for Iris to start and print the claim token from the log
+  sleep 5
+  CLAIM_TOKEN=$(grep -m1 "Bot is unclaimed" -A2 "${IRIS_DIR}/iris-runtime.log" 2>/dev/null | grep -oE '[0-9a-f]{64}' | tail -1)
+  if [[ -n "$CLAIM_TOKEN" ]]; then
+    log ""
+    log "  ┌─ Telegram Claim Token ──────────────────────────────────────────┐"
+    log "  │                                                                 │"
+    log "  │  Send this token to your bot on Telegram to claim it:          │"
+    log "  │                                                                 │"
+    log "  │  ${CLAIM_TOKEN}  │"
+    log "  │                                                                 │"
+    log "  │  Token expires in 10 minutes.                                  │"
+    log "  └─────────────────────────────────────────────────────────────────┘"
+  fi
+fi
 if [[ "$FIRECRACKER_MODE" == true ]]; then
   log "  Firecracker: iris-fc-public-sandbox → ${FC_GUEST_IP}"
   log "  Sandbox:     ${SANDBOX_FLAG}"
