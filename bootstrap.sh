@@ -887,7 +887,8 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
     fi
 
     log "Cloning $REPO_URL → $REPO_DIR..."
-    git clone "$REPO_URL" "$REPO_DIR"
+    CURRENT_BRANCH=$(git -C "$(dirname "$0")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    git clone --branch "$CURRENT_BRANCH" "$REPO_URL" "$REPO_DIR"
   else
     log "Updating repo at $REPO_DIR..."
     git -C "$REPO_DIR" pull --ff-only 2>/dev/null || log "Warning: could not pull latest — continuing with current checkout"
