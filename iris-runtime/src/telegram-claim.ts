@@ -65,8 +65,14 @@ export class TelegramClaimManager {
 	// Attempt to claim the bot with the given token. Returns true on success.
 	tryClaimWith(chatId: number, token: string): "claimed" | "invalid" | "expired" {
 		if (!this.state.pendingToken) return "invalid";
+		if (new Date(this.state.tokenExpiresAt!).getTime() < Date.now()) {
+			// Token expired — clear it from disk so it's gone
+			this.state.pendingToken = null;
+			this.state.tokenExpiresAt = null;
+			this.save();
+			return "expired";
+		}
 		if (this.state.pendingToken !== token) return "invalid";
-		if (new Date(this.state.tokenExpiresAt!).getTime() < Date.now()) return "expired";
 
 		this.state.claimed = true;
 		this.state.chatId = chatId;
@@ -74,6 +80,18 @@ export class TelegramClaimManager {
 		this.state.tokenExpiresAt = null;
 		this.save();
 		return "claimed";
+	}
+
+	// Returns the pending token only if it's still valid, clears it if expired.
+	getActivePendingToken(): string | null {
+		if (!this.state.pendingToken) return null;
+		if (new Date(this.state.tokenExpiresAt!).getTime() < Date.now()) {
+			this.state.pendingToken = null;
+			this.state.tokenExpiresAt = null;
+			this.save();
+			return null;
+		}
+		return this.state.pendingToken;
 	}
 
 	// Reset claim state so a new owner can claim.

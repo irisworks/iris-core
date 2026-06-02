@@ -1265,9 +1265,9 @@ else
   log "  Slack:     not configured (add tokens to /iris/.env and restart)"
 fi
 if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  # Wait for Iris to start and print the claim token from the log
+  # Wait for Iris to start, then read the active token directly from the claim state file
   sleep 5
-  CLAIM_TOKEN=$(grep "Bot is unclaimed" -A2 "${IRIS_DIR}/iris-runtime.log" 2>/dev/null | grep -oE '[0-9a-f]{64}' | tail -1)
+  CLAIM_TOKEN=$(jq -r '.pendingToken // empty' "${IRIS_DIR}/data/data/telegram-owner.json" 2>/dev/null || true)
   if [[ -n "$CLAIM_TOKEN" ]]; then
     log ""
     log "  ┌─ Telegram Claim Token ──────────────────────────────────────────┐"
