@@ -429,7 +429,9 @@ Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
 
 ## Telegram Setup
 
-Iris supports Telegram natively. Get a bot token from `@BotFather` on Telegram, then:
+Iris supports Telegram natively. The bot is private by design — it ignores all messages until you claim it with a one-time token.
+
+---
 
 **Step 1 — Create a bot via @BotFather**
 
@@ -439,21 +441,56 @@ Iris supports Telegram natively. Get a bot token from `@BotFather` on Telegram, 
 4. Enter a username ending in `bot` (e.g. `iris_mybot`)
 5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
 
-**During bootstrap (automatic):**
+---
+
+**Step 2 — Add the token**
+
+During bootstrap (automatic):
 ```
 [iris-bootstrap] Set up Telegram integration? [Y/n]
 [iris-bootstrap] Telegram Bot Token: ****
 ```
-Bootstrap writes the token to `/iris/.env` and sets `IRIS_TRANSPORT` automatically.
 
-**Post-install (manual):**
-
-Add to `/iris/.env`:
+Post-install (manual) — add to `/iris/.env`:
 ```
 TELEGRAM_BOT_TOKEN=<your-token>
-IRIS_TRANSPORT=telegram
 ```
 Then `sudo systemctl restart iris`.
+
+---
+
+**Step 3 — Claim the bot**
+
+On first startup, Iris prints a one-time claim token to the terminal:
+
+```
+[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:
+
+    7609ca139e8d7ad4508c26ef0f1e1c6ea14eafb7a0a719d59e6404bf114724ae
+
+[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.
+```
+
+Open Telegram, message your bot with that exact token. Bot replies:
+
+```
+✅ Bot claimed. You're all set — start chatting!
+```
+
+Claim state is saved to disk — persists across restarts.
+
+---
+
+**Reclaiming** (e.g. changed Telegram account):
+
+```bash
+# In /iris/.env
+IRIS_TELEGRAM_FORCE_RECLAIM=true
+```
+
+Restart Iris — new token is printed. Claim it from your new account. Remove the env var after.
+
+---
 
 **Bot commands**
 
@@ -463,13 +500,16 @@ Then `sudo systemctl restart iris`.
 | `/compact` | Summarise context to save tokens |
 | `/stop` | Abort a running response |
 
-**Session mapping**
+---
 
-| Chat type | Channel ID |
-|---|---|
-| DM | `tg-{chat_id}` |
-| Group | `tg-{chat_id}` |
-| Group with topics | `tg-{chat_id}-{thread_id}` |
+**Running Slack and Telegram simultaneously**
+
+Set all tokens in `/iris/.env` — both transports start in the same process automatically:
+```
+IRIS_SLACK_APP_TOKEN=xapp-...
+IRIS_SLACK_BOT_TOKEN=xoxb-...
+TELEGRAM_BOT_TOKEN=...
+```
 
 ---
 
