@@ -744,8 +744,26 @@ if (!SLACK_ENABLED && !TELEGRAM_BOT_TOKEN) {
 	log.logInfo("⚡️ Bridge-only mode active");
 }
 
-const eventsWatcher = createEventsWatcher(workingDir, eventsWatcherBot);
-eventsWatcher.start();
+// Create a universal router bot that dispatches events to the right transport
+// based on channelId prefix: tg-* → TelegramBot, everything else → SlackBot/stub
+const tgBotRef = (TELEGRAM_BOT_TOKEN ? (botRef instanceof TelegramBot ? botRef : null) : null);
+const universalBot = {
+	...eventsWatcherBot,
+	enqueueEvent: (event: any) => {
+		if (event.channel?.startsWith("tg-") && tgBotRef) {
+			return tgBotRef.enqueueEvent(event);
+		}
+		return eventsWatcherBot.enqueueEvent(event);
+	},
+} as any;
 
-process.on("SIGINT", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); process.exit(0); });
-process.on("SIGTERM", () => { log.logInfo("Shutting down..."); eventsWatcher.stop(); process.exit(0); });
+// Watch slack/events/, telegram/events/, and root events/ for backward compat
+const watchDirs = ["slack/events", "telegram/events", "events"];
+const watchers = watchDirs.map(sub => {
+	const w = createEventsWatcher(workingDir, universalBot, sub === "events" ? undefined : sub.split("/")[0]);
+	w.start();
+	return w;
+});
+
+process.on("SIGINT", () => { log.logInfo("Shutting down..."); watchers.forEach(w => w.stop()); process.exit(0); });
+process.on("SIGTERM", () => { log.logInfo("Shutting down..."); watchers.forEach(w => w.stop()); process.exit(0); });

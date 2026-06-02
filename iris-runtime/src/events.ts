@@ -378,7 +378,7 @@ export class EventsWatcher {
 /**
  * Create and start an events watcher.
  */
-export function createEventsWatcher(workspaceDir: string, slack: SlackBot): EventsWatcher {
-	const eventsDir = join(workspaceDir, "events");
+export function createEventsWatcher(workspaceDir: string, slack: SlackBot, subDir?: string): EventsWatcher {
+	const eventsDir = subDir ? join(workspaceDir, subDir, "events") : join(workspaceDir, "events");
 	return new EventsWatcher(eventsDir, slack);
 }
