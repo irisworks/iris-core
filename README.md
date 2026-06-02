@@ -461,7 +461,7 @@ On first startup, Iris prints a one-time claim token to the terminal:
 ```
 [telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:
 
-    7609ca139e8d7ad4508c26ef0f1e1c6ea14eafb7a0a719d59e6404bf114724ae
+    a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
 
 [telegram] Token expires in 10 minutes. Restart Iris to generate a new one.
 ```
@@ -484,7 +484,13 @@ If you need to transfer ownership to a different Telegram account, add this to `
 IRIS_TELEGRAM_FORCE_RECLAIM=true
 ```
 
-Restart Iris — the previous owner is cleared and a new claim token is printed to the terminal:
+Then restart Iris:
+
+```bash
+sudo systemctl restart iris
+```
+
+The previous owner is cleared and a new claim token is printed to the terminal:
 
 ```
 [telegram] Force reclaim — previous owner cleared.
