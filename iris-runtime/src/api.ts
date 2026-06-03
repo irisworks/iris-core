@@ -12,6 +12,8 @@
  *                                          body: { channelId, text, user? }
  *   POST /escalate                       — sub-agent escalates a problem to Iris
  *                                          body: { agent, issue, context?, severity?, environment? }
+ *   POST /internal/write-event           — write an event file (immediate/one-shot/periodic/interval)
+ *                                          body: { name, type, channelId, text, ...type-specific fields }
  *
  *   POST   /sessions                     — create session
  *   GET    /sessions                     — list all sessions
@@ -446,6 +448,68 @@ export function startApiServer(
 				appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
 				log.logInfo(`[api] POST /sessions/${sessionId}/inject-turn: ${body.text.substring(0, 60)}`);
 				json(res, 200, { status: "ok" });
+				return;
+			}
+
+			// ── POST /internal/write-event ─────────────────────────────────────────
+			// Write an event file to the appropriate transport events directory.
+			// Supports all four event types: immediate, one-shot, periodic, interval.
+			if (method === "POST" && urlParts[0] === "internal" && urlParts[1] === "write-event") {
+				let body: Record<string, unknown>;
+				try {
+					body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				} catch {
+					json(res, 400, { error: "invalid JSON body" });
+					return;
+				}
+
+				const { name, type, channelId, text } = body;
+				if (!name || !type || !channelId || !text) {
+					json(res, 400, { error: "name, type, channelId, text are required" });
+					return;
+				}
+
+				// Route to the right events subdirectory based on channel prefix
+				const subDir = String(channelId).startsWith("tg-") ? "telegram" : "slack";
+				const dir = join(workingDir, subDir, "events");
+				const filename = `${String(name)}-${Date.now()}.json`;
+				const filePath = join(dir, filename);
+
+				// Build the event payload — only include known fields per type
+				let payload: Record<string, unknown>;
+				switch (String(type)) {
+					case "immediate":
+						payload = { type: "immediate", channelId, text };
+						break;
+					case "one-shot":
+						if (!body.at) { json(res, 400, { error: "'at' is required for one-shot events" }); return; }
+						payload = { type: "one-shot", channelId, text, at: body.at };
+						break;
+					case "periodic":
+						if (!body.schedule || !body.timezone) { json(res, 400, { error: "'schedule' and 'timezone' are required for periodic events" }); return; }
+						payload = { type: "periodic", channelId, text, schedule: body.schedule, timezone: body.timezone };
+						break;
+					case "interval":
+						if (typeof body.intervalSeconds !== "number" || body.intervalSeconds <= 0) { json(res, 400, { error: "'intervalSeconds' must be a positive number for interval events" }); return; }
+						payload = { type: "interval", channelId, text, intervalSeconds: body.intervalSeconds };
+						if (body.endsAt) payload.endsAt = body.endsAt;
+						if (body.count !== undefined) payload.count = Number(body.count);
+						break;
+					default:
+						json(res, 400, { error: `unknown event type '${type}'` });
+						return;
+				}
+
+				try {
+					const { mkdirSync: mkdir2 } = await import("fs");
+					mkdir2(dir, { recursive: true });
+					writeFileSync(filePath, JSON.stringify(payload, null, 2));
+					log.logInfo(`[api] POST /internal/write-event → ${filename} (${type})`);
+					json(res, 200, { ok: true, filename });
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					json(res, 500, { error: `Failed to write event file: ${msg}` });
+				}
 				return;
 			}
 
