@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { randomBytes } from "crypto";
 import { join } from "path";
 
@@ -14,34 +14,63 @@ interface ClaimState {
 }
 
 const TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const EMPTY_STATE: ClaimState = { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null };
 
 // ============================================================================
 // TelegramClaimManager
+// ============================================================================
+//
+// One claim file per bot, keyed by botId:
+//   /iris/data/data/telegram-owner-{botId}.json
+//
+// Migration: if the legacy shared file (telegram-owner.json) exists and the
+// per-bot file does not, the legacy file is renamed so the bot stays claimed.
+//
+// When botId is "pending" (pre-start placeholder) the file is not written.
 // ============================================================================
 
 export class TelegramClaimManager {
 	private filePath: string;
 	private state: ClaimState;
+	private readonly isPending: boolean;
 
-	constructor(workingDir: string) {
+	constructor(workingDir: string, botId: string) {
 		const dataDir = join(workingDir, "data");
 		if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
-		this.filePath = join(dataDir, "telegram-owner.json");
+
+		this.isPending = botId === "pending";
+
+		if (this.isPending) {
+			// Pre-start placeholder — reads nothing, writes nothing
+			this.filePath = "";
+			this.state = { ...EMPTY_STATE };
+			return;
+		}
+
+		this.filePath = join(dataDir, `telegram-owner-${botId}.json`);
+
+		// Migrate legacy shared file on first use of this botId
+		const legacyPath = join(dataDir, "telegram-owner.json");
+		if (!existsSync(this.filePath) && existsSync(legacyPath)) {
+			try {
+				renameSync(legacyPath, this.filePath);
+			} catch { /* leave legacy in place if rename fails */ }
+		}
+
 		this.state = this.load();
 	}
 
 	private load(): ClaimState {
-		if (!existsSync(this.filePath)) {
-			return { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null };
-		}
+		if (!this.filePath || !existsSync(this.filePath)) return { ...EMPTY_STATE };
 		try {
 			return JSON.parse(readFileSync(this.filePath, "utf-8")) as ClaimState;
 		} catch {
-			return { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null };
+			return { ...EMPTY_STATE };
 		}
 	}
 
 	private save(): void {
+		if (this.isPending || !this.filePath) return;
 		writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
 	}
 
@@ -53,20 +82,17 @@ export class TelegramClaimManager {
 		return this.state.claimed && this.state.chatId === chatId;
 	}
 
-	// Generate a new claim token, replacing any existing pending one.
 	generateToken(): string {
-		const token = randomBytes(32).toString("hex"); // 64-char hex
+		const token = randomBytes(32).toString("hex");
 		this.state.pendingToken = token;
 		this.state.tokenExpiresAt = new Date(Date.now() + TOKEN_TTL_MS).toISOString();
 		this.save();
 		return token;
 	}
 
-	// Attempt to claim the bot with the given token. Returns true on success.
 	tryClaimWith(chatId: number, token: string): "claimed" | "invalid" | "expired" {
 		if (!this.state.pendingToken) return "invalid";
 		if (new Date(this.state.tokenExpiresAt!).getTime() < Date.now()) {
-			// Token expired — clear it from disk so it's gone
 			this.state.pendingToken = null;
 			this.state.tokenExpiresAt = null;
 			this.save();
@@ -82,7 +108,6 @@ export class TelegramClaimManager {
 		return "claimed";
 	}
 
-	// Returns the pending token only if it's still valid, clears it if expired.
 	getActivePendingToken(): string | null {
 		if (!this.state.pendingToken) return null;
 		if (new Date(this.state.tokenExpiresAt!).getTime() < Date.now()) {
@@ -94,9 +119,8 @@ export class TelegramClaimManager {
 		return this.state.pendingToken;
 	}
 
-	// Reset claim state so a new owner can claim.
 	reset(): void {
-		this.state = { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null };
+		this.state = { ...EMPTY_STATE };
 		this.save();
 	}
 

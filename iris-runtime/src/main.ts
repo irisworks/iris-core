@@ -17,9 +17,8 @@ import { ChannelStore, resolveChannelDir } from "./store.js";
 // Config
 // ============================================================================
 
-const IRIS_SLACK_APP_TOKEN = process.env.IRIS_SLACK_APP_TOKEN ?? process.env.IRIS_SLACK_APP_TOKEN;
-const IRIS_SLACK_BOT_TOKEN = process.env.IRIS_SLACK_BOT_TOKEN ?? process.env.IRIS_SLACK_BOT_TOKEN;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const IRIS_SLACK_APP_TOKEN = process.env.IRIS_SLACK_APP_TOKEN;
+const IRIS_SLACK_BOT_TOKEN = process.env.IRIS_SLACK_BOT_TOKEN;
 
 interface ParsedArgs {
 	workingDir?: string;
@@ -185,7 +184,7 @@ function getState(channelId: string): ChannelState {
 		const channelDir = resolveChannelDir(workingDir, channelId);
 		state = {
 			running: false,
-			runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model),
+			runner: getOrCreateRunner(sandbox, channelId, channelDir, workingDir, provider, model),
 			store: new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! }),
 			stopRequested: false,
 		};
@@ -570,9 +569,9 @@ const telegramHandler: IrisTelegramHandler = {
 		if (state?.running) {
 			state.stopRequested = true;
 			state.runner.abort();
-			await bot.postMessage(channelId, "_Stopping..._");
+			await bot.postMessage(channelId, "_Stopping current task..._");
 		} else {
-			await bot.postMessage(channelId, "_Nothing running_");
+			await bot.postMessage(channelId, "_Nothing is currently running_");
 		}
 	},
 
@@ -598,13 +597,16 @@ const telegramHandler: IrisTelegramHandler = {
 
 	async handleReset(channelId: string, bot: TelegramBot): Promise<void> {
 		const state = getState(channelId);
+		// Abort whatever is currently running
 		if (state.running) {
 			state.stopRequested = true;
 			state.runner.abort();
 		}
+		// Drain all queued-but-not-yet-started tasks so nothing executes after this
+		bot.drainQueue(channelId);
 		state.runner.reset();
 		state.running = false;
-		await bot.postMessage(channelId, "_Context cleared — starting fresh_");
+		await bot.postMessage(channelId, "_All tasks stopped and queue cleared. Context reset — starting fresh._");
 	},
 
 	async handleEvent(event: TelegramEvent, bot: TelegramBot, isEvent?: boolean): Promise<void> {
@@ -727,22 +729,41 @@ const eventsWatcherBot = SLACK_ENABLED
 		return stubBot;
 	})();
 
-if (TELEGRAM_BOT_TOKEN) {
-	const tgBot = new TelegramBot(telegramHandler, { token: TELEGRAM_BOT_TOKEN, workingDir });
-	// Use tgBot as botRef only if Slack is not available (API server prefers Slack)
-	if (!SLACK_ENABLED) botRef = tgBot;
-	await tgBot.start();
+// ============================================================================
+// Telegram — start up to 5 bot instances (one per token)
+// ============================================================================
 
-	// Force reclaim — reset owner so a new user can claim
-	if (process.env.IRIS_TELEGRAM_FORCE_RECLAIM === "true") {
-		tgBot.claim.reset();
-		log.logInfo("[telegram] Force reclaim — previous owner cleared.");
+// Collect all configured tokens: TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_TOKEN_2..5
+const telegramTokens: string[] = [
+	process.env.TELEGRAM_BOT_TOKEN,
+	process.env.TELEGRAM_BOT_TOKEN_2,
+	process.env.TELEGRAM_BOT_TOKEN_3,
+	process.env.TELEGRAM_BOT_TOKEN_4,
+	process.env.TELEGRAM_BOT_TOKEN_5,
+].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+
+const tgBots: TelegramBot[] = [];
+
+for (const token of telegramTokens) {
+	const tgBot = new TelegramBot(telegramHandler, { token, workingDir });
+	try {
+		await tgBot.start();
+	} catch (err) {
+		// Registry rejected this bot (max 5 reached) or API error — skip it
+		log.logWarning("[telegram] Bot failed to start", err instanceof Error ? err.message : String(err));
+		continue;
 	}
 
-	// If bot is unclaimed, generate a claim token and print it to the terminal
+	// Force reclaim if requested (applies to ALL bots on this startup)
+	if (process.env.IRIS_TELEGRAM_FORCE_RECLAIM === "true") {
+		tgBot.claim.reset();
+		log.logInfo(`[telegram:${tgBot.getBotId()}] Force reclaim — previous owner cleared.`);
+	}
+
+	// Print claim token to terminal for any unclaimed bot
 	if (!tgBot.claim.isClaimed()) {
 		const token = tgBot.claim.generateToken();
-		log.logInfo("[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:");
+		log.logInfo(`[telegram:${tgBot.getBotId()}] Bot is unclaimed. Send this token to your bot on Telegram to claim it:`);
 		log.logInfo("");
 		log.logInfo(`    ${token}`);
 		log.logInfo("");
@@ -750,24 +771,47 @@ if (TELEGRAM_BOT_TOKEN) {
 		log.logInfo("[telegram] To force re-claim later, set IRIS_TELEGRAM_FORCE_RECLAIM=true and restart.");
 	}
 
-	process.on("SIGINT", () => { tgBot.stop(); });
-	process.on("SIGTERM", () => { tgBot.stop(); });
-} else {
+	tgBots.push(tgBot);
+	// First bot becomes botRef if Slack is not active (API server prefers Slack)
+	if (!SLACK_ENABLED && tgBots.length === 1) botRef = tgBot;
+}
+
+if (telegramTokens.length === 0) {
 	log.logInfo("Telegram token not set — Telegram transport disabled");
 }
 
-if (!SLACK_ENABLED && !TELEGRAM_BOT_TOKEN) {
+if (!SLACK_ENABLED && telegramTokens.length === 0) {
 	log.logInfo("⚡️ Bridge-only mode active");
 }
 
-// Create a universal router bot that dispatches events to the right transport
-// based on channelId prefix: tg-* → TelegramBot, everything else → SlackBot/stub
-const tgBotRef = (TELEGRAM_BOT_TOKEN ? (botRef instanceof TelegramBot ? botRef : null) : null);
+
+// ============================================================================
+// Universal router — dispatches events to the right transport.
+// For tg-* channels: find the bot whose claim owner matches the chatId.
+// Each bot's queues are completely isolated — no cross-bot dispatch.
+// ============================================================================
+
+function findBotForChannel(channelId: string): TelegramBot | undefined {
+	if (!channelId.startsWith("tg-")) return undefined;
+	// Extract numeric chatId from channelId (tg-{chatId} or tg-n{abs} or tg-{chatId}-{threadId})
+	const rest = channelId.slice(3);
+	const chatStr = rest.includes("-") ? rest.slice(0, rest.lastIndexOf("-")) : rest;
+	const chatId = chatStr.startsWith("n") ? -parseInt(chatStr.slice(1), 10) : parseInt(chatStr, 10);
+
+	// Prefer the bot that owns this chatId (has it claimed or has seen it before)
+	const ownerMatch = tgBots.find((b) => b.claim.getOwnerId() === chatId);
+	if (ownerMatch) return ownerMatch;
+
+	// Fall back to first available bot
+	return tgBots[0];
+}
+
 const universalBot = {
 	...eventsWatcherBot,
 	enqueueEvent: (event: any) => {
-		if (event.channel?.startsWith("tg-") && tgBotRef) {
-			return tgBotRef.enqueueEvent(event);
+		if (event.channel?.startsWith("tg-")) {
+			const tgBot = findBotForChannel(event.channel);
+			if (tgBot) return tgBot.enqueueEvent(event);
 		}
 		return eventsWatcherBot.enqueueEvent(event);
 	},
@@ -775,9 +819,8 @@ const universalBot = {
 
 // Route hasPendingEvent checks to the right transport
 const hasPendingEvent = (channelId: string): boolean => {
-	if (channelId.startsWith("tg-") && tgBotRef instanceof TelegramBot) {
-		return tgBotRef.hasPendingEvent(channelId);
-	}
+	const tgBot = findBotForChannel(channelId);
+	if (tgBot) return tgBot.hasPendingEvent(channelId);
 	return false;
 };
 
@@ -794,5 +837,11 @@ const watchers = watchDirs.map(sub => {
 	return w;
 });
 
-process.on("SIGINT", () => { log.logInfo("Shutting down..."); watchers.forEach(w => w.stop()); process.exit(0); });
-process.on("SIGTERM", () => { log.logInfo("Shutting down..."); watchers.forEach(w => w.stop()); process.exit(0); });
+const shutdown = () => {
+	log.logInfo("Shutting down...");
+	tgBots.forEach((b) => b.stop());
+	watchers.forEach((w) => w.stop());
+	process.exit(0);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

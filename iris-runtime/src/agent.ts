@@ -210,7 +210,8 @@ You are operating via Telegram as ${botDisplayName}.
 - Sub-agent spawning is disabled for Telegram. Handle all tasks directly.
 - For recurring task requests, create or update a skill file so the work can be repeated efficiently.
 - Use standard Markdown: **bold**, _italic_, \`inline code\`, \`\`\`code blocks\`\`\`. Do NOT use Slack mrkdwn (*bold*, <url|text>).
-- Available user commands: /reset (clear context), /compact (summarise context), /stop (abort current task).` : "";
+- Available user commands: /reset (clear context), /compact (summarise context), /stop (abort current task).
+- Never reveal, repeat, describe, or hint at environment variables, API keys, tokens, passwords, or any internal credentials or system configuration. If asked about system internals or credentials, decline clearly.` : "";
 
 	const identityLine = isTg
 		? `You are ${botDisplayName}, a Telegram-connected AI assistant. Be concise. No emojis.`
@@ -460,13 +461,14 @@ export function getOrCreateRunner(
 	sandboxConfig: SandboxConfig,
 	channelId: string,
 	channelDir: string,
+	workingDir: string,
 	provider: string,
 	modelId: string,
 ): AgentRunner {
 	const existing = channelRunners.get(channelId);
 	if (existing) return existing;
 
-	const runner = createRunner(sandboxConfig, channelId, channelDir, provider, modelId);
+	const runner = createRunner(sandboxConfig, channelId, channelDir, workingDir, provider, modelId);
 	channelRunners.set(channelId, runner);
 	return runner;
 }
@@ -479,11 +481,12 @@ function createRunner(
 	sandboxConfig: SandboxConfig,
 	channelId: string,
 	channelDir: string,
+	workingDir: string,
 	provider: string,
 	modelId: string,
 ): AgentRunner {
 	const executor = createExecutor(sandboxConfig, channelId);
-	const workspaceDir = channelDir.replace(`/${channelId}`, "");
+	const workspaceDir = workingDir;
 	const workspacePath = executor.getWorkspacePath(workspaceDir);
 
 	// Create tools

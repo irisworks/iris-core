@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "./log.js";
+import { TelegramBotRegistry } from "./telegram-bot-registry.js";
 import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
 import { TelegramClaimManager } from "./telegram-claim.js";
@@ -11,6 +12,10 @@ import { TelegramClaimManager } from "./telegram-claim.js";
 
 const TG_MAX_CHARS = 4096;
 const POLL_TIMEOUT = 30;
+const USER_QUEUE_MAX = 5;
+const SPAM_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+const EVENT_QUEUE_HARD_CAP = 360;
+const EVENT_QUEUE_DEFAULT = 50;
 
 // ============================================================================
 // Telegram API types
@@ -128,54 +133,177 @@ export interface IrisTelegramHandler {
 }
 
 // ============================================================================
+// Scheduling intent — cosine similarity engine
+// ============================================================================
+
+const SCHEDULE_THRESHOLD = 0.35;
+
+const SCHEDULE_REFERENCE_PHRASES = [
+	"schedule a task for me",
+	"set up a reminder",
+	"remind me every day",
+	"run this every morning",
+	"create a periodic task",
+	"set up recurring job",
+	"schedule this weekly",
+	"remind me at 9am daily",
+	"run this on a schedule",
+	"create an interval event",
+	"set a cron job",
+	"daily reminder",
+	"weekly task",
+	"schedule every hour",
+	"send me update every day",
+	"check this every morning",
+	"repeat this task",
+	"recurring reminder",
+	"automate this task",
+	"run automatically",
+];
+
+const STOPWORDS = new Set([
+	"a", "an", "the", "is", "it", "in", "on", "at", "to", "for", "of",
+	"and", "or", "i", "me", "my", "this", "that", "with", "be", "do",
+	"up", "by", "from", "can", "you", "we", "us", "am", "are", "was",
+	"will", "would", "could", "should", "please", "just",
+]);
+
+function tokenize(text: string): string[] {
+	return text
+		.toLowerCase()
+		.replace(/[^a-z0-9\s]/g, " ")
+		.split(/\s+/)
+		.filter((t) => t.length > 1 && !STOPWORDS.has(t));
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+	let dot = 0, magA = 0, magB = 0;
+	for (let i = 0; i < a.length; i++) {
+		dot += a[i] * b[i];
+		magA += a[i] * a[i];
+		magB += b[i] * b[i];
+	}
+	if (magA === 0 || magB === 0) return 0;
+	return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+function hasSchedulingIntent(text: string): boolean {
+	const inputTokens = tokenize(text);
+	if (inputTokens.length === 0) return false;
+
+	// Build vocabulary from all reference phrases + input
+	const vocabSet = new Set<string>();
+	const refTokensList = SCHEDULE_REFERENCE_PHRASES.map((p) => {
+		const t = tokenize(p);
+		t.forEach((w) => vocabSet.add(w));
+		return t;
+	});
+	inputTokens.forEach((w) => vocabSet.add(w));
+	const vocab = Array.from(vocabSet);
+
+	const toVec = (tokens: string[]): number[] =>
+		vocab.map((w) => (tokens.includes(w) ? 1 : 0));
+
+	const inputVec = toVec(inputTokens);
+
+	for (const refTokens of refTokensList) {
+		const sim = cosineSimilarity(inputVec, toVec(refTokens));
+		if (sim >= SCHEDULE_THRESHOLD) return true;
+	}
+	return false;
+}
+
+// ============================================================================
 // Per-channel queue
 // ============================================================================
-// Single execution queue per channel — user messages and scheduled events
-// serialize through it so the runner is never called concurrently.
-// User and event pending counts are tracked separately so their caps are
-// independent: a burst of user messages can't starve scheduled events.
+// userQueue and eventQueue are fully independent — events never block user
+// messages and vice versa. Spam cooldown is tracked per channel.
 // ============================================================================
 
 type QueuedWork = () => Promise<void>;
+type EnqueueUserResult = "queued" | "spam" | "full";
+
+function getEventQueueMax(): number {
+	const raw = parseInt(process.env.TG_EVENT_QUEUE_MAX ?? "", 10);
+	if (isNaN(raw) || raw <= 0) return EVENT_QUEUE_DEFAULT;
+	return Math.min(raw, EVENT_QUEUE_HARD_CAP);
+}
 
 class ChannelQueues {
-	private queue: QueuedWork[] = [];
-	private processing = false;
-	private userPending = 0;
-	private eventPending = 0;
+	private userQueue: QueuedWork[] = [];
+	private eventQueue: QueuedWork[] = [];
+	private userProcessing = false;
+	private eventProcessing = false;
+	private spamCooldownUntil = 0;
+	private readonly eventQueueMax: number;
 
-	userSize(): number { return this.userPending; }
-	eventSize(): number { return this.eventPending; }
-
-	enqueueUser(work: QueuedWork): void {
-		this.userPending++;
-		this.queue.push(async () => {
-			this.userPending--;
-			await work();
-		});
-		this.processNext();
+	constructor() {
+		this.eventQueueMax = getEventQueueMax();
 	}
 
-	enqueueEvent(work: QueuedWork): void {
-		this.eventPending++;
-		this.queue.push(async () => {
-			this.eventPending--;
-			await work();
-		});
-		this.processNext();
+	// -- Spam cooldown --------------------------------------------------------
+
+	isSpamCooldownActive(): boolean {
+		return Date.now() < this.spamCooldownUntil;
 	}
 
-	private async processNext(): Promise<void> {
-		if (this.processing || this.queue.length === 0) return;
-		this.processing = true;
-		const work = this.queue.shift()!;
-		try {
-			await work();
-		} catch (err) {
-			log.logWarning("Queue error", err instanceof Error ? err.message : String(err));
+	// -- User queue -----------------------------------------------------------
+
+	userSize(): number { return this.userQueue.length; }
+
+	enqueueUser(work: QueuedWork): EnqueueUserResult {
+		if (this.isSpamCooldownActive()) return "spam";
+		if (this.userQueue.length >= USER_QUEUE_MAX) {
+			this.spamCooldownUntil = Date.now() + SPAM_COOLDOWN_MS;
+			log.logWarning("[telegram] Spam cooldown activated — ignoring messages for 5 minutes");
+			return "spam";
 		}
-		this.processing = false;
-		this.processNext();
+		this.userQueue.push(work);
+		void this.processNextUser();
+		return "queued";
+	}
+
+	// -- Event queue ----------------------------------------------------------
+
+	eventSize(): number { return this.eventQueue.length; }
+
+	enqueueEvent(work: QueuedWork): boolean {
+		if (this.eventQueue.length >= this.eventQueueMax) return false;
+		this.eventQueue.push(work);
+		void this.processNextEvent();
+		return true;
+	}
+
+	// -- Drain (used by /reset) -----------------------------------------------
+
+	drain(): void {
+		this.userQueue = [];
+		this.eventQueue = [];
+		this.spamCooldownUntil = 0;
+	}
+
+	// -- Private processing loops --------------------------------------------
+
+	private async processNextUser(): Promise<void> {
+		if (this.userProcessing || this.userQueue.length === 0) return;
+		this.userProcessing = true;
+		const work = this.userQueue.shift()!;
+		try { await work(); } catch (err) {
+			log.logWarning("User queue error", err instanceof Error ? err.message : String(err));
+		}
+		this.userProcessing = false;
+		void this.processNextUser();
+	}
+
+	private async processNextEvent(): Promise<void> {
+		if (this.eventProcessing || this.eventQueue.length === 0) return;
+		this.eventProcessing = true;
+		const work = this.eventQueue.shift()!;
+		try { await work(); } catch (err) {
+			log.logWarning("Event queue error", err instanceof Error ? err.message : String(err));
+		}
+		this.eventProcessing = false;
+		void this.processNextEvent();
 	}
 }
 
@@ -188,21 +316,17 @@ function escapeHtml(text: string): string {
 }
 
 function toTelegramHtml(text: string): string {
-	// Fenced code blocks: ```lang\ncode\n``` → <pre><code>code</code></pre>
 	text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code: string) =>
 		`<pre><code>${escapeHtml(code.trim())}</code></pre>`,
 	);
-	// Inline code: `code` → <code>code</code>
 	text = text.replace(/`([^`\n]+)`/g, (_, code: string) => `<code>${escapeHtml(code)}</code>`);
-	// Bold: **text**
 	text = text.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-	// Italic: _text_ (word boundaries to avoid matching underscores in identifiers)
 	text = text.replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, "<i>$1</i>");
 	return text;
 }
 
 // ============================================================================
-// Chunk splitting (mirrors main.ts splitIntoChunks)
+// Chunk splitting
 // ============================================================================
 
 function splitIntoChunks(text: string, maxChars: number): string[] {
@@ -210,10 +334,7 @@ function splitIntoChunks(text: string, maxChars: number): string[] {
 	const chunks: string[] = [];
 	let remaining = text;
 	while (remaining.length > 0) {
-		if (remaining.length <= maxChars) {
-			chunks.push(remaining);
-			break;
-		}
+		if (remaining.length <= maxChars) { chunks.push(remaining); break; }
 		const searchFrom = Math.floor(maxChars * 0.8);
 		const newlineIdx = remaining.lastIndexOf("\n", maxChars);
 		const cut = newlineIdx >= searchFrom ? newlineIdx + 1 : maxChars;
@@ -221,6 +342,15 @@ function splitIntoChunks(text: string, maxChars: number): string[] {
 		remaining = remaining.slice(cut).trimStart();
 	}
 	return chunks;
+}
+
+// ============================================================================
+// Pending schedule choice — per channel state
+// ============================================================================
+
+interface ScheduleChoice {
+	originalText: string;
+	existingFiles: string[];  // absolute paths to existing event files for this channel
 }
 
 // ============================================================================
@@ -236,16 +366,21 @@ export class TelegramBot {
 	private offset = 0;
 	private chatNames = new Map<string, string>();
 	private botName: string | undefined;
-	readonly claim: TelegramClaimManager;
+	private botId: string | undefined;
+	private pendingScheduleChoices = new Map<string, ScheduleChoice>();
+	// claim is a placeholder until start() resolves the real botId
+	claim: TelegramClaimManager;
+	private registry: TelegramBotRegistry;
 
 	constructor(
 		handler: IrisTelegramHandler,
 		config: { token: string; workingDir: string },
 	) {
 		this.token = config.token;
-		this.claim = new TelegramClaimManager(config.workingDir);
 		this.handler = handler;
 		this.workingDir = config.workingDir;
+		this.registry = new TelegramBotRegistry(config.workingDir);
+		this.claim = new TelegramClaimManager(config.workingDir, "pending");
 	}
 
 	// ==========================================================================
@@ -269,9 +404,6 @@ export class TelegramBot {
 
 	// ==========================================================================
 	// Channel ID encoding
-	// tg-{chatId} for positive IDs (DMs)
-	// tg-n{abs(chatId)} for negative IDs (groups/channels)
-	// tg-{chatId}-{threadId} for topic threads
 	// ==========================================================================
 
 	private encodeChannel(chatId: number, threadId?: number): string {
@@ -280,9 +412,8 @@ export class TelegramBot {
 	}
 
 	private decodeChannel(channelId: string): { chatId: number; threadId?: number } {
-		const rest = channelId.slice(3); // strip "tg-"
+		const rest = channelId.slice(3);
 		const dashIdx = rest.lastIndexOf("-");
-		// Check if there's a thread suffix (last segment is all digits)
 		const hasTwoSegments = dashIdx > 0 && /^\d+$/.test(rest.slice(dashIdx + 1));
 		const chatStr = hasTwoSegments ? rest.slice(0, dashIdx) : rest;
 		const threadId = hasTwoSegments ? parseInt(rest.slice(dashIdx + 1), 10) : undefined;
@@ -291,7 +422,7 @@ export class TelegramBot {
 	}
 
 	// ==========================================================================
-	// Public messaging API (mirrors SlackBot interface)
+	// Public messaging API
 	// ==========================================================================
 
 	async postMessage(channelId: string, text: string): Promise<string> {
@@ -333,13 +464,10 @@ export class TelegramBot {
 		}
 	}
 
-	// Called when generation is complete — edit thinking indicator with chunk 1,
-	// send overflow as new messages below.
 	async finalizeMessage(channelId: string, messageId: string, text: string): Promise<void> {
 		const { chatId, threadId } = this.decodeChannel(channelId);
 		const html = toTelegramHtml(text);
 		const chunks = splitIntoChunks(html, TG_MAX_CHARS);
-
 		try {
 			await this.call("editMessageText", {
 				chat_id: chatId,
@@ -353,7 +481,6 @@ export class TelegramBot {
 				log.logWarning("[telegram] finalizeMessage edit failed", msg);
 			}
 		}
-
 		for (let i = 1; i < chunks.length; i++) {
 			await this.call("sendMessage", {
 				chat_id: chatId,
@@ -367,16 +494,12 @@ export class TelegramBot {
 	async deleteMessage(channelId: string, messageId: string): Promise<void> {
 		const { chatId } = this.decodeChannel(channelId);
 		try {
-			await this.call("deleteMessage", {
-				chat_id: chatId,
-				message_id: parseInt(messageId, 10),
-			});
+			await this.call("deleteMessage", { chat_id: chatId, message_id: parseInt(messageId, 10) });
 		} catch (err) {
 			log.logWarning("[telegram] deleteMessage failed", err instanceof Error ? err.message : String(err));
 		}
 	}
 
-	// For Telegram, "posting in thread" is just posting to the same channel/topic.
 	async postInThread(channelId: string, _replyToId: string, text: string): Promise<string> {
 		return this.postMessage(channelId, text);
 	}
@@ -411,7 +534,6 @@ export class TelegramBot {
 			const dir = join(resolveChannelDir(this.workingDir, channelId), "attachments");
 			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-			// Use message_id as prefix so attachments are directly linked to their message
 			const localFileName = `msg${messageId}_${fileName}`;
 			const localRelPath = `${resolveChannelPath(channelId)}/attachments/${localFileName}`;
 			const absPath = join(this.workingDir, localRelPath);
@@ -427,7 +549,7 @@ export class TelegramBot {
 	}
 
 	// ==========================================================================
-	// Logging (mirrors SlackBot)
+	// Logging
 	// ==========================================================================
 
 	logToFile(channelId: string, entry: object): void {
@@ -448,7 +570,7 @@ export class TelegramBot {
 	}
 
 	// ==========================================================================
-	// Context helpers (mirrors SlackBot getUser/getChannel)
+	// Context helpers
 	// ==========================================================================
 
 	getChatName(channelId: string): string | undefined {
@@ -459,12 +581,16 @@ export class TelegramBot {
 		return this.botName ?? "Iris";
 	}
 
+	getBotId(): string {
+		return this.botId ?? "unknown";
+	}
+
 	getAllChats(): Array<{ id: string; name: string }> {
 		return Array.from(this.chatNames.entries()).map(([id, name]) => ({ id, name }));
 	}
 
 	// ==========================================================================
-	// Session injection (required by api.ts SessionInjector interface)
+	// Session injection
 	// ==========================================================================
 
 	async injectSessionMessage(sessionId: string, user: string, text: string): Promise<string> {
@@ -497,9 +623,7 @@ export class TelegramBot {
 		return responsePromise;
 	}
 
-	resetSessionContext(_sessionId: string): void {
-		// File-based reset handled in api.ts; in-memory state reloads clean on next message.
-	}
+	resetSessionContext(_sessionId: string): void {}
 
 	// ==========================================================================
 	// Events watcher integration
@@ -511,13 +635,49 @@ export class TelegramBot {
 
 	enqueueEvent(event: TelegramEvent): boolean {
 		const queue = this.getQueue(event.channel);
-		if (queue.eventSize() >= 5) {
-			log.logWarning(`[telegram] Event queue full for ${event.channel}`);
+		if (queue.eventSize() >= EVENT_QUEUE_HARD_CAP) {
+			log.logWarning(`[telegram:${this.botId}] Event queue full for ${event.channel}`);
 			return false;
 		}
-		log.logInfo(`[telegram] Enqueueing event for ${event.channel}: ${event.text.substring(0, 50)}`);
-		queue.enqueueEvent(() => this.handler.handleEvent(event, this, true));
-		return true;
+		log.logInfo(`[telegram:${this.botId}] Enqueueing event for ${event.channel}: ${event.text.substring(0, 50)}`);
+		return queue.enqueueEvent(() => this.handler.handleEvent(event, this, true));
+	}
+
+	// Discard all pending items for a channel (used by /reset)
+	drainQueue(channelId: string): void {
+		this.queues.get(channelId)?.drain();
+	}
+
+	// ==========================================================================
+	// Scheduled event conflict detection
+	// ==========================================================================
+
+	private findExistingEventFiles(channelId: string): string[] {
+		const dirsToCheck = [
+			join(this.workingDir, "telegram", "events"),
+			join(this.workingDir, "events"),
+		];
+		const found: string[] = [];
+		for (const dir of dirsToCheck) {
+			if (!existsSync(dir)) continue;
+			try {
+				const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+				for (const f of files) {
+					const fullPath = join(dir, f);
+					try {
+						const data = JSON.parse(readFileSync(fullPath, "utf-8")) as { channelId?: string; type?: string };
+						// Only flag persistent events (periodic/interval) — not one-shot/immediate
+						if (
+							data.channelId === channelId &&
+							(data.type === "periodic" || data.type === "interval")
+						) {
+							found.push(fullPath);
+						}
+					} catch { /* skip malformed */ }
+				}
+			} catch { /* skip unreadable dir */ }
+		}
+		return found;
 	}
 
 	// ==========================================================================
@@ -526,15 +686,47 @@ export class TelegramBot {
 
 	async start(): Promise<void> {
 		this.running = true;
-		const me = (await this.call("getMe")) as { username?: string; first_name?: string };
+		const me = (await this.call("getMe")) as { id: number; username?: string; first_name?: string };
+		this.botId = String(me.id);
 		this.botName = me.first_name ?? me.username ?? "Iris";
-		log.logInfo(`[telegram] Connected as @${me.username ?? me.first_name ?? "unknown"}`);
+
+		// Re-initialise claim manager with the real botId so each bot has its own file
+		this.claim = new TelegramClaimManager(this.workingDir, this.botId);
+
+		// Check bot registry — enforces max 5 bots
+		const allowed = this.registry.register(this.botId, me.username ?? this.botName);
+		if (!allowed) {
+			this.running = false;
+			throw new Error(`[telegram] Bot @${me.username} (id=${this.botId}) rejected: max 5 bots reached`);
+		}
+
+		log.logInfo(`[telegram:${this.botId}] Connected as @${me.username ?? me.first_name ?? "unknown"}`);
 		log.logConnected();
+		await this.registerCommands();
 		void this.poll();
 	}
 
 	stop(): void {
 		this.running = false;
+	}
+
+	// ==========================================================================
+	// Command registration — runs on every start() so any bot token gets it
+	// ==========================================================================
+
+	private async registerCommands(): Promise<void> {
+		try {
+			await this.call("setMyCommands", {
+				commands: [
+					{ command: "reset", description: "Stop all tasks, clear queue and context" },
+					{ command: "stop", description: "Stop the current running task" },
+					{ command: "compact", description: "Summarise context to free up space" },
+				],
+			});
+			log.logInfo(`[telegram:${this.botId}] Commands registered`);
+		} catch (err) {
+			log.logWarning(`[telegram:${this.botId}] Failed to register commands`, err instanceof Error ? err.message : String(err));
+		}
 	}
 
 	// ==========================================================================
@@ -568,12 +760,12 @@ export class TelegramBot {
 					try {
 						await this.handleUpdate(update);
 					} catch (err) {
-						log.logWarning("[telegram] handleUpdate error", err instanceof Error ? err.message : String(err));
+						log.logWarning(`[telegram:${this.botId}] handleUpdate error`, err instanceof Error ? err.message : String(err));
 					}
 				}
 			} catch (err) {
 				if (this.running) {
-					log.logWarning("[telegram] Poll error — retrying in 5s", err instanceof Error ? err.message : String(err));
+					log.logWarning(`[telegram:${this.botId}] Poll error — retrying in 5s`, err instanceof Error ? err.message : String(err));
 					await new Promise((r) => setTimeout(r, 5000));
 				}
 			}
@@ -587,14 +779,12 @@ export class TelegramBot {
 	private async handleUpdate(update: TgUpdate): Promise<void> {
 		const msg = update.message;
 		if (!msg) return;
-		// Ignore messages from other bots
 		if (msg.from?.is_bot) return;
 
 		const chatId = msg.chat.id;
 		const threadId = msg.message_thread_id;
 		const channelId = this.encodeChannel(chatId, threadId);
 
-		// Store human-readable chat name for context
 		const chatName =
 			msg.chat.title ??
 			(msg.chat.username ? `@${msg.chat.username}` : null) ??
@@ -604,67 +794,57 @@ export class TelegramBot {
 
 		const text = (msg.text ?? msg.caption ?? "").trim();
 
-		// ==========================================================================
-		// Claim gate — bot must be claimed before it processes any messages
-		// ==========================================================================
-
+		// Claim gate
 		if (!this.claim.isClaimed()) {
-			// Only accept a claim token — ignore everything else
 			const result = this.claim.tryClaimWith(chatId, text);
 			if (result === "claimed") {
-				log.logInfo(`[telegram] Bot claimed by chat_id ${chatId}`);
+				log.logInfo(`[telegram:${this.botId}] Bot claimed by chat_id ${chatId}`);
 				await this.postMessage(channelId, "✅ Bot claimed. You're all set — start chatting!");
 			} else if (result === "expired") {
 				await this.postMessage(channelId, "❌ Token expired. Restart Iris to get a new one.");
 			}
-			// Invalid token or no pending token — silently ignore
 			return;
 		}
 
-		// Bot is claimed — only the owner gets through
 		if (!this.claim.isOwner(chatId)) return;
 
-		// Handle bot commands
+		// Spam cooldown — silently drop everything during cooldown
+		const queue = this.getQueue(channelId);
+		if (queue.isSpamCooldownActive()) {
+			log.logInfo(`[telegram:${this.botId}] Spam cooldown active for ${channelId} — dropping message`);
+			return;
+		}
+
+		// Bot commands — handled directly, bypass all queues
 		if (text.startsWith("/")) {
 			const cmd = text.split(/\s/)[0].toLowerCase().replace(/@[^@]*$/, "");
-			if (cmd === "/reset") {
-				await this.handler.handleReset(channelId, this);
-				return;
-			}
-			if (cmd === "/compact") {
-				await this.handler.handleCompact(channelId, this);
-				return;
-			}
-			if (cmd === "/stop") {
-				await this.handler.handleStop(channelId, this);
-				return;
-			}
+			if (cmd === "/reset") { await this.handler.handleReset(channelId, this); return; }
+			if (cmd === "/compact") { await this.handler.handleCompact(channelId, this); return; }
+			if (cmd === "/stop") { await this.handler.handleStop(channelId, this); return; }
 			// Unknown commands fall through as regular messages
+		}
+
+		// Pending schedule choice — handle "1" / "2" response
+		const pendingChoice = this.pendingScheduleChoices.get(channelId);
+		if (pendingChoice) {
+			await this.handleScheduleChoice(channelId, text, pendingChoice);
+			return;
 		}
 
 		// Build file list
 		const files: TelegramEvent["files"] = [];
-		if (msg.document) {
-			files.push({ fileId: msg.document.file_id, name: msg.document.file_name ?? "file", mimeType: msg.document.mime_type });
-		}
+		if (msg.document) files.push({ fileId: msg.document.file_id, name: msg.document.file_name ?? "file", mimeType: msg.document.mime_type });
 		if (msg.photo) {
 			const largest = msg.photo[msg.photo.length - 1];
 			files.push({ fileId: largest.file_id, name: "photo.jpg", mimeType: "image/jpeg" });
 		}
-		if (msg.audio) {
-			files.push({ fileId: msg.audio.file_id, name: msg.audio.file_name ?? "audio.mp3", mimeType: msg.audio.mime_type });
-		}
-		if (msg.voice) {
-			files.push({ fileId: msg.voice.file_id, name: "voice.ogg", mimeType: msg.voice.mime_type ?? "audio/ogg" });
-		}
-		if (msg.video) {
-			files.push({ fileId: msg.video.file_id, name: msg.video.file_name ?? "video.mp4", mimeType: msg.video.mime_type });
-		}
+		if (msg.audio) files.push({ fileId: msg.audio.file_id, name: msg.audio.file_name ?? "audio.mp3", mimeType: msg.audio.mime_type });
+		if (msg.voice) files.push({ fileId: msg.voice.file_id, name: "voice.ogg", mimeType: msg.voice.mime_type ?? "audio/ogg" });
+		if (msg.video) files.push({ fileId: msg.video.file_id, name: msg.video.file_name ?? "video.mp4", mimeType: msg.video.mime_type });
 
-		// Skip messages with no text and no files
 		if (!text && files.length === 0) return;
 
-		// Download attachments (synchronous in poll loop — acceptable for file size Telegram allows)
+		// Download attachments
 		const attachments: Attachment[] = [];
 		for (const file of files) {
 			const att = await this.downloadFile(file.fileId, channelId, file.name, String(msg.message_id));
@@ -672,11 +852,9 @@ export class TelegramBot {
 		}
 
 		const userName = msg.from?.username;
-		const displayName =
-			[msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || undefined;
+		const displayName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || undefined;
 		const userId = String(msg.from?.id ?? "unknown");
 
-		// Log user message
 		this.logToFile(channelId, {
 			date: new Date(msg.date * 1000).toISOString(),
 			ts: String(msg.message_id),
@@ -687,6 +865,22 @@ export class TelegramBot {
 			attachments,
 			isBot: false,
 		});
+
+		// Scheduling intent + conflict check (only for text messages with no files)
+		if (text && files.length === 0 && hasSchedulingIntent(text)) {
+			const existingFiles = this.findExistingEventFiles(channelId);
+			if (existingFiles.length > 0) {
+				this.pendingScheduleChoices.set(channelId, { originalText: text, existingFiles });
+				await this.postMessage(
+					channelId,
+					`⚠️ A scheduled task already exists for this chat.\n\n` +
+					`Reply with:\n` +
+					`<b>1</b> — Delete existing and schedule new task\n` +
+					`<b>2</b> — Keep existing task (cancel new request)`,
+				);
+				return;
+			}
+		}
 
 		const event: TelegramEvent = {
 			type: "message",
@@ -700,11 +894,58 @@ export class TelegramBot {
 			attachments,
 		};
 
-		const queue = this.getQueue(channelId);
-		if (queue.userSize() >= 5) {
+		const result = queue.enqueueUser(() => this.handler.handleEvent(event, this));
+		if (result === "spam") {
+			// Cooldown just activated — message dropped silently
+		} else if (result === "full") {
 			await this.postMessage(channelId, "_Too many messages queued. Please wait._");
+		}
+	}
+
+	// ==========================================================================
+	// Private — schedule conflict choice handler
+	// ==========================================================================
+
+	private async handleScheduleChoice(channelId: string, reply: string, choice: ScheduleChoice): Promise<void> {
+		const trimmed = reply.trim();
+
+		if (trimmed === "1") {
+			// Delete existing event files
+			let deleted = 0;
+			for (const filePath of choice.existingFiles) {
+				try {
+					const { unlinkSync } = await import("fs");
+					unlinkSync(filePath);
+					deleted++;
+				} catch { /* already gone */ }
+			}
+			this.pendingScheduleChoices.delete(channelId);
+			await this.postMessage(channelId, `✅ Deleted ${deleted} existing scheduled task${deleted !== 1 ? "s" : ""}. Scheduling new task...`);
+
+			// Re-enqueue the original request to the agent
+			const event: TelegramEvent = {
+				type: "message",
+				channel: channelId,
+				ts: String(Date.now()),
+				user: "user",
+				text: choice.originalText,
+				chatId: this.claim.getOwnerId() ?? 0,
+				attachments: [],
+			};
+			this.getQueue(channelId).enqueueUser(() => this.handler.handleEvent(event, this));
+
+		} else if (trimmed === "2") {
+			this.pendingScheduleChoices.delete(channelId);
+			await this.postMessage(channelId, "✅ Keeping existing scheduled task. New request cancelled.");
+
 		} else {
-			queue.enqueueUser(() => this.handler.handleEvent(event, this));
+			// Re-prompt
+			await this.postMessage(
+				channelId,
+				`Please reply with <b>1</b> or <b>2</b>:\n\n` +
+				`<b>1</b> — Delete existing and schedule new task\n` +
+				`<b>2</b> — Keep existing task (cancel new request)`,
+			);
 		}
 	}
 }
