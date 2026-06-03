@@ -176,6 +176,7 @@ function buildSystemPrompt(
 	users: UserInfo[],
 	skills: Skill[],
 	agents: AgentRegistry = {},
+	telegramBotName?: string,
 ): string {
 	const channelPath = `${workspacePath}/${channelId}`;
 	const isDocker = sandboxConfig.type === "docker";
@@ -199,7 +200,23 @@ function buildSystemPrompt(
 
 	const constitutionSection = constitution ? `\n\n${constitution}` : "";
 
-	return `You are Iris, a Slack-connected orchestrator for specialized sub-agents. Be concise. No emojis.${constitutionSection}
+	const isTg = channelId.startsWith("tg-");
+	const botDisplayName = isTg ? (telegramBotName ?? "Iris") : "Iris";
+	const telegramSection = isTg ? `
+
+## Telegram Interface
+You are operating via Telegram as ${botDisplayName}.
+- Shell command details and tool output are hidden from the user — only your final text response is visible.
+- Sub-agent spawning is disabled for Telegram. Handle all tasks directly.
+- For recurring task requests, create or update a skill file so the work can be repeated efficiently.
+- Use standard Markdown: **bold**, _italic_, \`inline code\`, \`\`\`code blocks\`\`\`. Do NOT use Slack mrkdwn (*bold*, <url|text>).
+- Available user commands: /reset (clear context), /compact (summarise context), /stop (abort current task).` : "";
+
+	const identityLine = isTg
+		? `You are ${botDisplayName}, a Telegram-connected AI assistant. Be concise. No emojis.`
+		: `You are Iris, a Slack-connected orchestrator for specialized sub-agents. Be concise. No emojis.`;
+
+	return `${identityLine}${constitutionSection}
 
 ## Context
 - For the current date/time, use: date
@@ -368,6 +385,7 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 - attach: Share files to Slack
 
 Each tool requires a "label" parameter (shown to user).
+${telegramSection}
 `;
 }
 
@@ -597,6 +615,7 @@ function createRunner(
 
 		const { ctx, logCtx, queue, pendingTools } = runState;
 		const isSessionChannel = channelId.startsWith("SESSION-");
+		const isTelegramChannel = channelId.startsWith("tg-");
 
 		if (event.type === "tool_execution_start") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
@@ -610,7 +629,7 @@ function createRunner(
 			});
 
 			log.logToolStart(logCtx, agentEvent.toolName, label, agentEvent.args as Record<string, unknown>);
-			if (!isSessionChannel) {
+			if (!isSessionChannel && !isTelegramChannel) {
 				queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
 			}
 		} else if (event.type === "tool_execution_end") {
@@ -639,10 +658,17 @@ function createRunner(
 			if (argsFormatted) threadMessage += `\`\`\`\n${argsFormatted}\n\`\`\`\n`;
 			threadMessage += `*Result:*\n\`\`\`\n${resultStr}\n\`\`\``;
 
-			queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+			if (!isTelegramChannel) {
+				queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+			}
 
-			if (agentEvent.isError && !isSessionChannel) {
-				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
+			if (agentEvent.isError) {
+				if (isTelegramChannel) {
+					// For Telegram, errors are visible via respondInThread (posts as a new message)
+					queue.enqueue(() => ctx.respondInThread(`_Tool error: ${truncate(resultStr, 200)}_`), "tool error");
+				} else if (!isSessionChannel) {
+					queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
+				}
 			}
 		} else if (event.type === "message_start") {
 			const agentEvent = event as AgentEvent & { type: "message_start" };
@@ -688,7 +714,7 @@ function createRunner(
 
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
-					if (!isSessionChannel) {
+					if (!isSessionChannel && !isTelegramChannel) {
 						queue.enqueueMessage(`_${thinking}_`, "main", "thinking main");
 						queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
 					}
@@ -782,11 +808,12 @@ function createRunner(
 			const memory = getMemory(channelDir);
 			const constitution = loadConstitution(workspaceDir);
 			let skills = loadIrisSkills(channelDir, workspacePath);
-			// SESSION- channels are non-admin (thread mode) — no agent spawning allowed
-			if (channelId.startsWith("SESSION-")) {
+			// SESSION- and tg-* channels — no agent spawning allowed
+			if (channelId.startsWith("SESSION-") || channelId.startsWith("tg-")) {
 				skills = skills.filter((s) => s.name !== "spawn-agent");
 			}
 			const agents = loadAgentRegistry(workspaceDir);
+			const telegramBotName = (ctx as any).telegramBotName as string | undefined;
 			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
@@ -797,6 +824,7 @@ function createRunner(
 				ctx.users,
 				skills,
 				agents,
+				telegramBotName,
 			);
 			session.agent.state.systemPrompt = systemPrompt;
 
@@ -1028,9 +1056,14 @@ function createRunner(
 			agent.reset();
 			// Release VM if this is a pool-mode session (next exec will boot a fresh one)
 			void releaseExecutor(executor);
-			// Truncate the context file so future loads start fresh
+			// Truncate the context file AND re-initialize sessionManager from the empty file.
+			// Writing the file alone is not enough — sessionManager keeps its own in-memory
+			// state (fileEntries, byId, leafId) that persists across runs. Without this,
+			// buildSessionContext() still returns the old corrupted message tree on the next
+			// run, so the reset appears to work but the same API error recurs.
 			try {
 				writeFileSync(contextFile, "");
+				sessionManager.setSessionFile(contextFile);
 				log.logInfo(`[${channelId}] Context reset — cleared ${contextFile}`);
 			} catch (err) {
 				log.logWarning(`[${channelId}] Failed to clear context file`, err instanceof Error ? err.message : String(err));
