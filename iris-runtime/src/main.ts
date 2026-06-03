@@ -472,6 +472,7 @@ function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: Ch
 			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
 		},
 		channelName: bot.getChatName(event.channel),
+		telegramBotName: bot.getBotName(),
 		store: state.store,
 		channels: bot.getAllChats(),
 		users: [],
@@ -556,6 +557,9 @@ function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: Ch
 // Telegram handler
 // ============================================================================
 
+const SPAWN_INTENT_RE =
+	/\b(spawn|create|launch|deploy|make|build|start|set\s+up|setup)\s+(a\s+|an\s+|new\s+)?agent\b|\bspin\s+up\b.*\bagent\b|\bspawn-agent\b/i;
+
 const telegramHandler: IrisTelegramHandler = {
 	isRunning(channelId: string): boolean {
 		return channelStates.get(channelId)?.running ?? false;
@@ -607,6 +611,18 @@ const telegramHandler: IrisTelegramHandler = {
 		const state = getState(event.channel);
 		state.running = true;
 		state.stopRequested = false;
+
+		// Detect spawn intent — notify user, then continue without spawning
+		if (!isEvent && SPAWN_INTENT_RE.test(event.text)) {
+			try {
+				await bot.postMessage(
+					event.channel,
+					`Agent creation is not available via Telegram. I'll handle this task directly as ${bot.getBotName()}.`,
+				);
+			} catch (err) {
+				log.logWarning("[telegram] Failed to send spawn notice", err instanceof Error ? err.message : String(err));
+			}
+		}
 
 		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
 
@@ -757,10 +773,23 @@ const universalBot = {
 	},
 } as any;
 
+// Route hasPendingEvent checks to the right transport
+const hasPendingEvent = (channelId: string): boolean => {
+	if (channelId.startsWith("tg-") && tgBotRef instanceof TelegramBot) {
+		return tgBotRef.hasPendingEvent(channelId);
+	}
+	return false;
+};
+
 // Watch slack/events/, telegram/events/, and root events/ for backward compat
 const watchDirs = ["slack/events", "telegram/events", "events"];
 const watchers = watchDirs.map(sub => {
-	const w = createEventsWatcher(workingDir, universalBot, sub === "events" ? undefined : sub.split("/")[0]);
+	const w = createEventsWatcher(
+		workingDir,
+		(channelId, text) => universalBot.enqueueEvent({ channel: channelId, text, type: "mention", user: "EVENT", ts: Date.now().toString() }),
+		hasPendingEvent,
+		sub === "events" ? undefined : sub.split("/")[0],
+	);
 	w.start();
 	return w;
 });
