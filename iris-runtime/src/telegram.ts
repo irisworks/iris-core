@@ -128,22 +128,41 @@ export interface IrisTelegramHandler {
 }
 
 // ============================================================================
-// Per-channel queue (mirrors slack.ts)
+// Per-channel queue
+// ============================================================================
+// Single execution queue per channel — user messages and scheduled events
+// serialize through it so the runner is never called concurrently.
+// User and event pending counts are tracked separately so their caps are
+// independent: a burst of user messages can't starve scheduled events.
 // ============================================================================
 
 type QueuedWork = () => Promise<void>;
 
-class ChannelQueue {
+class ChannelQueues {
 	private queue: QueuedWork[] = [];
 	private processing = false;
+	private userPending = 0;
+	private eventPending = 0;
 
-	enqueue(work: QueuedWork): void {
-		this.queue.push(work);
+	userSize(): number { return this.userPending; }
+	eventSize(): number { return this.eventPending; }
+
+	enqueueUser(work: QueuedWork): void {
+		this.userPending++;
+		this.queue.push(async () => {
+			this.userPending--;
+			await work();
+		});
 		this.processNext();
 	}
 
-	size(): number {
-		return this.queue.length;
+	enqueueEvent(work: QueuedWork): void {
+		this.eventPending++;
+		this.queue.push(async () => {
+			this.eventPending--;
+			await work();
+		});
+		this.processNext();
 	}
 
 	private async processNext(): Promise<void> {
@@ -212,10 +231,11 @@ export class TelegramBot {
 	private token: string;
 	private handler: IrisTelegramHandler;
 	private workingDir: string;
-	private queues = new Map<string, ChannelQueue>();
+	private queues = new Map<string, ChannelQueues>();
 	private running = false;
 	private offset = 0;
 	private chatNames = new Map<string, string>();
+	private botName: string | undefined;
 	readonly claim: TelegramClaimManager;
 
 	constructor(
@@ -435,6 +455,10 @@ export class TelegramBot {
 		return this.chatNames.get(channelId);
 	}
 
+	getBotName(): string {
+		return this.botName ?? "Iris";
+	}
+
 	getAllChats(): Array<{ id: string; name: string }> {
 		return Array.from(this.chatNames.entries()).map(([id, name]) => ({ id, name }));
 	}
@@ -447,7 +471,7 @@ export class TelegramBot {
 		const channelId = `SESSION-${sessionId}`;
 		const queue = this.getQueue(channelId);
 
-		if (queue.size() >= 5) throw new Error("Session message queue is full");
+		if (queue.userSize() >= 5) throw new Error("Session message queue is full");
 
 		const ts = String(Date.now());
 		this.logToFile(channelId, {
@@ -469,7 +493,7 @@ export class TelegramBot {
 			chatId: 0,
 			attachments: [],
 		};
-		queue.enqueue(() => this.handler.handleEvent(event, this));
+		queue.enqueueUser(() => this.handler.handleEvent(event, this));
 		return responsePromise;
 	}
 
@@ -481,14 +505,18 @@ export class TelegramBot {
 	// Events watcher integration
 	// ==========================================================================
 
+	hasPendingEvent(channelId: string): boolean {
+		return (this.queues.get(channelId)?.eventSize() ?? 0) > 0;
+	}
+
 	enqueueEvent(event: TelegramEvent): boolean {
 		const queue = this.getQueue(event.channel);
-		if (queue.size() >= 5) {
+		if (queue.eventSize() >= 5) {
 			log.logWarning(`[telegram] Event queue full for ${event.channel}`);
 			return false;
 		}
 		log.logInfo(`[telegram] Enqueueing event for ${event.channel}: ${event.text.substring(0, 50)}`);
-		queue.enqueue(() => this.handler.handleEvent(event, this, true));
+		queue.enqueueEvent(() => this.handler.handleEvent(event, this, true));
 		return true;
 	}
 
@@ -499,6 +527,7 @@ export class TelegramBot {
 	async start(): Promise<void> {
 		this.running = true;
 		const me = (await this.call("getMe")) as { username?: string; first_name?: string };
+		this.botName = me.first_name ?? me.username ?? "Iris";
 		log.logInfo(`[telegram] Connected as @${me.username ?? me.first_name ?? "unknown"}`);
 		log.logConnected();
 		void this.poll();
@@ -512,10 +541,10 @@ export class TelegramBot {
 	// Private — queue
 	// ==========================================================================
 
-	private getQueue(channelId: string): ChannelQueue {
+	private getQueue(channelId: string): ChannelQueues {
 		let queue = this.queues.get(channelId);
 		if (!queue) {
-			queue = new ChannelQueue();
+			queue = new ChannelQueues();
 			this.queues.set(channelId, queue);
 		}
 		return queue;
@@ -672,10 +701,10 @@ export class TelegramBot {
 		};
 
 		const queue = this.getQueue(channelId);
-		if (queue.size() >= 5) {
+		if (queue.userSize() >= 5) {
 			await this.postMessage(channelId, "_Too many messages queued. Please wait._");
 		} else {
-			queue.enqueue(() => this.handler.handleEvent(event, this));
+			queue.enqueueUser(() => this.handler.handleEvent(event, this));
 		}
 	}
 }
