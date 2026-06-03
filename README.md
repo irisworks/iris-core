@@ -620,6 +620,7 @@ irisflow/
 │   ├── firecracker-agent/          # manage microVM lifecycle
 │   ├── get-secret/
 │   ├── github/
+│   ├── hi-agent/
 │   ├── promote-skill/
 │   ├── search-web/
 │   ├── self-extend/
