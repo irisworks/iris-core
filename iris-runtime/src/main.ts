@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { startApiServer } from "./api.js";
@@ -12,6 +12,10 @@ import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
 import { TelegramBot, type IrisTelegramHandler, type TelegramEvent } from "./telegram.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
+import { startScheduler, type SchedulerCallbacks } from "./scheduler.js";
+import { resolveBridgeRequest } from "./bridge.js";
+import { startWatchdog } from "./agent-watchdog.js";
+import { getMissedTasks, updateTaskStatus } from "./task-queue.js";
 
 // ============================================================================
 // Config
@@ -676,7 +680,32 @@ migrateChannelDirs(workingDir);
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
 // botRef is set after bot construction below; the closure captures it by reference
 let botRef: SlackBotClass | TelegramBot | null = null;
-startApiServer(effectiveApiPort, workingDir, channelStates, () => botRef as any);
+const tgBotsForApi: TelegramBot[] = []; // populated after bot construction
+
+// Scheduler callbacks — notifyOwner posts a message via the owning bot
+const schedulerCallbacks: SchedulerCallbacks = {
+	workingDir,
+	notifyOwner: (botId, channelId, text) => {
+		const bot = tgBotsForApi.find((b) => b.getBotId() === botId) ?? tgBotsForApi[0];
+		if (bot) void bot.postMessage(channelId, text).catch((err: unknown) =>
+			log.logWarning(`[notifyOwner] postMessage to ${channelId} failed`, String(err)),
+		);
+	},
+};
+
+startApiServer(
+	effectiveApiPort,
+	workingDir,
+	channelStates,
+	() => botRef as any,
+	(botId?: string) => {
+		const bot = botId
+			? tgBotsForApi.find((b) => b.getBotId() === botId)
+			: tgBotsForApi[0];
+		return bot?.claim ?? null;
+	},
+	schedulerCallbacks,
+);
 
 // Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
 const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
@@ -704,7 +733,28 @@ const eventsWatcherBot = SLACK_ENABLED
 			getChannel: () => undefined,
 			getAllChannels: () => [],
 			getAllUsers: () => [],
-			postMessage: async () => Date.now().toString(),
+			postMessage: async (channel: string, text: string) => {
+				if (channel.startsWith("BRIDGE-")) {
+					const requestId = channel.slice("BRIDGE-".length);
+					if (bridgePort > 0) {
+						// Sub-agent: LLM just finished — resolve the bridge server's
+						// pending promise so the HTTP response goes back to main Iris.
+						resolveBridgeRequest(requestId, text);
+					} else {
+						// Main Iris: a sub-agent is posting its response back.
+						// Forward to the /event endpoint so callAgentBridge resolves.
+						const apiUrl = process.env.IRIS_API_URL ?? "http://172.18.0.1:3000";
+						try {
+							await fetch(`${apiUrl}/event`, {
+								method: "POST",
+								headers: { "Content-Type": "application/json" },
+								body: JSON.stringify({ channelId: channel, text, user: "agent" }),
+							});
+						} catch { /* non-fatal — main Iris bridge will timeout */ }
+					}
+				}
+				return Date.now().toString();
+			},
 			updateMessage: async () => {},
 			finalizeMessage: async () => {},
 			deleteMessage: async () => {},
@@ -762,16 +812,34 @@ for (const token of telegramTokens) {
 
 	// Print claim token to terminal for any unclaimed bot
 	if (!tgBot.claim.isClaimed()) {
-		const token = tgBot.claim.generateToken();
+		const claimToken = tgBot.claim.generateToken();
 		log.logInfo(`[telegram:${tgBot.getBotId()}] Bot is unclaimed. Send this token to your bot on Telegram to claim it:`);
 		log.logInfo("");
-		log.logInfo(`    ${token}`);
+		log.logInfo(`    ${claimToken}`);
 		log.logInfo("");
-		log.logInfo("[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.");
-		log.logInfo("[telegram] To force re-claim later, set IRIS_TELEGRAM_FORCE_RECLAIM=true and restart.");
+		log.logInfo("[telegram] Token expires in 10 minutes.");
+		log.logInfo("[telegram] Missed it? Run: iris-claim-token");
+
+		// Write to well-known file so bootstrap.sh can display it without shell history exposure
+		const tokenDir = join(workingDir, "data");
+		const tokenFile = join(tokenDir, "claim-token.txt");
+		try {
+			mkdirSync(tokenDir, { recursive: true });
+			writeFileSync(tokenFile, claimToken, { mode: 0o600 });
+		} catch { /* non-fatal */ }
+
+		// Background watcher: notify terminal when bot is claimed, then clean up the token file
+		const watchInterval = setInterval(() => {
+			if (tgBot.claim.isClaimed()) {
+				clearInterval(watchInterval);
+				log.logInfo(`[telegram:${tgBot.getBotId()}] Claim token received. Bot is now active.`);
+				try { unlinkSync(tokenFile); } catch { /* file may already be gone */ }
+			}
+		}, 2000);
 	}
 
 	tgBots.push(tgBot);
+	tgBotsForApi.push(tgBot);
 	// First bot becomes botRef if Slack is not active (API server prefers Slack)
 	if (!SLACK_ENABLED && tgBots.length === 1) botRef = tgBot;
 }
@@ -783,6 +851,42 @@ if (telegramTokens.length === 0) {
 if (!SLACK_ENABLED && telegramTokens.length === 0) {
 	log.logInfo("⚡️ Bridge-only mode active");
 }
+
+// Start scheduler: check for missed tasks, reschedule pending ones.
+// Run after all bots are started so tgBotsForApi is fully populated.
+if (tgBotsForApi.length > 0) {
+	const botIds = tgBotsForApi.map((b) => b.getBotId()).filter((id): id is string => Boolean(id));
+	void startScheduler(botIds, schedulerCallbacks);
+}
+
+// Start watchdog: polls Docker every 30s, detects crashes and recoveries.
+void startWatchdog({
+	notifyOwner: schedulerCallbacks.notifyOwner,
+
+	onAgentCrashed: (agentId) => {
+		// Exit any active Telegram conversations with the crashed agent
+		for (const bot of tgBotsForApi) {
+			bot.clearAgentConversation(agentId);
+		}
+	},
+
+	onAgentRecovered: async (agentId, agentName, botId) => {
+		// Check for tasks that were missed while the agent was offline
+		const missed = await getMissedTasks(agentId);
+		if (missed.length === 0) return;
+
+		await Promise.all(missed.map((t) => updateTaskStatus(t.taskId, "skipped")));
+
+		const ownerChannelId = `tg-${missed[0].channelId.replace(/^tg-/, "").split("-")[0]}`;
+		const noun = missed.length === 1 ? "task" : "tasks";
+		schedulerCallbacks.notifyOwner(
+			botId,
+			ownerChannelId,
+			`⚠️ <b>${agentName}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
+			missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n"),
+		);
+	},
+});
 
 
 // ============================================================================
@@ -809,6 +913,17 @@ function findBotForChannel(channelId: string): TelegramBot | undefined {
 const universalBot = {
 	...eventsWatcherBot,
 	enqueueEvent: (event: any) => {
+		// BRIDGE-* events mean different things depending on context:
+		// - Main Iris (bridgePort===0): a sub-agent posted its LLM response back.
+		//   Resolve the callAgentBridge promise immediately.
+		// - Sub-agent (bridgePort>0): an incoming request that the LLM must process.
+		//   Do NOT intercept here — fall through to eventsWatcherBot so the LLM runs,
+		//   then stubBot.postMessage resolves the bridge server's pending promise.
+		if (event.channel?.startsWith("BRIDGE-") && bridgePort === 0) {
+			const requestId = (event.channel as string).slice("BRIDGE-".length);
+			resolveBridgeRequest(requestId, event.text ?? "");
+			return true;
+		}
 		if (event.channel?.startsWith("tg-")) {
 			const tgBot = findBotForChannel(event.channel);
 			if (tgBot) return tgBot.enqueueEvent(event);
