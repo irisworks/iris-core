@@ -58,17 +58,17 @@ Always use `count` or `endsAt` for bounded tasks.
 ## API endpoint
 
 ```
-POST http://172.20.1.1:3000/internal/write-event
+POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event
 ```
 
-The host is always reachable at `172.20.1.1` from inside the Firecracker sandbox.
+The host is always reachable via `$IRIS_API_URL` (defaults to `http://172.18.0.1:3000`).
 
 ---
 
 ## Immediate event — fire right now
 
 ```bash
-curl -s -X POST http://172.20.1.1:3000/internal/write-event \
+curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
   -H "Content-Type: application/json" \
   -d '{
     "name":      "check-status",
@@ -83,7 +83,7 @@ curl -s -X POST http://172.20.1.1:3000/internal/write-event \
 ## One-shot event — fire once at a specific time
 
 ```bash
-curl -s -X POST http://172.20.1.1:3000/internal/write-event \
+curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
   -H "Content-Type: application/json" \
   -d '{
     "name":      "remind-meeting",
@@ -106,7 +106,7 @@ BASE=$(date -u +%s)
 for i in 1 2 3 4 5 6; do
   AT=$(date -u -d "@$((BASE + i * 10))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
        python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(seconds=$i*10)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
-  curl -s -X POST http://172.20.1.1:3000/internal/write-event \
+  curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
     -H "Content-Type: application/json" \
     -d "{
       \"name\":      \"hi-$i\",
@@ -126,7 +126,7 @@ preserved even if earlier agent runs are still in progress.
 ## Interval event — repeat every N seconds (any interval)
 
 ```bash
-curl -s -X POST http://172.20.1.1:3000/internal/write-event \
+curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
   -H "Content-Type: application/json" \
   -d '{
     "name":           "status-ping",
@@ -168,7 +168,7 @@ Examples:
 ## Periodic event — standard cron schedule (hourly, daily, weekly)
 
 ```bash
-curl -s -X POST http://172.20.1.1:3000/internal/write-event \
+curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
   -H "Content-Type: application/json" \
   -d '{
     "name":      "daily-summary",
