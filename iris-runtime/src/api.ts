@@ -37,6 +37,9 @@ import {
 	updateSession,
 	type Session,
 } from "./sessions.js";
+import { getAgent } from "./agent-registry.js";
+import { createTask } from "./task-queue.js";
+import { scheduleNewTask, type SchedulerCallbacks } from "./scheduler.js";
 
 // Minimal interface so api.ts doesn't import SlackBot directly (avoids circular deps)
 interface SessionInjector {
@@ -76,11 +79,18 @@ function writeEvent(eventsDir: string, channelId: string, user: string, text: st
 	return eventId;
 }
 
+interface ClaimTokenSource {
+	generateToken(): string;
+	reset(): void;
+}
+
 export function startApiServer(
 	port: number,
 	workingDir: string,
 	channelStates: Map<string, ChannelState>,
 	getBot: () => SessionInjector | null = () => null,
+	getClaim: (botId?: string) => ClaimTokenSource | null = () => null,
+	schedulerCallbacks: SchedulerCallbacks | null = null,
 ): void {
 	const eventsDir = join(workingDir, "events");
 
@@ -91,6 +101,22 @@ export function startApiServer(
 		const urlParts = url.replace(/^\//, "").split("/").map((p) => decodeURIComponent(p));
 
 		try {
+			// ── Guard dog — agent isolation enforcement ─────────────────────────────
+			// Requests from known agents must carry X-Agent-ID. We validate the agent
+			// exists in the registry (blocks spoofed or deleted agent IDs).
+			// Channel-level isolation is enforced by Docker volume scoping — each agent
+			// container has its own workspace and cannot reach another agent's files.
+			const agentId = req.headers["x-agent-id"] as string | undefined;
+			if (agentId) {
+				const agentRecord = await getAgent(agentId);
+				if (!agentRecord) {
+					log.logWarning(`[guard-dog] Rejected request from unknown agent ID: ${agentId}`, url);
+					json(res, 403, { error: `Guard dog: unknown agent ID ${agentId}` });
+					return;
+				}
+				log.logInfo(`[guard-dog] Agent ${agentRecord.name} (${agentId}) → ${method} ${url}`);
+			}
+
 			// ── GET /health ────────────────────────────────────────────────────────────
 			if (method === "GET" && url === "/health") {
 				json(res, 200, { ok: true, channels: channelStates.size });
@@ -510,6 +536,103 @@ export function startApiServer(
 					const msg = err instanceof Error ? err.message : String(err);
 					json(res, 500, { error: `Failed to write event file: ${msg}` });
 				}
+				return;
+			}
+
+			// ── POST /internal/claim-token ────────────────────────────────────────────
+			// Resets the claim state and issues a fresh token. Used by the
+			// iris-claim-token recovery command when the user misses the 10-minute window.
+			if (method === "POST" && url === "/internal/claim-token") {
+				const body = await readBody(req);
+				let botId: string | undefined;
+				try { botId = body ? (JSON.parse(body) as { botId?: string }).botId : undefined; } catch { /* ignore */ }
+
+				const claim = getClaim(botId);
+				if (!claim) {
+					json(res, 404, { error: "No Telegram bot found. Is TELEGRAM_BOT_TOKEN set?" });
+					return;
+				}
+
+				claim.reset();
+				const token = claim.generateToken();
+
+				// Write to well-known file so bootstrap watcher can display it
+				const tokenFile = join(workingDir, "data", "claim-token.txt");
+				try {
+					const { mkdirSync: mkdir3 } = await import("fs");
+					mkdir3(join(workingDir, "data"), { recursive: true });
+					writeFileSync(tokenFile, token);
+				} catch { /* non-fatal */ }
+
+				log.logInfo("[api] POST /internal/claim-token — fresh claim token issued");
+				json(res, 200, { token });
+				return;
+			}
+
+			// ── POST /internal/agent-task ─────────────────────────────────────────────
+			// Agents submit tasks here. Immediate tasks get a dispatch event file
+			// written right away. Scheduled tasks are handed to the croner scheduler.
+			if (method === "POST" && url === "/internal/agent-task") {
+				const body = await readBody(req);
+				let params: {
+					agentId?: string;
+					channelId?: string;
+					payload?: string;
+					scheduledFor?: string;
+					timezone?: string;
+					localTimeStr?: string;
+				};
+				try { params = JSON.parse(body); } catch {
+					json(res, 400, { error: "Invalid JSON body" });
+					return;
+				}
+
+				if (!params.agentId || !params.channelId || !params.payload) {
+					json(res, 400, { error: "Required: agentId, channelId, payload" });
+					return;
+				}
+
+				const agent = await getAgent(params.agentId);
+				if (!agent) {
+					json(res, 404, { error: `Agent ${params.agentId} not found` });
+					return;
+				}
+
+				const task = await createTask({
+					agentId:     params.agentId,
+					botId:       agent.botId,
+					channelId:   params.channelId,
+					payload:     params.payload,
+					scheduledFor: params.scheduledFor,
+					timezone:    params.timezone,
+					localTimeStr: params.localTimeStr,
+				});
+
+				if (!task) {
+					json(res, 500, { error: "Failed to create task record" });
+					return;
+				}
+
+				if (task.type === "immediate") {
+					// Dispatch right away via event file
+					const { randomBytes: rb } = await import("crypto");
+					const { mkdirSync: mkdir4, writeFileSync: wfs2 } = await import("fs");
+					const evDir = join(workingDir, "events");
+					mkdir4(evDir, { recursive: true });
+					const fn = `task-${task.taskId}-${(rb(4) as Buffer).toString("hex")}.json`;
+					wfs2(join(evDir, fn), JSON.stringify({
+						type: "immediate",
+						channelId: task.channelId,
+						text: `[${agent.name}]: ${task.payload}`,
+					}, null, 2));
+					log.logInfo(`[api] POST /internal/agent-task → immediate dispatch: ${fn}`);
+				} else if (schedulerCallbacks) {
+					// Hand off to scheduler for croner scheduling
+					await scheduleNewTask(task, agent.name, schedulerCallbacks);
+					log.logInfo(`[api] POST /internal/agent-task → scheduled: ${task.scheduledFor}`);
+				}
+
+				json(res, 200, { taskId: task.taskId, type: task.type, status: task.status });
 				return;
 			}
 
