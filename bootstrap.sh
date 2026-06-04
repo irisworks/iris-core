@@ -130,6 +130,12 @@ if ! command -v docker &>/dev/null; then
   sudo usermod -aG docker "$USER"
 fi
 
+# Ensure iris-internal bridge network exists (used by sub-agent containers)
+if ! docker_cmd network inspect iris-internal &>/dev/null; then
+  log "Creating iris-internal Docker network..."
+  docker_cmd network create --driver bridge --subnet 172.18.0.0/16 --gateway 172.18.0.1 iris-internal
+fi
+
 # Azure CLI only needed when using Key Vault
 if [[ "$NO_KEYVAULT" == false ]] && ! command -v az &>/dev/null; then
   log "Installing Azure CLI..."
@@ -310,11 +316,8 @@ fi
 # ────────────────────────────────────────────────────────────
 log_h "GitHub login"
 if ! gh auth status &>/dev/null; then
-  log "Not logged in to GitHub. Running gh auth login..."
   gh auth login
 fi
-GH_USER=$(gh api user --jq .login)
-log "GitHub user: $GH_USER"
 
 # ────────────────────────────────────────────────────────────
 # Shared: prompt for all secrets
@@ -349,7 +352,7 @@ prompt_secrets() {
     case "$IRIS_PROVIDER" in
       anthropic)      default_model="claude-sonnet-4-5" ;;
       openai)         default_model="gpt-4o" ;;
-      foundry-e2)     default_model="gpt-4o" ;;
+      foundry-e2)     default_model="Kimi-K2.6" ;;
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       *)              default_model="gpt-4o" ;;
     esac
@@ -457,6 +460,23 @@ prompt_secrets() {
     [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
   else
     log "Skipping Telegram — you can add TELEGRAM_BOT_TOKEN to /iris/.env later."
+  fi
+
+  # ── Supabase (optional — enables durable claim state + task queue) ──
+  SUPABASE_URL=""
+  SUPABASE_SERVICE_ROLE_KEY=""
+  if confirm "Set up Supabase for durable storage (recommended for Firecracker)?" "n"; then
+    echo ""
+    echo "  ┌─ Supabase Setup ───────────────────────────────────────────────────┐"
+    echo "  │  1. Create a project at https://supabase.com                      │"
+    echo "  │  2. Project Settings → API → copy Project URL and service_role key │"
+    echo "  │  3. Run the schema from supabase/schema.sql in the SQL editor      │"
+    echo "  └────────────────────────────────────────────────────────────────────┘"
+    echo ""
+    SUPABASE_URL=$(prompt "Supabase Project URL (https://xxx.supabase.co)" "")
+    SUPABASE_SERVICE_ROLE_KEY=$(prompt_secret "Supabase service_role key")
+  else
+    log "Skipping Supabase — claim state will use local files only."
   fi
 
   # ── GitHub token ──
@@ -609,7 +629,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   else
     # Restore mode — defaults only
     [[ -z "$IRIS_PROVIDER" ]] && IRIS_PROVIDER="foundry-e2"
-    [[ -z "$IRIS_MODEL" ]]    && IRIS_MODEL="gpt-4o"
+    [[ -z "$IRIS_MODEL" ]]    && IRIS_MODEL="Kimi-K2.6"
   fi
 
 else
@@ -631,7 +651,7 @@ else
     source "$IRIS_DIR/.env" 2>/dev/null || true
     set -u
     IRIS_PROVIDER="${IRIS_PROVIDER:-foundry-e2}"
-    IRIS_MODEL="${IRIS_MODEL:-gpt-4o}"
+    IRIS_MODEL="${IRIS_MODEL:-Kimi-K2.6}"
     SLACK_APP_TOKEN="${IRIS_SLACK_APP_TOKEN:-}"
     SLACK_BOT_TOKEN="${IRIS_SLACK_BOT_TOKEN:-}"
     if [[ -n "$SLACK_APP_TOKEN" && "$SLACK_APP_TOKEN" != xapp-* ]]; then
@@ -951,6 +971,8 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo ""
   echo "GITHUB_TOKEN=$(e "${GITHUB_TOKEN:-}")"
   echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"
+  echo "SUPABASE_URL=$(e "${SUPABASE_URL:-}")"
+  echo "SUPABASE_SERVICE_ROLE_KEY=$(e "${SUPABASE_SERVICE_ROLE_KEY:-}")"
   echo ""
   echo "AZURE_SUBSCRIPTION_ID=$(e "${SUBSCRIPTION_ID:-}")"
   echo "IRIS_KEY_VAULT=$(e "${KV_NAME:-}")"
@@ -1265,9 +1287,19 @@ else
   log "  Slack:     not configured (add tokens to /iris/.env and restart)"
 fi
 if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  # Wait for Iris to start, then read the active token directly from the claim state file
-  sleep 5
-  CLAIM_TOKEN=$(jq -r '.pendingToken // empty' "${IRIS_DIR}/data/data/telegram-owner.json" 2>/dev/null || true)
+  # Wait for Iris to write the claim token file (up to 30 s)
+  TOKEN_FILE="${IRIS_DIR}/data/claim-token.txt"
+  log "  Waiting for Iris to generate Telegram claim token..."
+  for i in $(seq 1 30); do
+    if [[ -f "$TOKEN_FILE" ]]; then break; fi
+    sleep 1
+  done
+
+  CLAIM_TOKEN=""
+  if [[ -f "$TOKEN_FILE" ]]; then
+    CLAIM_TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+  fi
+
   if [[ -n "$CLAIM_TOKEN" ]]; then
     log ""
     log "  ┌─ Telegram Claim Token ──────────────────────────────────────────┐"
@@ -1277,7 +1309,19 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "  │  ${CLAIM_TOKEN}  │"
     log "  │                                                                 │"
     log "  │  Token expires in 10 minutes.                                  │"
+    log "  │  Missed it? Run: bash /iris/repo/scripts/iris-claim-token.sh   │"
     log "  └─────────────────────────────────────────────────────────────────┘"
+    log ""
+    log "  Waiting for claim token to be sent to Telegram (Ctrl+C to skip)..."
+    # Poll until the token file is deleted (iris-runtime deletes it on successful claim)
+    while [[ -f "$TOKEN_FILE" ]]; do
+      sleep 2
+    done
+    if ! [[ -f "$TOKEN_FILE" ]]; then
+      log "  ✓ Claim token received. Iris is active."
+    fi
+  else
+    log "  Warning: Could not read claim token. Run: bash /iris/repo/scripts/iris-claim-token.sh"
   fi
 fi
 if [[ "$FIRECRACKER_MODE" == true ]]; then
