@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "./log.js";
@@ -5,6 +6,26 @@ import { TelegramBotRegistry } from "./telegram-bot-registry.js";
 import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
 import { TelegramClaimManager } from "./telegram-claim.js";
+import {
+	countAgents,
+	createAgent,
+	deleteAgent,
+	listAgents,
+	MAX_AGENTS_PER_BOT,
+	updateAgentStatus,
+	getAgentByName,
+	type AgentRecord,
+} from "./agent-registry.js";
+import { getOwnerTaskSummary, type TaskRecord } from "./task-queue.js";
+import {
+	bridgePortForSlot,
+	deprovisionAgent,
+	getAvailableSkills,
+	provisionAgent,
+	registerAgentBridge,
+	unregisterAgentBridge,
+} from "./agent-provision.js";
+import { callAgentBridge } from "./bridge.js";
 
 // ============================================================================
 // Constants
@@ -13,7 +34,7 @@ import { TelegramClaimManager } from "./telegram-claim.js";
 const TG_MAX_CHARS = 4096;
 const POLL_TIMEOUT = 30;
 const USER_QUEUE_MAX = 5;
-const SPAM_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+const SPAM_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
 const EVENT_QUEUE_HARD_CAP = 360;
 const EVENT_QUEUE_DEFAULT = 50;
 
@@ -213,6 +234,53 @@ function hasSchedulingIntent(text: string): boolean {
 	return false;
 }
 
+const CREATE_AGENT_THRESHOLD = 0.35;
+
+const CREATE_AGENT_REFERENCE_PHRASES = [
+	"create an agent",
+	"spawn an agent",
+	"make an agent",
+	"build an agent",
+	"create agent for",
+	"launch an agent",
+	"i need an agent",
+	"create a bot",
+	"new agent",
+	"spawn a new agent",
+	"create new agent",
+	"make me an agent",
+];
+
+function hasCreateAgentIntent(text: string): boolean {
+	// Fast path: explicit verb + agent/bot pattern anywhere in the message.
+	// Handles long messages that dilute cosine similarity below threshold.
+	if (/\b(create|spawn|make|build|launch)\s+(a\s+|an\s+|me\s+a\s+|me\s+an\s+|new\s+)?(agent|bot)\b/i.test(text)) return true;
+	if (/\bi\s+need\s+(a\s+|an\s+)?(agent|bot)\b/i.test(text)) return true;
+
+	// Fallback: cosine similarity for short/unconventional phrasing
+	const inputTokens = tokenize(text);
+	if (inputTokens.length === 0) return false;
+
+	const vocabSet = new Set<string>();
+	const refTokensList = CREATE_AGENT_REFERENCE_PHRASES.map((p) => {
+		const t = tokenize(p);
+		t.forEach((w) => vocabSet.add(w));
+		return t;
+	});
+	inputTokens.forEach((w) => vocabSet.add(w));
+	const vocab = Array.from(vocabSet);
+
+	const toVec = (tokens: string[]): number[] =>
+		vocab.map((w) => (tokens.includes(w) ? 1 : 0));
+
+	const inputVec = toVec(inputTokens);
+	for (const refTokens of refTokensList) {
+		const sim = cosineSimilarity(inputVec, toVec(refTokens));
+		if (sim >= CREATE_AGENT_THRESHOLD) return true;
+	}
+	return false;
+}
+
 // ============================================================================
 // Per-channel queue
 // ============================================================================
@@ -236,6 +304,8 @@ class ChannelQueues {
 	private eventProcessing = false;
 	private spamCooldownUntil = 0;
 	private readonly eventQueueMax: number;
+	// Track last 2 user messages for cosine-similarity spam detection
+	private lastUserMessages: string[] = [];
 
 	constructor() {
 		this.eventQueueMax = getEventQueueMax();
@@ -247,15 +317,55 @@ class ChannelQueues {
 		return Date.now() < this.spamCooldownUntil;
 	}
 
+	getRemainingCooldownMs(): number {
+		return Math.max(0, this.spamCooldownUntil - Date.now());
+	}
+
+	private activateCooldown(): void {
+		this.spamCooldownUntil = Date.now() + SPAM_COOLDOWN_MS;
+		log.logWarning("[telegram] Spam cooldown activated (cosine similarity) — 2 minutes");
+	}
+
+	private isSimilarToRecent(text: string): boolean {
+		if (this.lastUserMessages.length < 2) return false;
+		const inputTokens = tokenize(text);
+		if (inputTokens.length === 0) return false;
+
+		const allTokens = [...inputTokens];
+		const recentTokensList = this.lastUserMessages.map((m) => {
+			const t = tokenize(m);
+			t.forEach((w) => allTokens.push(w));
+			return t;
+		});
+		const vocab = [...new Set(allTokens)];
+		const toVec = (tokens: string[]): number[] => vocab.map((w) => (tokens.includes(w) ? 1 : 0));
+
+		const inputVec = toVec(inputTokens);
+		return recentTokensList.every((rt) => cosineSimilarity(inputVec, toVec(rt)) >= 0.35);
+	}
+
 	// -- User queue -----------------------------------------------------------
 
 	userSize(): number { return this.userQueue.length; }
 
-	enqueueUser(work: QueuedWork): EnqueueUserResult {
+	enqueueUser(work: QueuedWork, text = ""): EnqueueUserResult {
 		if (this.isSpamCooldownActive()) return "spam";
+
+		// Cosine-similarity spam gate: if the new message is very similar to both
+		// of the last 2 messages, the user is spamming — activate cooldown.
+		if (text && this.isSimilarToRecent(text)) {
+			this.activateCooldown();
+			return "spam";
+		}
+
+		// Track message for future similarity checks (keep last 2)
+		if (text) {
+			this.lastUserMessages.unshift(text);
+			if (this.lastUserMessages.length > 2) this.lastUserMessages.pop();
+		}
+
 		if (this.userQueue.length >= USER_QUEUE_MAX) {
-			this.spamCooldownUntil = Date.now() + SPAM_COOLDOWN_MS;
-			log.logWarning("[telegram] Spam cooldown activated — ignoring messages for 5 minutes");
+			this.activateCooldown();
 			return "spam";
 		}
 		this.userQueue.push(work);
@@ -354,6 +464,141 @@ interface ScheduleChoice {
 }
 
 // ============================================================================
+// Pending delete-agent state — two-phase: listing → confirming
+// ============================================================================
+
+interface DeleteAgentState {
+	phase: "listing" | "confirming";
+	agents: AgentRecord[];        // the list shown to the user
+	selectedAgent?: AgentRecord;  // set when user picks a number and we ask to confirm
+}
+
+// ============================================================================
+// Pending agent creation state — single-phase: awaiting_name
+// ============================================================================
+
+interface PendingAgentCreation {
+	phase: "awaiting_name";
+	originalIntent: string;    // the original "create an agent to do X" text
+	name?: string;             // set after naming phase
+	availableSkills: string[]; // cached skill list
+}
+
+// Use the configured IRIS_PROVIDER/IRIS_MODEL to pick relevant skills based on the user's intent.
+// Falls back to all skills if the API key is missing or the call fails.
+async function autoSelectSkills(intent: string, availableSkills: string[], workingDir: string): Promise<string[]> {
+	if (availableSkills.length === 0) return [];
+
+	const provider = process.env.IRIS_PROVIDER ?? "anthropic";
+	const model = process.env.IRIS_MODEL ?? "claude-sonnet-4-5";
+
+	try {
+		// Read provider config from models.json to get baseUrl and apiKey env var name
+		let baseUrl: string | undefined;
+		let apiKeyEnvVar: string | undefined;
+		let isAnthropicStyle = provider === "anthropic";
+
+		const modelsJsonPath = join(workingDir, "models.json");
+		if (existsSync(modelsJsonPath)) {
+			const config = JSON.parse(readFileSync(modelsJsonPath, "utf-8")) as {
+				providers?: Record<string, { baseUrl?: string; apiKey?: string; api?: string }>;
+			};
+			const pc = config.providers?.[provider];
+			if (pc) {
+				baseUrl = pc.baseUrl;
+				apiKeyEnvVar = pc.apiKey; // env var name, e.g. "FOUNDRY_E2_KEY"
+				isAnthropicStyle = (pc.api ?? "openai-completions") === "anthropic";
+			}
+		}
+
+		// Resolve the API key
+		const apiKey = apiKeyEnvVar
+			? process.env[apiKeyEnvVar]
+			: process.env[`${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`]
+			  ?? process.env.ANTHROPIC_API_KEY;
+		if (!apiKey) {
+			log.logWarning("[autoSelectSkills] No API key found — assigning all skills");
+			return [...availableSkills];
+		}
+
+		const prompt =
+			`You are selecting skills for an AI agent. The user wants: "${intent}"\n\n` +
+			`Available skills: ${availableSkills.join(", ")}\n\n` +
+			`Return ONLY a JSON array of skill names relevant to the user's request. ` +
+			`Be selective — only include skills the agent will actually need. ` +
+			`Example: ["search-web","store-file"]\n` +
+			`JSON array:`;
+
+		let responseText: string;
+
+		if (isAnthropicStyle) {
+			const client = new Anthropic({ apiKey });
+			const resp = await client.messages.create({
+				model,
+				max_tokens: 512,
+				messages: [{ role: "user", content: prompt }],
+			});
+			responseText = resp.content[0].type === "text" ? resp.content[0].text.trim() : "";
+		} else {
+			// OpenAI-compatible endpoint (foundry-e2, openai, etc.)
+			const url = `${baseUrl ?? "https://api.openai.com/v1"}/chat/completions`;
+			const resp = await fetch(url, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Authorization": `Bearer ${apiKey}`,
+					"api-key": apiKey, // Azure AI Foundry uses this header
+				},
+				body: JSON.stringify({
+					model,
+					messages: [{ role: "user", content: prompt }],
+					max_completion_tokens: 4096, // reasoning models consume ~2000-2300 tokens thinking before outputting; 512 caused empty content
+				}),
+			});
+			if (!resp.ok) {
+				const errBody = await resp.text().catch(() => "(unreadable)");
+				log.logWarning(`[autoSelectSkills] API error ${resp.status}: ${errBody} — assigning all skills`);
+				return [...availableSkills];
+			}
+			const data = await resp.json() as {
+				choices?: Array<{ message?: { content?: string | null; reasoning_content?: string } }>;
+			};
+			// Log first 400 chars of raw JSON for debugging
+			log.logInfo(`[autoSelectSkills] raw JSON: ${JSON.stringify(data).slice(0, 400)}`);
+			const msg = data.choices?.[0]?.message;
+			// Some reasoning models (e.g. Kimi-K2.6) return content=null with reasoning_content
+			responseText = (msg?.content ?? msg?.reasoning_content ?? "").trim();
+		}
+
+		log.logInfo(`[autoSelectSkills] raw response: ${responseText.slice(0, 200)}`);
+
+		const match = responseText.match(/\[[\s\S]*?\]/);
+		if (!match) {
+			log.logWarning(`[autoSelectSkills] No JSON array in response — assigning all skills`);
+			return [...availableSkills];
+		}
+
+		const parsed: unknown = JSON.parse(match[0]);
+		if (!Array.isArray(parsed)) return [...availableSkills];
+
+		const selected = (parsed as unknown[])
+			.filter((s): s is string => typeof s === "string")
+			.filter((s) => availableSkills.includes(s));
+
+		if (selected.length === 0) {
+			log.logWarning(`[autoSelectSkills] No valid skills matched — assigning all skills`);
+			return [...availableSkills];
+		}
+
+		log.logInfo(`[autoSelectSkills] selected: ${selected.join(", ")}`);
+		return selected;
+	} catch (err) {
+		log.logWarning(`[autoSelectSkills] Unexpected error: ${String(err)} — assigning all skills`);
+		return [...availableSkills];
+	}
+}
+
+// ============================================================================
 // TelegramBot
 // ============================================================================
 
@@ -368,6 +613,14 @@ export class TelegramBot {
 	private botName: string | undefined;
 	private botId: string | undefined;
 	private pendingScheduleChoices = new Map<string, ScheduleChoice>();
+	private pendingDeleteStates = new Map<string, DeleteAgentState>();
+	private pendingAgentCreations = new Map<string, PendingAgentCreation>();
+	private cooldownTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	// active agent conversation: channelId → { agentId, agentName, bridgeUrl }
+	private activeAgentConversations = new Map<string, { agentId: string; agentName: string; bridgeUrl: string }>();
+	// pending agent selection: user sent /agents, waiting for a number
+	private pendingAgentSelection = new Map<string, AgentRecord[]>();
+	private skillsDir: string;
 	// claim is a placeholder until start() resolves the real botId
 	claim: TelegramClaimManager;
 	private registry: TelegramBotRegistry;
@@ -381,6 +634,9 @@ export class TelegramBot {
 		this.workingDir = config.workingDir;
 		this.registry = new TelegramBotRegistry(config.workingDir);
 		this.claim = new TelegramClaimManager(config.workingDir, "pending");
+		// Skills are at /iris/data/skills (symlink to repo/skills) or workingDir/skills
+		this.skillsDir = process.env.IRIS_SKILLS_DIR
+			?? `${process.env.IRIS_DIR ?? "/iris"}/data/skills`;
 	}
 
 	// ==========================================================================
@@ -692,6 +948,7 @@ export class TelegramBot {
 
 		// Re-initialise claim manager with the real botId so each bot has its own file
 		this.claim = new TelegramClaimManager(this.workingDir, this.botId);
+		await this.claim.initialize();
 
 		// Check bot registry — enforces max 5 bots
 		const allowed = this.registry.register(this.botId, me.username ?? this.botName);
@@ -721,6 +978,11 @@ export class TelegramBot {
 					{ command: "reset", description: "Stop all tasks, clear queue and context" },
 					{ command: "stop", description: "Stop the current running task" },
 					{ command: "compact", description: "Summarise context to free up space" },
+					{ command: "agents", description: "List your agents and start a conversation" },
+					{ command: "status", description: "Show which agent you are currently talking to" },
+					{ command: "back", description: "Exit agent conversation, return to main bot" },
+					{ command: "delete_agent", description: "Delete an agent and free its slot" },
+					{ command: "task_status", description: "Show scheduled and recent tasks" },
 				],
 			});
 			log.logInfo(`[telegram:${this.botId}] Commands registered`);
@@ -794,40 +1056,119 @@ export class TelegramBot {
 
 		const text = (msg.text ?? msg.caption ?? "").trim();
 
-		// Claim gate
+		// Claim gate — handles first-time claim and ownership transfer
 		if (!this.claim.isClaimed()) {
 			const result = this.claim.tryClaimWith(chatId, text);
 			if (result === "claimed") {
 				log.logInfo(`[telegram:${this.botId}] Bot claimed by chat_id ${chatId}`);
-				await this.postMessage(channelId, "✅ Bot claimed. You're all set — start chatting!");
+				await this.postMessage(channelId, `Hi, I'm ${this.botName}. How can I help you today?`);
 			} else if (result === "expired") {
-				await this.postMessage(channelId, "❌ Token expired. Restart Iris to get a new one.");
+				await this.postMessage(channelId, "❌ Token expired. Run <code>iris-claim-token</code> on the server to generate a new one.");
 			}
 			return;
 		}
 
-		if (!this.claim.isOwner(chatId)) return;
+		// Ownership transfer confirmation — current owner replies 1 (allow) or 2 (deny)
+		if (this.claim.isOwner(chatId) && this.claim.getPendingTransferChatId() !== null) {
+			if (text === "1") {
+				this.claim.confirmTransfer();
+				await this.postMessage(channelId, "✅ Ownership transferred. The new user can now use this bot.");
+				log.logInfo(`[telegram:${this.botId}] Ownership transfer confirmed by ${chatId}`);
+				return;
+			} else if (text === "2") {
+				this.claim.rejectTransfer();
+				await this.postMessage(channelId, "❌ Transfer rejected. You remain the owner.");
+				return;
+			}
+		}
 
-		// Spam cooldown — silently drop everything during cooldown
-		const queue = this.getQueue(channelId);
-		if (queue.isSpamCooldownActive()) {
-			log.logInfo(`[telegram:${this.botId}] Spam cooldown active for ${channelId} — dropping message`);
+		// Transfer request from a different user with a valid token
+		if (!this.claim.isOwner(chatId)) {
+			const result = this.claim.tryClaimWith(chatId, text);
+			if (result === "transfer_pending") {
+				const ownerChannelId = this.encodeChannel(this.claim.getOwnerId()!, undefined);
+				await this.postMessage(
+					ownerChannelId,
+					`⚠️ A new user wants to take over this bot.\n\nReply <b>1</b> to allow or <b>2</b> to deny.\n\n` +
+					`All existing agents will remain visible to the new owner.`,
+				);
+				await this.postMessage(channelId, "⏳ Transfer request sent to the current owner. Waiting for their confirmation.");
+				return;
+			}
+			return; // not owner, not a valid token — ignore
+		}
+
+		// Agent conversation routing — if user is talking to a specific agent,
+		// route their message directly to that agent's bridge, bypassing the main gate.
+		const activeAgent = this.activeAgentConversations.get(channelId);
+		if (activeAgent && !text.startsWith("/")) {
+			const queue = this.getQueue(channelId);
+			if (queue.isSpamCooldownActive()) {
+				const sec = Math.ceil(queue.getRemainingCooldownMs() / 1000);
+				await this.postMessage(channelId, `⏳ Slow down — cooldown active. Try again in <b>${sec}s</b>.`);
+				return;
+			}
+			await this.routeToAgent(channelId, text, activeAgent);
 			return;
 		}
 
-		// Bot commands — handled directly, bypass all queues
+		// Pending agent selection — user replied to /agents list with a number
+		const pendingSelection = this.pendingAgentSelection.get(channelId);
+		if (pendingSelection && !text.startsWith("/")) {
+			await this.handleAgentSelectionReply(channelId, text, pendingSelection);
+			return;
+		}
+
+		// Spam cooldown — inform user of remaining time, start "lifted" timer on first hit
+		const queue = this.getQueue(channelId);
+		if (queue.isSpamCooldownActive()) {
+			const remainingMs  = queue.getRemainingCooldownMs();
+			const remainingSec = Math.ceil(remainingMs / 1000);
+			log.logInfo(`[telegram:${this.botId}] Spam cooldown active for ${channelId} — ${remainingSec}s remaining`);
+			await this.postMessage(channelId, `⏳ Slow down — cooldown active. Try again in <b>${remainingSec}s</b>.`);
+			// Schedule one-time "lifted" notification for the end of the cooldown
+			if (!this.cooldownTimers.has(channelId)) {
+				const tid = setTimeout(async () => {
+					this.cooldownTimers.delete(channelId);
+					await this.postMessage(channelId, "✅ Cooldown lifted. You can start prompting again.");
+				}, remainingMs + 500);
+				this.cooldownTimers.set(channelId, tid);
+			}
+			return;
+		}
+
+		// Bot commands — handled directly, bypass all queues and spam check
 		if (text.startsWith("/")) {
 			const cmd = text.split(/\s/)[0].toLowerCase().replace(/@[^@]*$/, "");
 			if (cmd === "/reset") { await this.handler.handleReset(channelId, this); return; }
 			if (cmd === "/compact") { await this.handler.handleCompact(channelId, this); return; }
 			if (cmd === "/stop") { await this.handler.handleStop(channelId, this); return; }
+			if (cmd === "/back") { await this.handleBack(channelId); return; }
+			if (cmd === "/agents") { await this.handleListAgents(channelId); return; }
+			if (cmd === "/status") { await this.handleStatus(channelId); return; }
+			if (cmd === "/delete_agent") { await this.handleDeleteAgentStart(channelId); return; }
+			if (cmd === "/task_status") { await this.handleTaskStatus(channelId); return; }
 			// Unknown commands fall through as regular messages
+		}
+
+		// Pending delete-agent flow — handle numeric selection and confirm/cancel
+		const pendingDelete = this.pendingDeleteStates.get(channelId);
+		if (pendingDelete) {
+			await this.handleDeleteAgentReply(channelId, text, pendingDelete);
+			return;
 		}
 
 		// Pending schedule choice — handle "1" / "2" response
 		const pendingChoice = this.pendingScheduleChoices.get(channelId);
 		if (pendingChoice) {
 			await this.handleScheduleChoice(channelId, text, pendingChoice);
+			return;
+		}
+
+		// Greeting shortcut — reply inline without invoking the agent
+		const greetingPattern = /^(hi|hello|hey|howdy|hiya|yo)\b[\s!?]*$/i;
+		if (greetingPattern.test(text)) {
+			await this.postMessage(channelId, `Hi, I'm ${this.botName}. How can I help you today?`);
 			return;
 		}
 
@@ -882,24 +1223,37 @@ export class TelegramBot {
 			}
 		}
 
-		const event: TelegramEvent = {
-			type: "message",
-			channel: channelId,
-			ts: String(msg.message_id),
-			user: userId,
-			text,
-			chatId,
-			threadId,
-			files,
-			attachments,
-		};
-
-		const result = queue.enqueueUser(() => this.handler.handleEvent(event, this));
-		if (result === "spam") {
-			// Cooldown just activated — message dropped silently
-		} else if (result === "full") {
-			await this.postMessage(channelId, "_Too many messages queued. Please wait._");
+		// Pending agent creation flow — naming → skill selection → provision
+		const pendingCreation = this.pendingAgentCreations.get(channelId);
+		if (pendingCreation) {
+			await this.handleAgentCreationReply(channelId, text, pendingCreation);
+			return;
 		}
+
+		// Gate: main bot only accepts agent creation. Everything else is rejected.
+		if (hasCreateAgentIntent(text)) {
+			// Require "agent" or "bot" in the text to avoid false positives like
+			// "create a task scheduler for me" matching "create agent for".
+			const hasAgentWord = /\b(agent|bot)\b/i.test(text);
+			if (hasAgentWord) {
+				await this.startAgentCreation(channelId, text);
+				return;
+			}
+			// Looks like a creation request but missing the word "agent" — guide the user
+			await this.postMessage(
+				channelId,
+				`It sounds like you want to create something! I create agents — try:\n\n` +
+				`<b>create an agent to ${text.replace(/^(create|make|build|spawn)\s+(a\s+|an\s+)?/i, "").replace(/\s+for me\s*$/i, "")}</b>`,
+			);
+			return;
+		}
+
+		await this.postMessage(
+			channelId,
+			`I can only create agents from this interface.\n\n` +
+			`Say something like: <b>create an agent to search the web</b>\n\n` +
+			`To chat with an existing agent, use /agents.`,
+		);
 	}
 
 	// ==========================================================================
@@ -932,7 +1286,7 @@ export class TelegramBot {
 				chatId: this.claim.getOwnerId() ?? 0,
 				attachments: [],
 			};
-			this.getQueue(channelId).enqueueUser(() => this.handler.handleEvent(event, this));
+			this.getQueue(channelId).enqueueUser(() => this.handler.handleEvent(event, this), choice.originalText);
 
 		} else if (trimmed === "2") {
 			this.pendingScheduleChoices.delete(channelId);
@@ -945,6 +1299,401 @@ export class TelegramBot {
 				`Please reply with <b>1</b> or <b>2</b>:\n\n` +
 				`<b>1</b> — Delete existing and schedule new task\n` +
 				`<b>2</b> — Keep existing task (cancel new request)`,
+			);
+		}
+	}
+
+	// ==========================================================================
+	// Private — /back command
+	// ==========================================================================
+
+	private async handleBack(channelId: string): Promise<void> {
+		const active = this.activeAgentConversations.get(channelId);
+		this.activeAgentConversations.delete(channelId);
+		this.pendingAgentSelection.delete(channelId);
+		if (active) {
+			await this.postMessage(channelId, `↩️ Back to main bot. Use /agents to talk to a specific agent.`);
+		} else {
+			await this.postMessage(channelId, "You're already in the main bot.");
+		}
+	}
+
+	private async handleStatus(channelId: string): Promise<void> {
+		const active = this.activeAgentConversations.get(channelId);
+		if (active) {
+			await this.postMessage(
+				channelId,
+				`🤖 You're currently talking to <b>${active.agentName}</b>.\n\nType /back to return to the main bot, or /agents to switch.`,
+			);
+		} else {
+			const botId = this.botId;
+			const agents = botId ? await listAgents(botId) : [];
+			if (agents.length === 0) {
+				await this.postMessage(channelId, `🏠 You're on the <b>main bot</b>. No agents created yet.`);
+			} else {
+				const lines = agents.map((a) => `• <b>${a.name}</b> — ${a.status}`).join("\n");
+				await this.postMessage(
+					channelId,
+					`🏠 You're on the <b>main bot</b>.\n\nYour agents:\n${lines}\n\nUse /agents to talk to one.`,
+				);
+			}
+		}
+	}
+
+	// ==========================================================================
+	// Private — agent conversation routing
+	// ==========================================================================
+
+	private async routeToAgent(
+		channelId: string,
+		text: string,
+		agent: { agentId: string; agentName: string; bridgeUrl: string },
+	): Promise<void> {
+		log.logInfo(`[telegram:${this.botId}] Routing to agent ${agent.agentName} (${agent.agentId})`);
+		try {
+			const response = await callAgentBridge(agent.bridgeUrl, text, "user");
+			const stripped = response.startsWith(`[${agent.agentName}]`)
+				? response.slice(`[${agent.agentName}]`.length).replace(/^:\s*/, "")
+				: response;
+			await this.postMessage(channelId, `🤖 <b>${agent.agentName}</b>\n${stripped}`);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			log.logWarning(`[telegram:${this.botId}] Bridge call to ${agent.agentName} failed`, msg);
+			await this.postMessage(
+				channelId,
+				`⚠️ <b>${agent.agentName}</b> is not responding (${msg}).\n\nUse /back to return to the main bot.`,
+			);
+		}
+	}
+
+	// ==========================================================================
+	// Private — agent selection (two-phase /agents)
+	// ==========================================================================
+
+	private async handleAgentSelectionReply(
+		channelId: string,
+		text: string,
+		agents: AgentRecord[],
+	): Promise<void> {
+		const idx = parseInt(text.trim(), 10) - 1;
+		if (isNaN(idx) || idx < 0 || idx >= agents.length) {
+			await this.postMessage(channelId, `Please reply with a number between 1 and ${agents.length}, or /back to cancel.`);
+			return;
+		}
+
+		const selected = agents[idx];
+		this.pendingAgentSelection.delete(channelId);
+
+		if (selected.status === "crashed" || selected.status === "stopped") {
+			await this.postMessage(channelId, `⚠️ <b>${selected.name}</b> is currently ${selected.status}. Start it first or choose another agent.`);
+			return;
+		}
+
+		const bridgeUrl = `http://127.0.0.1:${bridgePortForSlot(selected.slotIndex)}`;
+		this.activeAgentConversations.set(channelId, {
+			agentId:   selected.agentId,
+			agentName: selected.name,
+			bridgeUrl,
+		});
+
+		await this.postMessage(
+			channelId,
+			`🤖 Now talking to <b>${selected.name}</b>.\n\nType /back to return to the main bot.`,
+		);
+	}
+
+	// ==========================================================================
+	// Private — /task_status command
+	// ==========================================================================
+
+	private async handleTaskStatus(channelId: string): Promise<void> {
+		const botId = this.botId;
+		if (!botId) return;
+
+		const tasks = await getOwnerTaskSummary(botId);
+		if (tasks.length === 0) {
+			await this.postMessage(channelId, "No tasks found. Assign tasks to your agents to see them here.");
+			return;
+		}
+
+		// Group by agent_id, look up names from registry
+		const agents = await listAgents(botId);
+		const nameMap = new Map(agents.map((a) => [a.agentId, a.name]));
+
+		const statusEmoji: Record<string, string> = {
+			pending: "⏳", running: "⚙️", done: "✅", failed: "❌", skipped: "⏭️",
+		};
+
+		// Group tasks by agent
+		const byAgent = new Map<string, TaskRecord[]>();
+		for (const t of tasks) {
+			if (!byAgent.has(t.agentId)) byAgent.set(t.agentId, []);
+			byAgent.get(t.agentId)!.push(t);
+		}
+
+		const sections: string[] = [];
+		for (const [agentId, agentTasks] of byAgent) {
+			const agentName = nameMap.get(agentId) ?? agentId.slice(0, 8);
+			const lines = agentTasks.slice(0, 5).map((t) => {
+				const emoji = statusEmoji[t.status] ?? "❓";
+				const when = t.scheduledFor
+					? `scheduled ${new Date(t.scheduledFor).toLocaleString("en-GB", { timeZone: "UTC", hour12: false })}`
+					: "immediate";
+				const payload = t.payload.slice(0, 60) + (t.payload.length > 60 ? "…" : "");
+				return `  ${emoji} <i>${payload}</i>\n     <code>${when}</code>`;
+			});
+			sections.push(`<b>${agentName}</b>\n${lines.join("\n")}`);
+		}
+
+		await this.postMessage(channelId, sections.join("\n\n"));
+	}
+
+	// ==========================================================================
+	// Private — /agents command
+	// ==========================================================================
+
+	private async handleListAgents(channelId: string): Promise<void> {
+		const botId = this.botId;
+		if (!botId) return;
+
+		// If user is in an active agent conversation, show that first
+		const active = this.activeAgentConversations.get(channelId);
+		if (active) {
+			await this.postMessage(
+				channelId,
+				`You're currently talking to <b>${active.agentName}</b>. Type /back first to switch agents.`,
+			);
+			return;
+		}
+
+		const agents = await listAgents(botId);
+		if (agents.length === 0) {
+			await this.postMessage(channelId, "You have no agents yet. Say <b>create an agent</b> to get started.");
+			return;
+		}
+
+		const statusEmoji: Record<string, string> = { running: "🟢", stopped: "🔴", crashed: "💥" };
+		const lines = agents.map(
+			(a, i) => `<b>${i + 1}.</b> ${a.name} ${statusEmoji[a.status] ?? "❓"} <i>${a.status}</i>`,
+		);
+		const used = agents.length;
+
+		// Store the list so the user's next numeric reply selects an agent
+		this.pendingAgentSelection.set(channelId, agents);
+
+		await this.postMessage(
+			channelId,
+			`<b>Your agents (${used}/${MAX_AGENTS_PER_BOT}):</b>\n\n${lines.join("\n")}\n\n` +
+			`Reply with a number to start talking to that agent, or /back to cancel.`,
+		);
+	}
+
+	// ==========================================================================
+	// Private — /delete_agent command
+	// ==========================================================================
+
+	private async handleDeleteAgentStart(channelId: string): Promise<void> {
+		const botId = this.botId;
+		if (!botId) return;
+
+		const agents = await listAgents(botId);
+		if (agents.length === 0) {
+			await this.postMessage(channelId, "You have no agents to delete.");
+			return;
+		}
+
+		const statusEmoji: Record<string, string> = { running: "🟢", stopped: "🔴", crashed: "💥" };
+		const lines = agents.map(
+			(a, i) => `<b>${i + 1}.</b> ${a.name} ${statusEmoji[a.status] ?? "❓"}`,
+		);
+		this.pendingDeleteStates.set(channelId, { phase: "listing", agents });
+		await this.postMessage(
+			channelId,
+			`Which agent do you want to delete?\n\n${lines.join("\n")}\n\nReply with a number.`,
+		);
+	}
+
+	private async handleDeleteAgentReply(
+		channelId: string,
+		text: string,
+		state: DeleteAgentState,
+	): Promise<void> {
+		const trimmed = text.trim();
+
+		if (state.phase === "listing") {
+			const idx = parseInt(trimmed, 10) - 1;
+			if (isNaN(idx) || idx < 0 || idx >= state.agents.length) {
+				await this.postMessage(channelId, `Please reply with a number between 1 and ${state.agents.length}.`);
+				return;
+			}
+			const selected = state.agents[idx];
+			this.pendingDeleteStates.set(channelId, { phase: "confirming", agents: state.agents, selectedAgent: selected });
+			await this.postMessage(
+				channelId,
+				`Delete <b>${selected.name}</b>? This cannot be undone.\n\n<b>1</b> — Yes, delete\n<b>2</b> — Cancel`,
+			);
+			return;
+		}
+
+		// confirming phase
+		const agent = state.selectedAgent!;
+
+		if (trimmed === "1") {
+			this.pendingDeleteStates.delete(channelId);
+			// Deprovision the Docker container and clean up agents.json
+			await deprovisionAgent(`iris-tg-${agent.agentId}`);
+			unregisterAgentBridge(this.workingDir, agent.name);
+			await updateAgentStatus(agent.agentId, "stopped");
+			const deleted = await deleteAgent(agent.agentId);
+			if (deleted) {
+				log.logInfo(`[telegram:${this.botId}] Agent ${agent.name} (${agent.agentId}) deleted by owner`);
+				await this.postMessage(channelId, `✅ <b>${agent.name}</b> has been deleted. Slot ${agent.slotIndex} is now free.`);
+			} else {
+				await this.postMessage(channelId, `⚠️ Could not delete <b>${agent.name}</b> from the registry. Check Supabase connection.`);
+			}
+			return;
+		}
+
+		if (trimmed === "2") {
+			this.pendingDeleteStates.delete(channelId);
+			await this.postMessage(channelId, "Cancelled. No agents were deleted.");
+			return;
+		}
+
+		await this.postMessage(channelId, "Please reply with <b>1</b> to confirm or <b>2</b> to cancel.");
+	}
+
+	// ==========================================================================
+	// Public — watchdog integration
+	// ==========================================================================
+
+	/**
+	 * Called by the watchdog when an agent's container crashes.
+	 * Exits any active conversation with that agent and notifies the user.
+	 */
+	clearAgentConversation(agentId: string): void {
+		for (const [channelId, agent] of this.activeAgentConversations) {
+			if (agent.agentId === agentId) {
+				this.activeAgentConversations.delete(channelId);
+				void this.postMessage(
+					channelId,
+					`💥 <b>${agent.agentName}</b> went offline. Your conversation has ended.\n\n` +
+					`Use /agents to reconnect when it comes back.`,
+				);
+			}
+		}
+		// Also clear any pending agent selections that include the crashed agent
+		for (const [channelId, agents] of this.pendingAgentSelection) {
+			if (agents.some((a) => a.agentId === agentId)) {
+				this.pendingAgentSelection.delete(channelId);
+			}
+		}
+	}
+
+	// ==========================================================================
+	// Public — agent limit check (called before spawning)
+	// ==========================================================================
+
+	async checkAgentLimit(channelId: string): Promise<boolean> {
+		const botId = this.botId;
+		if (!botId) return true;
+		const count = await countAgents(botId);
+		if (count >= MAX_AGENTS_PER_BOT) {
+			await this.postMessage(
+				channelId,
+				`⛔ Agent limit reached (${count}/${MAX_AGENTS_PER_BOT}).\n\n` +
+				`To create a new agent, delete an existing one with /delete_agent.`,
+			);
+			return false;
+		}
+		return true;
+	}
+
+	// ==========================================================================
+	// Private — agent creation flow: name → auto-skill-select → provision
+	// ==========================================================================
+
+	private async startAgentCreation(channelId: string, originalText: string): Promise<void> {
+		const allowed = await this.checkAgentLimit(channelId);
+		if (!allowed) return;
+
+		const availableSkills = getAvailableSkills(this.skillsDir);
+		this.pendingAgentCreations.set(channelId, {
+			phase: "awaiting_name",
+			originalIntent: originalText,
+			availableSkills,
+		});
+		await this.postMessage(channelId, "What would you like to name this agent? (letters, numbers, hyphens only — max 32 chars)");
+	}
+
+	private async handleAgentCreationReply(
+		channelId: string,
+		text: string,
+		state: PendingAgentCreation,
+	): Promise<void> {
+		const botId = this.botId;
+		if (!botId) return;
+
+		// Phase: awaiting_name
+		const name = text.trim();
+
+		if (!/^[a-zA-Z0-9-]{1,32}$/.test(name)) {
+			await this.postMessage(
+				channelId,
+				"Invalid name. Use only letters, numbers, and hyphens (max 32 chars). Try again:",
+			);
+			return;
+		}
+
+		const existing = await getAgentByName(botId, name);
+		if (existing) {
+			await this.postMessage(channelId, `An agent named <b>${name}</b> already exists. Choose a different name:`);
+			return;
+		}
+
+		// Name accepted — remove pending state and auto-select skills
+		this.pendingAgentCreations.delete(channelId);
+
+		await this.postMessage(channelId, `Got it! Picking the right skills for <b>${name}</b>...`);
+
+		const selectedSkills = await autoSelectSkills(state.originalIntent, state.availableSkills, this.workingDir);
+
+		await this.postMessage(
+			channelId,
+			`Creating agent <b>${name}</b> with skills: ${selectedSkills.length > 0 ? selectedSkills.join(", ") : "none (general-purpose)"}...\n\nThis may take a moment.`,
+		);
+
+		const chatId = this.claim.getOwnerId()!;
+		const record = await createAgent({ botId, chatId, name, skills: selectedSkills });
+		if (!record) {
+			await this.postMessage(channelId, "⚠️ Failed to create agent record. Check Supabase connection and try again.");
+			return;
+		}
+
+		try {
+			const containerName = await provisionAgent({
+				agentId: record.agentId,
+				agentName: name,
+				slotIndex: record.slotIndex,
+				skills: selectedSkills,
+				ownerChannelId: channelId,
+			});
+			await updateAgentStatus(record.agentId, "running", containerName);
+			registerAgentBridge(this.workingDir, name, record.agentId, record.slotIndex);
+
+			log.logInfo(`[telegram:${botId}] Agent "${name}" provisioned — container: ${containerName}`);
+			await this.postMessage(
+				channelId,
+				`✅ <b>${name}</b> is live! (slot ${record.slotIndex}/${MAX_AGENTS_PER_BOT})\n\n` +
+				`Use /agents to start talking to it.`,
+			);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			log.logWarning(`[telegram:${botId}] Failed to provision agent "${name}"`, msg);
+			await deleteAgent(record.agentId);
+			await this.postMessage(
+				channelId,
+				`⚠️ Failed to start <b>${name}</b>: ${msg}\n\nThe agent slot has been freed.`,
 			);
 		}
 	}
