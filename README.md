@@ -452,11 +452,21 @@ During bootstrap you will be asked:
 ```
 Bootstrap writes it to `/iris/.env` automatically.
 
+To add it manually after bootstrap:
+```bash
+echo "TELEGRAM_BOT_TOKEN=your-token-here" >> /iris/.env
+sudo systemctl restart iris
+```
+
 ---
 
 **Step 3 — Claim the bot**
 
-On first startup, Iris prints a one-time claim token to the terminal:
+On first startup, Iris prints a one-time claim token to the logs:
+
+```bash
+sudo tail -f /iris/iris-runtime.log
+```
 
 ```
 [telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:
@@ -478,34 +488,27 @@ Claim state is saved to disk — persists across restarts.
 
 **Reclaiming** (e.g. changed Telegram account):
 
-If you need to transfer ownership to a different Telegram account, run this single command:
-
 ```bash
 echo "IRIS_TELEGRAM_FORCE_RECLAIM=true" >> /iris/.env && sudo systemctl restart iris
+# send the new claim token from your new Telegram account
+# once claimed, remove the flag:
+sed -i '/IRIS_TELEGRAM_FORCE_RECLAIM/d' /iris/.env
 ```
-
-The previous owner is cleared and a new claim token is printed to the terminal:
-
-```
-[telegram] Force reclaim — previous owner cleared.
-[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:
-
-    a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
-
-[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.
-```
-
-Send that token from your new Telegram account to the bot — it replies ✅ and the new account becomes the owner. Once claimed, remove `IRIS_TELEGRAM_FORCE_RECLAIM` from `/iris/.env`.
 
 ---
 
 **Bot commands**
 
-| Command | Action |
+| Command | What it does |
 |---|---|
-| `/reset` | Clear conversation history |
+| `/agents` | List your sub-agents and start a conversation with one |
+| `/status` | Show which agent you're currently talking to |
+| `/back` | Exit agent conversation, return to main Iris |
+| `/delete_agent` | Delete an agent and free its slot |
+| `/task_status` | Show scheduled and recent tasks |
+| `/reset` | Clear conversation history and stop all tasks |
 | `/compact` | Summarise context to save tokens |
-| `/stop` | Abort a running response |
+| `/stop` | Abort a currently running response |
 
 ---
 
@@ -517,6 +520,116 @@ IRIS_SLACK_APP_TOKEN=xapp-...
 IRIS_SLACK_BOT_TOKEN=xoxb-...
 TELEGRAM_BOT_TOKEN=...
 ```
+
+---
+
+## Supabase Setup
+
+Iris uses Supabase to store the agent registry, task queue, and bot claim state. Sub-agents will not work without it.
+
+**Step 1 — Create a project**
+
+1. Go to [supabase.com](https://supabase.com) and create a free project
+2. From **Project Settings → API**, copy:
+   - **Project URL** → `SUPABASE_URL`
+   - **service_role** secret key → `SUPABASE_SERVICE_ROLE_KEY`
+
+**Step 2 — Add credentials to env**
+
+```bash
+echo "SUPABASE_URL=https://<your-project>.supabase.co" >> /iris/.env
+echo "SUPABASE_SERVICE_ROLE_KEY=<service-role-key>" >> /iris/.env
+sudo systemctl restart iris
+```
+
+**Step 3 — Create the tables**
+
+In the Supabase dashboard go to **SQL Editor** and run:
+
+```sql
+-- ============================================================================
+-- Iris Supabase Schema
+-- Run this in the Supabase SQL editor for your project.
+-- ============================================================================
+
+-- ── Phase 1: Telegram claim / ownership ──────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS telegram_claim (
+    bot_id                   TEXT        PRIMARY KEY,
+    claimed                  BOOLEAN     NOT NULL DEFAULT false,
+    chat_id                  BIGINT,
+    pending_token            TEXT,
+    token_expires_at         TIMESTAMPTZ,
+    pending_transfer_chat_id BIGINT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE telegram_claim DISABLE ROW LEVEL SECURITY;
+
+-- ── Phase 2: Agent registry ───────────────────────────────────────────────────
+
+CREATE TYPE agent_status AS ENUM ('running', 'stopped', 'crashed');
+
+CREATE TABLE IF NOT EXISTS telegram_agents (
+    agent_id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    bot_id              TEXT         NOT NULL REFERENCES telegram_claim(bot_id) ON DELETE CASCADE,
+    chat_id             BIGINT       NOT NULL,
+    name                TEXT         NOT NULL,
+    docker_container_id TEXT,
+    status              agent_status NOT NULL DEFAULT 'stopped',
+    skills              JSONB        NOT NULL DEFAULT '[]',
+    slot_index          SMALLINT     NOT NULL CHECK (slot_index BETWEEN 1 AND 5),
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+
+    UNIQUE (bot_id, name),
+    UNIQUE (bot_id, slot_index)
+);
+
+ALTER TABLE telegram_agents DISABLE ROW LEVEL SECURITY;
+
+-- ── Phase 4: Per-agent task queue ─────────────────────────────────────────────
+
+CREATE TYPE task_type   AS ENUM ('immediate', 'scheduled');
+CREATE TYPE task_status AS ENUM ('pending', 'running', 'done', 'failed', 'skipped');
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    task_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id       UUID        NOT NULL REFERENCES telegram_agents(agent_id) ON DELETE CASCADE,
+    bot_id         TEXT        NOT NULL,
+    channel_id     TEXT        NOT NULL,
+    type           task_type   NOT NULL DEFAULT 'immediate',
+    payload        TEXT        NOT NULL,
+    scheduled_for  TIMESTAMPTZ,
+    timezone       TEXT,
+    local_time_str TEXT,
+    status         task_status NOT NULL DEFAULT 'pending',
+    assigned_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at     TIMESTAMPTZ,
+    completed_at   TIMESTAMPTZ,
+    output         TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX agent_tasks_agent_idx    ON agent_tasks(agent_id, status);
+CREATE INDEX agent_tasks_schedule_idx ON agent_tasks(scheduled_for) WHERE status = 'pending';
+
+ALTER TABLE agent_tasks DISABLE ROW LEVEL SECURITY;
+```
+
+**Viewing your data**
+
+Go to the **Table Editor** in your Supabase dashboard:
+```
+https://supabase.com/dashboard/project/<your-project-id>/editor
+```
+
+| Table | Contents |
+|---|---|
+| `telegram_claim` | Bot ownership / claim state |
+| `telegram_agents` | Provisioned sub-agent records (name, slot, skills) |
+| `agent_tasks` | Task queue — what agents have been asked to do |
 
 ---
 
