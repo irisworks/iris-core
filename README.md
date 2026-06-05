@@ -263,16 +263,23 @@ Supabase **Table Editor** should now show three tables: `sub_agents`, `sub_agent
 
 ### Migrating from old schema (telegram_claim / telegram_agents)
 
+If you previously ran an older schema that had `telegram_claim` and `telegram_agents` tables, the `CREATE TABLE IF NOT EXISTS` above will **not** have recreated `agent_tasks` (it already exists with the old FK pointing to `telegram_agents` instead of `sub_agents`). Task creation will fail with a FK violation until this is resolved.
+
+**Runtime workaround (already in place):** `sub-agent-registry.ts` contains a compatibility shim that mirrors every sub-agent into `telegram_agents` so task inserts pass the old FK check. Tasks work correctly while the shim is active.
+
+**To permanently fix** — run this in the Supabase SQL Editor, then re-run the full schema block above:
+
 ```sql
--- Run BEFORE the schema block above to clear legacy tables
+-- Drops legacy tables and stale types — then re-run the full schema block above
 DROP TABLE IF EXISTS agent_tasks     CASCADE;
 DROP TABLE IF EXISTS telegram_agents CASCADE;
 DROP TABLE IF EXISTS telegram_claim  CASCADE;
 DROP TYPE  IF EXISTS agent_status    CASCADE;
 DROP TYPE  IF EXISTS task_type       CASCADE;
 DROP TYPE  IF EXISTS task_status     CASCADE;
--- Then re-run the full schema block above
 ```
+
+After running the migration, remove the `upsertCompatRow` / `deleteCompatRow` shim from `src/sub-agent-registry.ts`.
 
 ---
 
@@ -562,7 +569,7 @@ az keyvault secret set --vault-name "$KV" --name "GITHUB-TOKEN"              --v
 | Firecracker VM not booting | `/dev/kvm` unavailable | Resize VM to Ddsv5 series on Azure (B/D/F series have no KVM) |
 | `firecracker: permission denied` | Not in kvm group | `sudo usermod -aG kvm $USER` then re-login |
 | Supabase errors | Missing credentials | Add `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` to `.env` |
-| Schema mismatch | Old tables still present | Run migration block then re-run schema |
+| Schema mismatch / task FK error | `agent_tasks` still has old FK to `telegram_agents` | Run migration block in Supabase SQL Editor then re-run schema (compat shim in code handles this in the meantime) |
 | `fatal: repository not found` | Wrong remote URL | `git remote set-url origin https://github.com/irisworks/iris-core.git` |
 
 ### Rebuild the `iris-runtime:local` Docker image
@@ -603,7 +610,7 @@ sudo systemctl start iris-fc-public-sandbox
 - **Sub-agent naming**: Docker containers are `iris-agent-{agentId}`; Firecracker VMs are `iris-fc-{agentId}`. Bridge ports: Docker uses `127.0.0.1:420{1..10}`; Firecracker uses `172.20.{slot}.2:4200`.
 - **Watchdog**: checks Docker via `docker inspect`, Firecracker via exec-server `/health`. On crash, notifies the linked Telegram bot. On recovery, marks missed scheduled tasks as skipped.
 - **Telegram state**: active links in Supabase (survive reboots). Pending claim tokens in `/iris/data/telegram-link-tokens.json` (expire after 10 min regardless).
-- **Agent creation restriction**: enforced at two independent levels — `spawn-agent` skill is not mounted into sub-agent containers, AND MEMORY.md constitution explicitly forbids it. Neither can be overridden by a user instruction.
+- **Agent creation restriction**: enforced at three independent levels — (1) `spawn-agent` skill filtered out of AgentRunner for all `BRIDGE-*`, `tg-*`, and `SESSION-*` channels; (2) `spawn-agent` skill directory not accessible to sub-agent containers in Firecracker VMs; (3) MEMORY.md constitution explicitly forbids it. No user instruction can override any of these.
 - **VM is disposable**: GitHub is the source of truth. A full rebuild from this README produces an identical running system.
 - **Never commit** secrets to git (`.env`, `models.json` with keys, etc.).
 
