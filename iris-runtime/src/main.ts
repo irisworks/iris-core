@@ -737,9 +737,12 @@ const eventsWatcherBot = SLACK_ENABLED
 				if (channel.startsWith("BRIDGE-")) {
 					const requestId = channel.slice("BRIDGE-".length);
 					if (bridgePort > 0) {
-						// Sub-agent: LLM just finished — resolve the bridge server's
-						// pending promise so the HTTP response goes back to main Iris.
-						resolveBridgeRequest(requestId, text);
+						// Sub-agent: skip typing indicators — bridge resolves on
+						// finalizeMessage (or here when no typing placeholder was shown).
+						const isTypingIndicator = text.includes("_Thinking_") || text.startsWith("_Starting event:");
+						if (!isTypingIndicator) {
+							resolveBridgeRequest(requestId, text);
+						}
 					} else {
 						// Main Iris: a sub-agent is posting its response back.
 						// Forward to the /event endpoint so callAgentBridge resolves.
@@ -756,7 +759,14 @@ const eventsWatcherBot = SLACK_ENABLED
 				return Date.now().toString();
 			},
 			updateMessage: async () => {},
-			finalizeMessage: async () => {},
+			finalizeMessage: async (channel: string, _ts: string, text: string) => {
+				// Called when the LLM replaces a typing placeholder with the real response.
+				// This is the correct resolution point when setTyping fired first.
+				if (channel.startsWith("BRIDGE-") && bridgePort > 0) {
+					const requestId = channel.slice("BRIDGE-".length);
+					resolveBridgeRequest(requestId, text);
+				}
+			},
 			deleteMessage: async () => {},
 			postInThread: async () => Date.now().toString(),
 			uploadFile: async () => {},
