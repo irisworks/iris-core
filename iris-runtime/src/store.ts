@@ -5,7 +5,39 @@ import * as log from "./log.js";
 
 export interface Attachment {
 	original: string; // original filename from uploader
-	local: string; // path relative to working dir (e.g., "C12345/attachments/1732531234567_file.png")
+	local: string; // path relative to working dir (e.g., "slack/C12345/attachments/1732531234567_file.png")
+}
+
+// Virtual/session channels live flat under workingDir — no transport prefix.
+function isVirtualChannel(channelId: string): boolean {
+	return (
+		channelId.startsWith("SESSION-") ||
+		channelId.startsWith("BRIDGE-") ||
+		channelId.startsWith("ESCALATE-") ||
+		channelId.startsWith("SELFHEAL-") ||
+		channelId.startsWith("WEBUI")
+	);
+}
+
+/**
+ * Resolve the absolute directory path for a channel.
+ * Telegram → workingDir/telegram/{channelId}
+ * Slack    → workingDir/slack/{channelId}
+ * Virtual  → workingDir/{channelId}  (SESSION-, BRIDGE-, etc.)
+ */
+export function resolveChannelDir(workingDir: string, channelId: string): string {
+	if (isVirtualChannel(channelId)) return join(workingDir, channelId);
+	if (channelId.startsWith("tg-")) return join(workingDir, "telegram", channelId);
+	return join(workingDir, "slack", channelId);
+}
+
+/**
+ * Resolve the relative path prefix for a channel (used in Attachment.local).
+ */
+export function resolveChannelPath(channelId: string): string {
+	if (isVirtualChannel(channelId)) return channelId;
+	if (channelId.startsWith("tg-")) return `telegram/${channelId}`;
+	return `slack/${channelId}`;
 }
 
 export interface LoggedMessage {
@@ -53,7 +85,7 @@ export class ChannelStore {
 	 * Get or create the directory for a channel/DM
 	 */
 	getChannelDir(channelId: string): string {
-		const dir = join(this.workingDir, channelId);
+		const dir = resolveChannelDir(this.workingDir, channelId);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
@@ -91,7 +123,7 @@ export class ChannelStore {
 			}
 
 			const filename = this.generateLocalFilename(file.name, timestamp);
-			const localPath = `${channelId}/attachments/${filename}`;
+			const localPath = `${resolveChannelPath(channelId)}/attachments/${filename}`;
 
 			attachments.push({
 				original: file.name,

@@ -3,7 +3,6 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, readdirSync, statS
 import { readFile } from "fs/promises";
 import { join } from "path";
 import * as log from "./log.js";
-import type { SlackBot, SlackEvent } from "./slack.js";
 
 // ============================================================================
 // Event Types
@@ -30,7 +29,16 @@ export interface PeriodicEvent {
 	timezone: string; // IANA timezone
 }
 
-export type IrisEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
+export interface IntervalEvent {
+	type: "interval";
+	channelId: string;
+	text: string;
+	intervalSeconds: number; // minimum 5s enforced at runtime
+	endsAt?: string;         // ISO 8601 — self-deletes when passed
+	count?: number;          // self-deletes after N fires
+}
+
+export type IrisEvent = ImmediateEvent | OneShotEvent | PeriodicEvent | IntervalEvent;
 
 // ============================================================================
 // EventsWatcher
@@ -42,6 +50,7 @@ const RETRY_BASE_MS = 100;
 
 export class EventsWatcher {
 	private timers: Map<string, NodeJS.Timeout> = new Map();
+	private intervals: Map<string, NodeJS.Timeout> = new Map();
 	private crons: Map<string, Cron> = new Map();
 	private debounceTimers: Map<string, NodeJS.Timeout> = new Map();
 	private startTime: number;
@@ -50,7 +59,8 @@ export class EventsWatcher {
 
 	constructor(
 		private eventsDir: string,
-		private slack: SlackBot,
+		private enqueue: (channelId: string, text: string) => boolean,
+		private hasPendingEvent: (channelId: string) => boolean = () => false,
 	) {
 		this.startTime = Date.now();
 	}
@@ -99,6 +109,12 @@ export class EventsWatcher {
 			clearTimeout(timer);
 		}
 		this.timers.clear();
+
+		// Cancel all interval timers
+		for (const timer of this.intervals.values()) {
+			clearInterval(timer);
+		}
+		this.intervals.clear();
 
 		// Cancel all cron jobs
 		for (const cron of this.crons.values()) {
@@ -169,6 +185,12 @@ export class EventsWatcher {
 			this.timers.delete(filename);
 		}
 
+		const interval = this.intervals.get(filename);
+		if (interval) {
+			clearInterval(interval);
+			this.intervals.delete(filename);
+		}
+
 		const cron = this.crons.get(filename);
 		if (cron) {
 			cron.stop();
@@ -215,6 +237,9 @@ export class EventsWatcher {
 			case "periodic":
 				this.handlePeriodic(filename, event);
 				break;
+			case "interval":
+				this.handleInterval(filename, event);
+				break;
 		}
 	}
 
@@ -250,6 +275,19 @@ export class EventsWatcher {
 					timezone: data.timezone,
 				};
 
+			case "interval":
+				if (typeof data.intervalSeconds !== "number" || data.intervalSeconds <= 0) {
+					throw new Error(`Missing or invalid 'intervalSeconds' field for interval event in ${filename}`);
+				}
+				return {
+					type: "interval",
+					channelId: data.channelId,
+					text: data.text,
+					intervalSeconds: data.intervalSeconds,
+					...(data.endsAt ? { endsAt: String(data.endsAt) } : {}),
+					...(data.count !== undefined ? { count: Number(data.count) } : {}),
+				};
+
 			default:
 				throw new Error(`Unknown event type '${data.type}' in ${filename}`);
 		}
@@ -280,9 +318,15 @@ export class EventsWatcher {
 		const now = Date.now();
 
 		if (atTime <= now) {
-			// Past - delete without executing
-			log.logInfo(`One-shot event in the past, deleting: ${filename}`);
-			this.deleteFile(filename);
+			const missedByMs = now - atTime;
+			if (missedByMs > 2 * 60 * 1000) {
+				log.logInfo(`One-shot event in the past, deleting: ${filename}`);
+				this.deleteFile(filename);
+				return;
+			}
+			// Missed within 2-minute grace window — run now
+			log.logInfo(`One-shot event missed by ${Math.round(missedByMs / 1000)}s, running now: ${filename}`);
+			this.execute(filename, event);
 			return;
 		}
 
@@ -315,6 +359,53 @@ export class EventsWatcher {
 		}
 	}
 
+	private handleInterval(filename: string, event: IntervalEvent): void {
+		const MIN_INTERVAL_MS = 5000;
+		const intervalMs = Math.max(event.intervalSeconds * 1000, MIN_INTERVAL_MS);
+		let fireCount = 0;
+
+		const stop = () => {
+			const t = this.intervals.get(filename);
+			if (t) { clearInterval(t); this.intervals.delete(filename); }
+			this.deleteFile(filename);
+		};
+
+		const fire = () => {
+			// Self-stop when endsAt has passed
+			if (event.endsAt && Date.now() >= new Date(event.endsAt).getTime()) {
+				log.logInfo(`Interval event expired: ${filename}`);
+				stop();
+				return;
+			}
+
+			// Skip-if-busy: a previous fire is still pending in the event queue
+			if (this.hasPendingEvent(event.channelId)) {
+				log.logInfo(`Skipping interval fire (busy): ${filename}`);
+				return;
+			}
+
+			fireCount++;
+			const label = event.count !== undefined ? ` (${fireCount}/${event.count})` : ` (fire ${fireCount})`;
+			log.logInfo(`Executing interval event: ${filename}${label}`);
+			this.execute(filename, event, false);
+
+			// Self-stop when count is exhausted
+			if (event.count !== undefined && fireCount >= event.count) {
+				stop();
+			}
+		};
+
+		const timer = setInterval(fire, intervalMs);
+		this.intervals.set(filename, timer);
+
+		const details = [
+			`every ${intervalMs / 1000}s`,
+			event.count !== undefined ? `max ${event.count} fires` : "",
+			event.endsAt ? `ends at ${event.endsAt}` : "",
+		].filter(Boolean).join(", ");
+		log.logInfo(`Scheduled interval event: ${filename} — ${details}`);
+	}
+
 	private execute(filename: string, event: IrisEvent, deleteAfter: boolean = true): void {
 		// Format the message
 		let scheduleInfo: string;
@@ -328,26 +419,14 @@ export class EventsWatcher {
 			case "periodic":
 				scheduleInfo = event.schedule;
 				break;
+			case "interval":
+				scheduleInfo = `every ${event.intervalSeconds}s`;
+				break;
 		}
 
 		const message = `[EVENT:${filename}:${event.type}:${scheduleInfo}] ${event.text}`;
 
-		// Create synthetic SlackEvent
-		const syntheticEvent: SlackEvent = {
-			type: "mention",
-			channel: event.channelId,
-			user: "EVENT",
-			text: message,
-			ts: Date.now().toString(),
-		};
-
-		// For Telegram events, extract and store chat context for response routing
-		if (event.channelId === "TELEGRAM") {
-			this.setTelegramContextFromFile(filename, event.channelId);
-		}
-
-		// Enqueue for processing
-		const enqueued = this.slack.enqueueEvent(syntheticEvent);
+		const enqueued = this.enqueue(event.channelId, message);
 
 		if (enqueued && deleteAfter) {
 			// Delete file after successful enqueue (immediate and one-shot)
@@ -378,28 +457,17 @@ export class EventsWatcher {
 		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 
-	/**
-	 * Extract Telegram chat context from event file and store it for response routing.
-	 */
-	private setTelegramContextFromFile(filename: string, channel: string): void {
-		try {
-			const filePath = join(this.eventsDir, filename);
-			const content = readFileSync(filePath, "utf-8");
-			const data = JSON.parse(content);
-			if (data.telegramChatId) {
-				this.slack.setTelegramContext(channel, data.telegramChatId, data.telegramMessageId);
-				log.logInfo(`[telegram] Context stored for ${channel}: chatId=${data.telegramChatId}`);
-			}
-		} catch (err) {
-			log.logWarning(`[telegram] Failed to extract context from ${filename}:`, String(err));
-		}
-	}
 }
 
 /**
  * Create and start an events watcher.
  */
-export function createEventsWatcher(workspaceDir: string, slack: SlackBot): EventsWatcher {
-	const eventsDir = join(workspaceDir, "events");
-	return new EventsWatcher(eventsDir, slack);
+export function createEventsWatcher(
+	workspaceDir: string,
+	enqueue: (channelId: string, text: string) => boolean,
+	hasPendingEvent: (channelId: string) => boolean = () => false,
+	subDir?: string,
+): EventsWatcher {
+	const eventsDir = subDir ? join(workspaceDir, subDir, "events") : join(workspaceDir, "events");
+	return new EventsWatcher(eventsDir, enqueue, hasPendingEvent);
 }

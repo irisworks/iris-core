@@ -31,7 +31,7 @@ Scripts are in: {baseDir}/
 # check.sh — Detect if Iris is processing messages
 set -euo pipefail
 
-LOG_FILE="/iris/data/D0AS2KC29MH/log.jsonl"
+LOG_FILE="/iris/data/${OWNER_CHANNEL_ID}/log.jsonl"
 RUNTIME_LOG="/iris/iris-runtime.log"
 ALERT_THRESHOLD_MINUTES=2
 

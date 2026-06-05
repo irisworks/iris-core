@@ -76,7 +76,7 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
  * Called by sub-agents (not by Iris herself).
  */
 export function startBridgeServer(port: number, workingDir: string): void {
-	const BRIDGE_TIMEOUT_MS = 60_000; // 60 seconds max for sub-agent to respond
+	const BRIDGE_TIMEOUT_MS = 300_000; // 5 minutes — reasoning models (e.g. Kimi-K2.6) need 60-90s just for chain-of-thought
 
 	const server = createServer(async (req, res) => {
 		if (req.method !== "POST" || req.url !== "/bridge") {
@@ -183,7 +183,7 @@ export async function callAgentBridge(
 	bridgeUrl: string,
 	text: string,
 	user: string,
-	timeoutMs = 120_000,
+	timeoutMs = 310_000, // slightly above server-side 300s so server error reaches caller before abort
 ): Promise<string> {
 	const requestId = randomBytes(8).toString("hex");
 

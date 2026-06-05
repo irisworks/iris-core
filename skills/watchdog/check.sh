@@ -2,7 +2,12 @@
 # check.sh — Detect if Iris is processing messages
 set -uo pipefail
 
-LOG_FILE="/iris/data/D0AS2KC29MH/log.jsonl"
+CHANNEL_ID="${OWNER_CHANNEL_ID:-${IRIS_ALERT_CHANNEL:-}}"
+if [[ -z "$CHANNEL_ID" ]]; then
+  echo "[ERROR] OWNER_CHANNEL_ID (or IRIS_ALERT_CHANNEL) must be set" >&2
+  exit 1
+fi
+LOG_FILE="/iris/data/${CHANNEL_ID}/log.jsonl"
 ALERT_THRESHOLD_MINUTES=2
 
 # Check if log file exists

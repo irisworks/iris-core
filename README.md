@@ -1,6 +1,6 @@
 # Iris Core
 
-Iris is an always-on AI orchestrator that runs on a cloud VM, listens on Slack, and manages a fleet of specialized sub-agents. Each sub-agent runs in an isolated Firecracker microVM — lightweight virtual machines with their own Linux kernel, booting in ~125ms.
+Iris is an always-on AI orchestrator that runs on a cloud VM, listens on Slack or Telegram, and manages a fleet of specialized sub-agents. Each sub-agent runs in an isolated Firecracker microVM — lightweight virtual machines with their own Linux kernel, booting in ~125ms.
 
 This repository is the source of truth for Iris's constitution, runtime, infrastructure, skills, and sub-agent scaffolding.
 
@@ -20,7 +20,7 @@ This repository is the source of truth for Iris's constitution, runtime, infrast
 ## Architecture
 
 ```
-You (Slack)
+You (Slack or Telegram)
 └── Iris  (Azure VM, systemd service)
     ├── iris-runtime
     ├── CONSTITUTION.md       read-only operator rules, injected every prompt
@@ -74,11 +74,13 @@ Implemented and verified:
 - `agents/newsletter` — newsletter sub-agent scaffold
 - Bootstrap script with interactive first-time setup (Key Vault or `.env` path)
 - Live runtime confirmed on `foundry-e2/Kimi-K2.5`; Slack smoke test passed
+- Native Telegram transport (`--transport=telegram`) — long polling, DMs, groups, topic threads, file downloads, `/reset` `/compact` `/stop` commands
 
 Still pending:
 
 - Phase 4 internal HTTP API for sub-agent communication
 - Phase 5 hardening and full resurrection test
+- Simultaneous Slack + Telegram in a single process (currently requires two separate service instances)
 
 ## Setup
 
@@ -88,6 +90,8 @@ Pick the path that matches your environment — one command does everything:
 |---|---|---|
 | **No Azure** | [Option 1](#option-1--no-azure-no-firecracker) — simplest | [Option 3](#option-3--no-azure-with-firecracker) |
 | **Azure Key Vault** | [Option 2](#option-2--azure-key-vault-no-firecracker) | [Option 4](#option-4--azure-key-vault--firecracker-full-production) — full production |
+
+All options prompt for both Slack and Telegram tokens during setup — answer `Y` to whichever you want. See [Telegram Setup](#telegram-setup) for details.
 
 All four paths start the same way:
 
@@ -183,6 +187,9 @@ bash bootstrap.sh --setup --no-keyvault
 [iris-bootstrap] Press Enter when your app is created and tokens are ready...
 [iris-bootstrap] Slack App token (xapp-...):
 [iris-bootstrap] Slack Bot token (xoxb-...):
+
+[iris-bootstrap] Set up Telegram integration? [Y/n]
+[iris-bootstrap] Telegram Bot Token:
 
 [iris-bootstrap] Add GitHub token for repo access? [Y/n]
 [iris-bootstrap] Set up email sending (Resend.com)? [y/N]
@@ -420,6 +427,212 @@ Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
 
 ---
 
+## Telegram Setup
+
+Iris supports Telegram natively. The bot is private by design — it ignores all messages until you claim it with a one-time token.
+
+---
+
+**Step 1 — Create a bot via @BotFather**
+
+1. Open Telegram and message `@BotFather`
+2. Send `/newbot`
+3. Enter a display name (e.g. `Iris`)
+4. Enter a username ending in `bot` (e.g. `iris_mybot`)
+5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
+
+---
+
+**Step 2 — Add the token**
+
+During bootstrap you will be asked:
+```
+[iris-bootstrap] Set up Telegram integration? [Y/n]
+[iris-bootstrap] Telegram Bot Token: ****
+```
+Bootstrap writes it to `/iris/.env` automatically.
+
+To add it manually after bootstrap:
+```bash
+echo "TELEGRAM_BOT_TOKEN=your-token-here" >> /iris/.env
+sudo systemctl restart iris
+```
+
+---
+
+**Step 3 — Claim the bot**
+
+On first startup, Iris prints a one-time claim token to the logs:
+
+```bash
+sudo tail -f /iris/iris-runtime.log
+```
+
+```
+[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:
+
+    a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+
+[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.
+```
+
+Open Telegram, message your bot with that exact token. Bot replies:
+
+```
+✅ Bot claimed. You're all set — start chatting!
+```
+
+Claim state is saved to disk — persists across restarts.
+
+---
+
+**Reclaiming** (e.g. changed Telegram account):
+
+```bash
+echo "IRIS_TELEGRAM_FORCE_RECLAIM=true" >> /iris/.env && sudo systemctl restart iris
+# send the new claim token from your new Telegram account
+# once claimed, remove the flag:
+sed -i '/IRIS_TELEGRAM_FORCE_RECLAIM/d' /iris/.env
+```
+
+---
+
+**Bot commands**
+
+| Command | What it does |
+|---|---|
+| `/agents` | List your sub-agents and start a conversation with one |
+| `/status` | Show which agent you're currently talking to |
+| `/back` | Exit agent conversation, return to main Iris |
+| `/delete_agent` | Delete an agent and free its slot |
+| `/task_status` | Show scheduled and recent tasks |
+| `/reset` | Clear conversation history and stop all tasks |
+| `/compact` | Summarise context to save tokens |
+| `/stop` | Abort a currently running response |
+
+---
+
+**Running Slack and Telegram simultaneously**
+
+Set all tokens in `/iris/.env` — both transports start in the same process automatically:
+```
+IRIS_SLACK_APP_TOKEN=xapp-...
+IRIS_SLACK_BOT_TOKEN=xoxb-...
+TELEGRAM_BOT_TOKEN=...
+```
+
+---
+
+## Supabase Setup
+
+Iris uses Supabase to store the agent registry, task queue, and bot claim state. Sub-agents will not work without it.
+
+**Step 1 — Create a project**
+
+1. Go to [supabase.com](https://supabase.com) and create a free project
+2. From **Project Settings → API**, copy:
+   - **Project URL** → `SUPABASE_URL`
+   - **service_role** secret key → `SUPABASE_SERVICE_ROLE_KEY`
+
+**Step 2 — Add credentials to env**
+
+```bash
+echo "SUPABASE_URL=https://<your-project>.supabase.co" >> /iris/.env
+echo "SUPABASE_SERVICE_ROLE_KEY=<service-role-key>" >> /iris/.env
+sudo systemctl restart iris
+```
+
+**Step 3 — Create the tables**
+
+In the Supabase dashboard go to **SQL Editor** and run:
+
+```sql
+-- ============================================================================
+-- Iris Supabase Schema
+-- Run this in the Supabase SQL editor for your project.
+-- ============================================================================
+
+-- ── Phase 1: Telegram claim / ownership ──────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS telegram_claim (
+    bot_id                   TEXT        PRIMARY KEY,
+    claimed                  BOOLEAN     NOT NULL DEFAULT false,
+    chat_id                  BIGINT,
+    pending_token            TEXT,
+    token_expires_at         TIMESTAMPTZ,
+    pending_transfer_chat_id BIGINT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE telegram_claim DISABLE ROW LEVEL SECURITY;
+
+-- ── Phase 2: Agent registry ───────────────────────────────────────────────────
+
+CREATE TYPE agent_status AS ENUM ('running', 'stopped', 'crashed');
+
+CREATE TABLE IF NOT EXISTS telegram_agents (
+    agent_id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    bot_id              TEXT         NOT NULL REFERENCES telegram_claim(bot_id) ON DELETE CASCADE,
+    chat_id             BIGINT       NOT NULL,
+    name                TEXT         NOT NULL,
+    docker_container_id TEXT,
+    status              agent_status NOT NULL DEFAULT 'stopped',
+    skills              JSONB        NOT NULL DEFAULT '[]',
+    slot_index          SMALLINT     NOT NULL CHECK (slot_index BETWEEN 1 AND 5),
+    created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+
+    UNIQUE (bot_id, name),
+    UNIQUE (bot_id, slot_index)
+);
+
+ALTER TABLE telegram_agents DISABLE ROW LEVEL SECURITY;
+
+-- ── Phase 4: Per-agent task queue ─────────────────────────────────────────────
+
+CREATE TYPE task_type   AS ENUM ('immediate', 'scheduled');
+CREATE TYPE task_status AS ENUM ('pending', 'running', 'done', 'failed', 'skipped');
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    task_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id       UUID        NOT NULL REFERENCES telegram_agents(agent_id) ON DELETE CASCADE,
+    bot_id         TEXT        NOT NULL,
+    channel_id     TEXT        NOT NULL,
+    type           task_type   NOT NULL DEFAULT 'immediate',
+    payload        TEXT        NOT NULL,
+    scheduled_for  TIMESTAMPTZ,
+    timezone       TEXT,
+    local_time_str TEXT,
+    status         task_status NOT NULL DEFAULT 'pending',
+    assigned_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at     TIMESTAMPTZ,
+    completed_at   TIMESTAMPTZ,
+    output         TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX agent_tasks_agent_idx    ON agent_tasks(agent_id, status);
+CREATE INDEX agent_tasks_schedule_idx ON agent_tasks(scheduled_for) WHERE status = 'pending';
+
+ALTER TABLE agent_tasks DISABLE ROW LEVEL SECURITY;
+```
+
+**Viewing your data**
+
+Go to the **Table Editor** in your Supabase dashboard:
+```
+https://supabase.com/dashboard/project/<your-project-id>/editor
+```
+
+| Table | Contents |
+|---|---|
+| `telegram_claim` | Bot ownership / claim state |
+| `telegram_agents` | Provisioned sub-agent records (name, slot, skills) |
+| `agent_tasks` | Task queue — what agents have been asked to do |
+
+---
+
 ## Runtime and Models
 
 The runtime reads `IRIS_PROVIDER` and `IRIS_MODEL` env vars and loads provider config from `data/models.json`.
@@ -435,6 +648,7 @@ IRIS_PROVIDER=foundry-e2
 IRIS_MODEL=Kimi-K2.5
 IRIS_ENV=prod          # preview | prod
 IRIS_API_PORT=3001     # 0 = disabled (default)
+IRIS_TRANSPORT=slack   # slack (default) | telegram
 ```
 
 Supported providers out of the box (configure in `data/models.json`):
@@ -484,6 +698,7 @@ Run `bash bootstrap.sh --setup --no-keyvault` and the script will prompt for all
 Optional secrets (all providers):
 
 - `ANTHROPIC-API-KEY` / `OPENAI-API-KEY` / `RESEND-API-KEY`
+- `TELEGRAM-BOT-TOKEN` — required when `IRIS_TRANSPORT=telegram`
 
 ---
 
@@ -500,8 +715,10 @@ irisflow/
 │   └── models.json.template        # template — bootstrap generates models.json from this
 ├── iris-runtime/                   # @iris-core/runtime — fork of pi-mom
 │   └── src/
-│       ├── main.ts                 # --provider, --model, --sandbox flags
+│       ├── main.ts                 # --provider, --model, --sandbox, --transport flags
 │       ├── agent.ts                # configurable model, constitution loading
+│       ├── slack.ts                # Slack Socket Mode transport
+│       ├── telegram.ts             # Telegram Bot API transport (long polling)
 │       ├── sandbox.ts              # HostExecutor, DockerExecutor, FirecrackerExecutor, pool
 │       ├── vm-manager.ts           # VmManager — on-demand Firecracker pool
 │       ├── api.ts                  # internal HTTP API stub
