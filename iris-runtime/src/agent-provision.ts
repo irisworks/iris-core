@@ -42,7 +42,7 @@ export interface ProvisionParams {
 	agentName: string;
 	slotIndex: number;
 	skills: string[];       // subset of available skill names
-	ownerChannelId?: string; // e.g. "tg-8814933356" — used so agent can schedule callbacks
+	ownerChannelId?: string; // e.g. "tg-{chatId}" — used so agent can schedule callbacks
 	irisDir?: string;       // default: /iris
 	irisRepoDir?: string;   // default: /iris/repo
 	irisHome?: string;      // default: /home/azureuser
