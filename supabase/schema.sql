@@ -12,6 +12,8 @@ CREATE TYPE agent_status AS ENUM ('running', 'stopped', 'crashed');
 CREATE TABLE IF NOT EXISTS sub_agents (
     agent_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name                    TEXT        NOT NULL,
+    runtime                 TEXT        NOT NULL DEFAULT 'docker'
+                                        CHECK (runtime IN ('docker', 'firecracker')),
     docker_container_id     TEXT,
     status                  agent_status NOT NULL DEFAULT 'stopped',
     skills                  JSONB       NOT NULL DEFAULT '[]',

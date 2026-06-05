@@ -47,7 +47,7 @@ import {
 import { getSubAgent, listSubAgents, createSubAgent, deleteSubAgent, updateSubAgentStatus } from "./sub-agent-registry.js";
 import { createTask, getTask, updateTaskStatus, type TaskStatus } from "./task-queue.js";
 import { scheduleNewTask, type SchedulerCallbacks } from "./scheduler.js";
-import { bridgePortForSlot, deprovisionAgent, getAvailableSkills, provisionAgent, registerAgentBridge, unregisterAgentBridge } from "./agent-provision.js";
+import { deprovisionAgent, deprovisionFirecrackerAgent, getAvailableSkills, provisionAgent, registerAgentBridge, unregisterAgentBridge } from "./agent-provision.js";
 import type { TelegramLinkManager } from "./telegram-link.js";
 
 // Minimal interface so api.ts doesn't import SlackBot directly (avoids circular deps)
@@ -547,10 +547,10 @@ export function startApiServer(
 			}
 
 			// ── POST /agents ──────────────────────────────────────────────────────────
-			// Create a new sub-agent and provision its Docker container.
-			// body: { name: string, skills?: string[] }
+			// Create a new sub-agent and provision its runtime.
+			// body: { name: string, skills?: string[], runtime?: "docker" | "firecracker" }
 			if (method === "POST" && url === "/agents") {
-				let body: { name?: string; skills?: string[] };
+				let body: { name?: string; skills?: string[]; runtime?: "docker" | "firecracker" };
 				try { body = JSON.parse(await readBody(req)); } catch {
 					json(res, 400, { error: "invalid JSON body" }); return;
 				}
@@ -558,7 +558,8 @@ export function startApiServer(
 				if (!/^[a-zA-Z0-9-]{1,32}$/.test(body.name)) {
 					json(res, 400, { error: "name must contain only letters, numbers, and hyphens (max 32 chars)" }); return;
 				}
-				const record = await createSubAgent({ name: body.name, skills: body.skills ?? [] });
+				const runtime = body.runtime === "firecracker" ? "firecracker" : "docker";
+				const record = await createSubAgent({ name: body.name, skills: body.skills ?? [], runtime });
 				if (!record) { json(res, 409, { error: `Agent "${body.name}" already exists or no slots available` }); return; }
 
 				try {
@@ -567,14 +568,15 @@ export function startApiServer(
 						agentName: record.name,
 						slotIndex: record.slotIndex,
 						skills:    record.skills,
+						runtime:   record.runtime,
 					});
 					await updateSubAgentStatus(record.agentId, "running", containerName);
-					registerAgentBridge(workingDir, record.name, record.agentId, record.slotIndex);
-					log.logInfo(`[api] POST /agents → created "${record.name}" (slot ${record.slotIndex})`);
-					json(res, 201, { ...record, status: "running", dockerContainerId: containerName });
+					registerAgentBridge(workingDir, record.name, record.agentId, record.slotIndex, record.runtime);
+					log.logInfo(`[api] POST /agents → created "${record.name}" (slot ${record.slotIndex}, ${record.runtime})`);
+					json(res, 201, { ...record, status: "running", containerId: containerName });
 				} catch (err) {
 					await deleteSubAgent(record.agentId);
-					json(res, 500, { error: `Container failed to start: ${String(err)}` });
+					json(res, 500, { error: `Runtime failed to start: ${String(err)}` });
 				}
 				return;
 			}
@@ -596,7 +598,12 @@ export function startApiServer(
 				// Unlink Telegram if linked
 				if (telegramLinkManager) await telegramLinkManager.unlinkAgent(agent.agentId);
 
-				await deprovisionAgent(`iris-tg-${agent.agentId}`);
+				if (agent.runtime === "firecracker") {
+					await deprovisionFirecrackerAgent(agent.slotIndex);
+				} else {
+					const containerName = agent.dockerContainerId ?? `iris-agent-${agent.agentId}`;
+					await deprovisionAgent(containerName);
+				}
 				unregisterAgentBridge(workingDir, agent.name);
 				const ok = await deleteSubAgent(agent.agentId);
 				log.logInfo(`[api] DELETE /agents/${agent.agentId} → ${ok ? "deleted" : "partial failure"}`);

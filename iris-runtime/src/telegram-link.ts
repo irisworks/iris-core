@@ -21,7 +21,7 @@ import { randomBytes } from "crypto";
 import { join } from "path";
 import { getDb } from "./db.js";
 import { getSubAgent, type SubAgentRecord } from "./sub-agent-registry.js";
-import { bridgePortForSlot } from "./agent-provision.js";
+import { bridgeUrlForAgent } from "./agent-provision.js";
 import * as log from "./log.js";
 
 // ============================================================================
@@ -173,7 +173,7 @@ export class TelegramLinkManager {
 			const info: LinkedAgentInfo = {
 				agentId:   agent.agentId,
 				agentName: agent.name,
-				bridgeUrl: `http://127.0.0.1:${bridgePortForSlot(agent.slotIndex)}`,
+				bridgeUrl: bridgeUrlForAgent(agent.slotIndex, agent.runtime),
 				slotIndex: agent.slotIndex,
 				skills:    agent.skills,
 			};

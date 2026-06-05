@@ -20,22 +20,31 @@ export interface WatchdogCallbacks {
 }
 
 // ============================================================================
-// Docker status check
+// Runtime-specific health checks
 // ============================================================================
 
-async function getDockerStatus(containerName: string): Promise<string> {
+async function isDockerRunning(containerName: string): Promise<boolean> {
 	try {
 		const { stdout } = await execAsync(
 			`docker inspect --format='{{.State.Status}}' ${containerName} 2>/dev/null`,
 		);
-		return stdout.trim().replace(/'/g, "") || "not_found";
+		const status = stdout.trim().replace(/'/g, "");
+		return status === "running" || status === "restarting";
 	} catch {
-		return "not_found";
+		return false;
 	}
 }
 
-function isDockerRunning(dockerStatus: string): boolean {
-	return dockerStatus === "running" || dockerStatus === "restarting";
+async function isFirecrackerRunning(slotIndex: number): Promise<boolean> {
+	try {
+		const res = await fetch(
+			`http://172.20.${slotIndex}.2:8080/health`,
+			{ signal: AbortSignal.timeout(4000) },
+		);
+		return res.ok;
+	} catch {
+		return false;
+	}
 }
 
 // ============================================================================
@@ -43,16 +52,17 @@ function isDockerRunning(dockerStatus: string): boolean {
 // ============================================================================
 
 async function checkAgent(agent: SubAgentRecord, callbacks: WatchdogCallbacks): Promise<void> {
-	const containerName = `iris-agent-${agent.agentId}`;
-	const dockerStatus = await getDockerStatus(containerName);
-	const nowRunning = isDockerRunning(dockerStatus);
+	const nowRunning = agent.runtime === "firecracker"
+		? await isFirecrackerRunning(agent.slotIndex)
+		: await isDockerRunning(agent.dockerContainerId ?? `iris-agent-${agent.agentId}`);
+
 	const wasRunning = agent.status === "running";
 	const wasCrashed = agent.status === "crashed" || agent.status === "stopped";
 
 	if (wasRunning && !nowRunning) {
 		log.logWarning(
 			`[watchdog] Agent ${agent.name} (${agent.agentId}) went offline`,
-			`docker status: ${dockerStatus}`,
+			`runtime: ${agent.runtime}`,
 		);
 		await updateSubAgentStatus(agent.agentId, "crashed");
 		callbacks.onAgentCrashed(agent.agentId);

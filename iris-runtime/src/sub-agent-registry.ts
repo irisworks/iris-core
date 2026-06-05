@@ -5,11 +5,13 @@ import * as log from "./log.js";
 // Types
 // ============================================================================
 
-export type AgentStatus = "running" | "stopped" | "crashed";
+export type AgentStatus  = "running" | "stopped" | "crashed";
+export type AgentRuntime = "docker" | "firecracker";
 
 export interface SubAgentRecord {
 	agentId: string;
 	name: string;
+	runtime: AgentRuntime;
 	dockerContainerId: string | null;
 	status: AgentStatus;
 	skills: string[];
@@ -28,6 +30,7 @@ function rowToRecord(row: Record<string, unknown>): SubAgentRecord {
 	return {
 		agentId:           row.agent_id as string,
 		name:              row.name as string,
+		runtime:           ((row.runtime as AgentRuntime) ?? "docker"),
 		dockerContainerId: (row.docker_container_id as string | null) ?? null,
 		status:            (row.status as AgentStatus) ?? "stopped",
 		skills:            (row.skills as string[]) ?? [],
@@ -123,6 +126,7 @@ export async function getSubAgentByName(name: string): Promise<SubAgentRecord | 
 export async function createSubAgent(params: {
 	name: string;
 	skills: string[];
+	runtime?: AgentRuntime;
 }): Promise<SubAgentRecord | null> {
 	const db = getDb();
 	if (!db) return noDb("createSubAgent");
@@ -142,7 +146,13 @@ export async function createSubAgent(params: {
 	try {
 		const { data, error } = await db
 			.from("sub_agents")
-			.insert({ name: params.name, skills: params.skills, slot_index: slot, status: "stopped" })
+			.insert({
+				name:      params.name,
+				skills:    params.skills,
+				runtime:   params.runtime ?? "docker",
+				slot_index: slot,
+				status:    "stopped",
+			})
 			.select("*")
 			.single();
 		if (error) throw error;

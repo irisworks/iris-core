@@ -296,14 +296,27 @@ At this point the bots are **running but unlinked** — they will reject all mes
 
 ### Step 3 — Create a sub-agent
 
-Sub-agents are created via the Iris internal API. Each sub-agent gets a Docker container, a slot (1–10), and a bridge port (4201–4210).
+Sub-agents are created via the Iris internal API. Each sub-agent gets a runtime (Docker container or Firecracker microVM), a slot (1–10), and a bridge port.
 
+**Docker** (default — recommended unless you need full VM isolation):
 ```bash
 curl -s -X POST http://localhost:3000/agents \
   -H "Content-Type: application/json" \
   -d '{
     "name": "MyAgent",
-    "skills": ["search-web", "send-email"]
+    "skills": ["search-web", "send-email"],
+    "runtime": "docker"
+  }' | jq .
+```
+
+**Firecracker microVM** (stronger isolation — requires KVM on the host):
+```bash
+curl -s -X POST http://localhost:3000/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "MyAgent",
+    "skills": ["search-web", "send-email"],
+    "runtime": "firecracker"
   }' | jq .
 ```
 
@@ -312,13 +325,21 @@ Response:
 {
   "agentId": "a1b2c3d4-...",
   "name": "MyAgent",
+  "runtime": "docker",
   "slotIndex": 1,
   "status": "running",
   "skills": ["search-web", "send-email"]
 }
 ```
 
+| Runtime | Isolation | Bridge URL | Requires |
+|---|---|---|---|
+| `docker` | Docker namespace + seccomp | `http://127.0.0.1:4201` (slot 1) | Docker installed |
+| `firecracker` | Hardware VM boundary (KVM) | `http://172.20.1.2:4200` (slot 1) | KVM + Firecracker rootfs |
+
 > **Skills** are optional. Leave `skills` as `[]` for a general-purpose agent. Available skill names match subdirectory names under `/iris/data/skills`.
+>
+> **Firecracker prerequisite**: the base rootfs must exist at `/var/lib/iris/firecracker/rootfs.ext4`. Build it with `sudo bash scripts/build-firecracker-rootfs.sh` if it is missing.
 
 ---
 
@@ -502,6 +523,8 @@ END $$;
 CREATE TABLE IF NOT EXISTS sub_agents (
     agent_id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     name                TEXT         NOT NULL,
+    runtime             TEXT         NOT NULL DEFAULT 'docker'
+                                     CHECK (runtime IN ('docker', 'firecracker')),
     docker_container_id TEXT,
     status              agent_status NOT NULL DEFAULT 'stopped',
     skills              JSONB        NOT NULL DEFAULT '[]',
