@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { startApiServer } from "./api.js";
@@ -10,7 +10,8 @@ import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
-import { TelegramBot, type IrisTelegramHandler, type TelegramEvent } from "./telegram.js";
+import { TelegramBot, type TelegramEvent } from "./telegram.js";
+import { TelegramLinkManager } from "./telegram-link.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
 import { startScheduler, type SchedulerCallbacks } from "./scheduler.js";
 import { resolveBridgeRequest } from "./bridge.js";
@@ -455,206 +456,9 @@ const handler: IrisHandler = {
 	},
 };
 
-// ============================================================================
-// Telegram context adapter
-// ============================================================================
-
-function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: ChannelState) {
-	let messageId: string | null = null;
-	const extraMessageIds: string[] = [];
-	let accumulatedText = "";
-	let updatePromise = Promise.resolve();
-
-	return {
-		message: {
-			text: event.text,
-			rawText: event.text,
-			user: event.user,
-			channel: event.channel,
-			ts: event.ts,
-			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
-		},
-		channelName: bot.getChatName(event.channel),
-		telegramBotName: bot.getBotName(),
-		store: state.store,
-		channels: bot.getAllChats(),
-		users: [],
-
-		respond: async (text: string, shouldLog = true) => {
-			updatePromise = updatePromise.then(async () => {
-				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				if (shouldLog && messageId) {
-					bot.logBotResponse(event.channel, text, messageId);
-				}
-			});
-			await updatePromise;
-		},
-
-		replaceMessage: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					if (messageId) {
-						await bot.finalizeMessage(event.channel, messageId, text);
-					} else {
-						messageId = await bot.postMessage(event.channel, text);
-					}
-				} catch (err) {
-					log.logWarning("Telegram replaceMessage error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
-		},
-
-		respondInThread: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					const id = await bot.postInThread(event.channel, messageId ?? event.ts, text);
-					extraMessageIds.push(id);
-				} catch (err) {
-					log.logWarning("Telegram respondInThread error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
-		},
-
-		setTyping: async (isTyping: boolean) => {
-			if (isTyping && !messageId) {
-				updatePromise = updatePromise.then(async () => {
-					try {
-						if (!messageId) {
-							messageId = await bot.postMessage(event.channel, "_Thinking..._");
-						}
-					} catch (err) {
-						log.logWarning("Telegram setTyping error", err instanceof Error ? err.message : String(err));
-					}
-				});
-				await updatePromise;
-			}
-		},
-
-		uploadFile: async (filePath: string, title?: string) => {
-			await bot.uploadFile(event.channel, filePath, title);
-		},
-
-		setWorking: async (_working: boolean) => {},
-
-		deleteMessage: async () => {
-			updatePromise = updatePromise.then(async () => {
-				for (let i = extraMessageIds.length - 1; i >= 0; i--) {
-					try { await bot.deleteMessage(event.channel, extraMessageIds[i]); } catch {}
-				}
-				extraMessageIds.length = 0;
-				if (messageId) {
-					await bot.deleteMessage(event.channel, messageId);
-					messageId = null;
-				}
-			});
-			await updatePromise;
-		},
-
-		getAccumulatedText: () => accumulatedText,
-	};
-}
-
-// ============================================================================
-// Telegram handler
-// ============================================================================
-
-const SPAWN_INTENT_RE =
-	/\b(spawn|create|launch|deploy|make|build|start|set\s+up|setup)\s+(a\s+|an\s+|new\s+)?agent\b|\bspin\s+up\b.*\bagent\b|\bspawn-agent\b/i;
-
-const telegramHandler: IrisTelegramHandler = {
-	isRunning(channelId: string): boolean {
-		return channelStates.get(channelId)?.running ?? false;
-	},
-
-	async handleStop(channelId: string, bot: TelegramBot): Promise<void> {
-		const state = channelStates.get(channelId);
-		if (state?.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-			await bot.postMessage(channelId, "_Stopping current task..._");
-		} else {
-			await bot.postMessage(channelId, "_Nothing is currently running_");
-		}
-	},
-
-	async handleCompact(channelId: string, bot: TelegramBot): Promise<void> {
-		if (telegramHandler.isRunning(channelId)) {
-			await bot.postMessage(channelId, "_Can't compact while running — send /stop first_");
-			return;
-		}
-		const state = getState(channelId);
-		const ts = await bot.postMessage(channelId, "_Compacting context..._");
-		try {
-			const result = await state.runner.compact();
-			if (result) {
-				await bot.updateMessage(channelId, ts, `_Compacted: ${result.tokensBefore.toLocaleString()} tokens summarised_`);
-			} else {
-				await bot.updateMessage(channelId, ts, "_Compaction complete_");
-			}
-		} catch (err) {
-			const errMsg = err instanceof Error ? err.message : String(err);
-			await bot.updateMessage(channelId, ts, `_Compaction failed: ${errMsg}_`);
-		}
-	},
-
-	async handleReset(channelId: string, bot: TelegramBot): Promise<void> {
-		const state = getState(channelId);
-		// Abort whatever is currently running
-		if (state.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-		}
-		// Drain all queued-but-not-yet-started tasks so nothing executes after this
-		bot.drainQueue(channelId);
-		state.runner.reset();
-		state.running = false;
-		await bot.postMessage(channelId, "_All tasks stopped and queue cleared. Context reset — starting fresh._");
-	},
-
-	async handleEvent(event: TelegramEvent, bot: TelegramBot, isEvent?: boolean): Promise<void> {
-		const state = getState(event.channel);
-		state.running = true;
-		state.stopRequested = false;
-
-		// Detect spawn intent — notify user, then continue without spawning
-		if (!isEvent && SPAWN_INTENT_RE.test(event.text)) {
-			try {
-				await bot.postMessage(
-					event.channel,
-					`Agent creation is not available via Telegram. I'll handle this task directly as ${bot.getBotName()}.`,
-				);
-			} catch (err) {
-				log.logWarning("[telegram] Failed to send spawn notice", err instanceof Error ? err.message : String(err));
-			}
-		}
-
-		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
-
-		try {
-			const ctx = createTelegramContext(event, bot, state);
-			await ctx.setTyping(true);
-			await ctx.setWorking(true);
-			const result = await state.runner.run(ctx as any, state.store);
-			await ctx.setWorking(false);
-
-			if (event.channel.startsWith("SESSION-")) {
-				const sessionId = event.channel.slice("SESSION-".length);
-				const { resolveSessionRequest } = await import("./sessions.js");
-				resolveSessionRequest(sessionId, ctx.getAccumulatedText());
-			}
-
-			if (result.stopReason === "aborted" && state.stopRequested) {
-				await bot.postMessage(event.channel, "_Stopped_");
-			}
-		} catch (err) {
-			log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
-		} finally {
-			state.running = false;
-		}
-	},
-};
+// Telegram context adapter and telegramHandler have been removed.
+// All Telegram message routing is now handled internally by TelegramBot,
+// which forwards every message to the linked sub-agent's bridge.
 
 // ============================================================================
 // Start
@@ -678,9 +482,13 @@ migrateChannelDirs(workingDir);
 
 // Start internal API server (default port 3000, always-on for sub-agent escalation)
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
+const effectiveApiUrl = process.env.IRIS_API_URL ?? `http://127.0.0.1:${effectiveApiPort}`;
 // botRef is set after bot construction below; the closure captures it by reference
 let botRef: SlackBotClass | TelegramBot | null = null;
 const tgBotsForApi: TelegramBot[] = []; // populated after bot construction
+
+// Single TelegramLinkManager shared across all bots and the API server
+const telegramLinkManager = new TelegramLinkManager(workingDir);
 
 // Scheduler callbacks — notifyOwner posts a message via the owning bot
 const schedulerCallbacks: SchedulerCallbacks = {
@@ -691,6 +499,7 @@ const schedulerCallbacks: SchedulerCallbacks = {
 			log.logWarning(`[notifyOwner] postMessage to ${channelId} failed`, String(err)),
 		);
 	},
+	getBotForAgent: (agentId) => telegramLinkManager.getBotForAgent(agentId),
 };
 
 startApiServer(
@@ -698,12 +507,7 @@ startApiServer(
 	workingDir,
 	channelStates,
 	() => botRef as any,
-	(botId?: string) => {
-		const bot = botId
-			? tgBotsForApi.find((b) => b.getBotId() === botId)
-			: tgBotsForApi[0];
-		return bot?.claim ?? null;
-	},
+	telegramLinkManager,
 	schedulerCallbacks,
 );
 
@@ -805,7 +609,7 @@ const telegramTokens: string[] = [
 const tgBots: TelegramBot[] = [];
 
 for (const token of telegramTokens) {
-	const tgBot = new TelegramBot(telegramHandler, { token, workingDir });
+	const tgBot = new TelegramBot({ token, workingDir, linkManager: telegramLinkManager, irisApiUrl: effectiveApiUrl });
 	try {
 		await tgBot.start();
 	} catch (err) {
@@ -814,39 +618,7 @@ for (const token of telegramTokens) {
 		continue;
 	}
 
-	// Force reclaim if requested (applies to ALL bots on this startup)
-	if (process.env.IRIS_TELEGRAM_FORCE_RECLAIM === "true") {
-		tgBot.claim.reset();
-		log.logInfo(`[telegram:${tgBot.getBotId()}] Force reclaim — previous owner cleared.`);
-	}
-
-	// Print claim token to terminal for any unclaimed bot
-	if (!tgBot.claim.isClaimed()) {
-		const claimToken = tgBot.claim.generateToken();
-		log.logInfo(`[telegram:${tgBot.getBotId()}] Bot is unclaimed. Send this token to your bot on Telegram to claim it:`);
-		log.logInfo("");
-		log.logInfo(`    ${claimToken}`);
-		log.logInfo("");
-		log.logInfo("[telegram] Token expires in 10 minutes.");
-		log.logInfo("[telegram] Missed it? Run: iris-claim-token");
-
-		// Write to well-known file so bootstrap.sh can display it without shell history exposure
-		const tokenDir = join(workingDir, "data");
-		const tokenFile = join(tokenDir, "claim-token.txt");
-		try {
-			mkdirSync(tokenDir, { recursive: true });
-			writeFileSync(tokenFile, claimToken, { mode: 0o600 });
-		} catch { /* non-fatal */ }
-
-		// Background watcher: notify terminal when bot is claimed, then clean up the token file
-		const watchInterval = setInterval(() => {
-			if (tgBot.claim.isClaimed()) {
-				clearInterval(watchInterval);
-				log.logInfo(`[telegram:${tgBot.getBotId()}] Claim token received. Bot is now active.`);
-				try { unlinkSync(tokenFile); } catch { /* file may already be gone */ }
-			}
-		}, 2000);
-	}
+	log.logInfo(`[telegram:${tgBot.getBotId()}] Started. Send a sub-agent claim token to this bot to link it.`);
 
 	tgBots.push(tgBot);
 	tgBotsForApi.push(tgBot);
@@ -864,37 +636,35 @@ if (!SLACK_ENABLED && telegramTokens.length === 0) {
 
 // Start scheduler: check for missed tasks, reschedule pending ones.
 // Run after all bots are started so tgBotsForApi is fully populated.
-if (tgBotsForApi.length > 0) {
-	const botIds = tgBotsForApi.map((b) => b.getBotId()).filter((id): id is string => Boolean(id));
-	void startScheduler(botIds, schedulerCallbacks);
-}
+void startScheduler(schedulerCallbacks);
 
 // Start watchdog: polls Docker every 30s, detects crashes and recoveries.
 void startWatchdog({
-	notifyOwner: schedulerCallbacks.notifyOwner,
-
 	onAgentCrashed: (agentId) => {
-		// Exit any active Telegram conversations with the crashed agent
 		for (const bot of tgBotsForApi) {
-			bot.clearAgentConversation(agentId);
+			bot.notifyLinkedAgentCrashed(agentId);
 		}
 	},
 
-	onAgentRecovered: async (agentId, agentName, botId) => {
-		// Check for tasks that were missed while the agent was offline
+	onAgentRecovered: async (agentId, agentName) => {
+		// Mark any tasks that were missed while the agent was offline
 		const missed = await getMissedTasks(agentId);
 		if (missed.length === 0) return;
 
 		await Promise.all(missed.map((t) => updateTaskStatus(t.taskId, "skipped")));
 
-		const ownerChannelId = `tg-${missed[0].channelId.replace(/^tg-/, "").split("-")[0]}`;
-		const noun = missed.length === 1 ? "task" : "tasks";
-		schedulerCallbacks.notifyOwner(
-			botId,
-			ownerChannelId,
-			`⚠️ <b>${agentName}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
-			missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n"),
-		);
+		// Notify via Telegram if the agent is linked to a bot
+		const botId = await telegramLinkManager.getBotForAgent(agentId);
+		if (botId) {
+			const channelId = missed[0].channelId;
+			const noun = missed.length === 1 ? "task" : "tasks";
+			schedulerCallbacks.notifyOwner(
+				botId,
+				channelId,
+				`⚠️ <b>${agentName}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
+				missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n"),
+			);
+		}
 	},
 });
 
@@ -907,15 +677,9 @@ void startWatchdog({
 
 function findBotForChannel(channelId: string): TelegramBot | undefined {
 	if (!channelId.startsWith("tg-")) return undefined;
-	// Extract numeric chatId from channelId (tg-{chatId} or tg-n{abs} or tg-{chatId}-{threadId})
-	const rest = channelId.slice(3);
-	const chatStr = rest.includes("-") ? rest.slice(0, rest.lastIndexOf("-")) : rest;
-	const chatId = chatStr.startsWith("n") ? -parseInt(chatStr.slice(1), 10) : parseInt(chatStr, 10);
-
-	// Prefer the bot that owns this chatId (has it claimed or has seen it before)
-	const ownerMatch = tgBots.find((b) => b.claim.getOwnerId() === chatId);
-	if (ownerMatch) return ownerMatch;
-
+	// Prefer the bot that has seen this specific channel (chatId) before
+	const seen = tgBots.find((b) => b.hasSeen(channelId));
+	if (seen) return seen;
 	// Fall back to first available bot
 	return tgBots[0];
 }

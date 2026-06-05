@@ -12,6 +12,13 @@
  *                                          body: { channelId, text, user? }
  *   POST /escalate                       — sub-agent escalates a problem to Iris
  *                                          body: { agent, issue, context?, severity?, environment? }
+ *   GET    /agents                        — list all sub-agents
+ *   POST   /agents                        — create a sub-agent
+ *   GET    /agents/:id                    — get a sub-agent
+ *   DELETE /agents/:id                    — delete a sub-agent
+ *   PATCH  /agents/:id/skills             — add/remove skills
+ *   POST   /agents/:id/telegram/token     — generate Telegram link token
+ *   DELETE /agents/:id/telegram           — unlink Telegram from sub-agent
  *   POST /internal/write-event           — write an event file (immediate/one-shot/periodic/interval)
  *                                          body: { name, type, channelId, text, ...type-specific fields }
  *
@@ -26,7 +33,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import * as log from "./log.js";
@@ -37,9 +44,11 @@ import {
 	updateSession,
 	type Session,
 } from "./sessions.js";
-import { getAgent } from "./agent-registry.js";
+import { getSubAgent, listSubAgents, createSubAgent, deleteSubAgent, updateSubAgentStatus } from "./sub-agent-registry.js";
 import { createTask, getTask, updateTaskStatus, type TaskStatus } from "./task-queue.js";
 import { scheduleNewTask, type SchedulerCallbacks } from "./scheduler.js";
+import { bridgePortForSlot, deprovisionAgent, getAvailableSkills, provisionAgent, registerAgentBridge, unregisterAgentBridge } from "./agent-provision.js";
+import type { TelegramLinkManager } from "./telegram-link.js";
 
 // Minimal interface so api.ts doesn't import SlackBot directly (avoids circular deps)
 interface SessionInjector {
@@ -70,18 +79,8 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
 	const eventId = `api-${Date.now()}-${randomBytes(4).toString("hex")}`;
 	const eventFile = join(eventsDir, `${eventId}.json`);
-	writeFileSync(eventFile, JSON.stringify({
-		type: "immediate",
-		channelId,
-		user,
-		text,
-	}));
+	writeFileSync(eventFile, JSON.stringify({ type: "immediate", channelId, user, text }));
 	return eventId;
-}
-
-interface ClaimTokenSource {
-	generateToken(): string;
-	reset(): void;
 }
 
 export function startApiServer(
@@ -89,7 +88,7 @@ export function startApiServer(
 	workingDir: string,
 	channelStates: Map<string, ChannelState>,
 	getBot: () => SessionInjector | null = () => null,
-	getClaim: (botId?: string) => ClaimTokenSource | null = () => null,
+	telegramLinkManager: TelegramLinkManager | null = null,
 	schedulerCallbacks: SchedulerCallbacks | null = null,
 ): void {
 	const eventsDir = join(workingDir, "events");
@@ -108,7 +107,7 @@ export function startApiServer(
 			// container has its own workspace and cannot reach another agent's files.
 			const agentId = req.headers["x-agent-id"] as string | undefined;
 			if (agentId) {
-				const agentRecord = await getAgent(agentId);
+				const agentRecord = await getSubAgent(agentId);
 				if (!agentRecord) {
 					log.logWarning(`[guard-dog] Rejected request from unknown agent ID: ${agentId}`, url);
 					json(res, 403, { error: `Guard dog: unknown agent ID ${agentId}` });
@@ -539,33 +538,151 @@ export function startApiServer(
 				return;
 			}
 
-			// ── POST /internal/claim-token ────────────────────────────────────────────
-			// Resets the claim state and issues a fresh token. Used by the
-			// iris-claim-token recovery command when the user misses the 10-minute window.
-			if (method === "POST" && url === "/internal/claim-token") {
-				const body = await readBody(req);
-				let botId: string | undefined;
-				try { botId = body ? (JSON.parse(body) as { botId?: string }).botId : undefined; } catch { /* ignore */ }
+			// ── GET /agents ──────────────────────────────────────────────────────────
+			// List all sub-agents.
+			if (method === "GET" && url === "/agents") {
+				const agents = await listSubAgents();
+				json(res, 200, { agents });
+				return;
+			}
 
-				const claim = getClaim(botId);
-				if (!claim) {
-					json(res, 404, { error: "No Telegram bot found. Is TELEGRAM_BOT_TOKEN set?" });
-					return;
+			// ── POST /agents ──────────────────────────────────────────────────────────
+			// Create a new sub-agent and provision its Docker container.
+			// body: { name: string, skills?: string[] }
+			if (method === "POST" && url === "/agents") {
+				let body: { name?: string; skills?: string[] };
+				try { body = JSON.parse(await readBody(req)); } catch {
+					json(res, 400, { error: "invalid JSON body" }); return;
+				}
+				if (!body.name) { json(res, 400, { error: "name is required" }); return; }
+				if (!/^[a-zA-Z0-9-]{1,32}$/.test(body.name)) {
+					json(res, 400, { error: "name must contain only letters, numbers, and hyphens (max 32 chars)" }); return;
+				}
+				const record = await createSubAgent({ name: body.name, skills: body.skills ?? [] });
+				if (!record) { json(res, 409, { error: `Agent "${body.name}" already exists or no slots available` }); return; }
+
+				try {
+					const containerName = await provisionAgent({
+						agentId:   record.agentId,
+						agentName: record.name,
+						slotIndex: record.slotIndex,
+						skills:    record.skills,
+					});
+					await updateSubAgentStatus(record.agentId, "running", containerName);
+					registerAgentBridge(workingDir, record.name, record.agentId, record.slotIndex);
+					log.logInfo(`[api] POST /agents → created "${record.name}" (slot ${record.slotIndex})`);
+					json(res, 201, { ...record, status: "running", dockerContainerId: containerName });
+				} catch (err) {
+					await deleteSubAgent(record.agentId);
+					json(res, 500, { error: `Container failed to start: ${String(err)}` });
+				}
+				return;
+			}
+
+			// ── GET /agents/:id ───────────────────────────────────────────────────────
+			if (method === "GET" && urlParts[0] === "agents" && urlParts[1] && !urlParts[2]) {
+				const agent = await getSubAgent(urlParts[1]);
+				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
+				json(res, 200, agent);
+				return;
+			}
+
+			// ── DELETE /agents/:id ────────────────────────────────────────────────────
+			// Stop container, remove from bridge registry, unlink from Telegram, delete record.
+			if (method === "DELETE" && urlParts[0] === "agents" && urlParts[1] && !urlParts[2]) {
+				const agent = await getSubAgent(urlParts[1]);
+				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
+
+				// Unlink Telegram if linked
+				if (telegramLinkManager) await telegramLinkManager.unlinkAgent(agent.agentId);
+
+				await deprovisionAgent(`iris-tg-${agent.agentId}`);
+				unregisterAgentBridge(workingDir, agent.name);
+				const ok = await deleteSubAgent(agent.agentId);
+				log.logInfo(`[api] DELETE /agents/${agent.agentId} → ${ok ? "deleted" : "partial failure"}`);
+				json(res, 200, { ok, agentId: agent.agentId });
+				return;
+			}
+
+			// ── PATCH /agents/:id/skills ──────────────────────────────────────────────
+			// Add or remove skills from a sub-agent's runtime.
+			// body: { add?: string[], remove?: string[] }
+			if (method === "PATCH" && urlParts[0] === "agents" && urlParts[1] && urlParts[2] === "skills") {
+				const agent = await getSubAgent(urlParts[1]);
+				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
+
+				let body: { add?: string[]; remove?: string[] };
+				try { body = JSON.parse(await readBody(req)); } catch {
+					json(res, 400, { error: "invalid JSON body" }); return;
 				}
 
-				claim.reset();
-				const token = claim.generateToken();
+				const available = getAvailableSkills(process.env.IRIS_SKILLS_DIR
+					?? `${process.env.IRIS_DIR ?? "/iris"}/data/skills`);
 
-				// Write to well-known file so bootstrap watcher can display it
-				const tokenFile = join(workingDir, "data", "claim-token.txt");
+				const invalidSkills = [...(body.add ?? []), ...(body.remove ?? [])].filter(s => !available.includes(s));
+				if (invalidSkills.length > 0) {
+					json(res, 400, { error: `Unknown skills: ${invalidSkills.join(", ")}. Available: ${available.join(", ")}` }); return;
+				}
+
+				// Skills are mounted via volume — just update the registry record
+				let updatedSkills = [...agent.skills];
+				if (body.add) updatedSkills = [...new Set([...updatedSkills, ...body.add])];
+				if (body.remove) updatedSkills = updatedSkills.filter(s => !(body.remove ?? []).includes(s));
+
+				const { getDb } = await import("./db.js");
+				const db = getDb();
+				if (db) {
+					await db.from("sub_agents").update({ skills: updatedSkills, updated_at: new Date().toISOString() }).eq("agent_id", agent.agentId);
+				}
+
+				// Invalidate Telegram link cache so next message sees updated skill list
+				if (telegramLinkManager) telegramLinkManager.invalidateCache(
+					(await telegramLinkManager.getBotForAgent(agent.agentId)) ?? ""
+				);
+
+				log.logInfo(`[api] PATCH /agents/${agent.agentId}/skills → ${updatedSkills.join(", ")}`);
+				json(res, 200, { agentId: agent.agentId, skills: updatedSkills });
+				return;
+			}
+
+			// ── POST /agents/:id/telegram/token ──────────────────────────────────────
+			// Generate a claim token for connecting a Telegram bot to this sub-agent.
+			// Returns the token the user must send to the Telegram bot.
+			if (method === "POST" && urlParts[0] === "agents" && urlParts[2] === "telegram" && urlParts[3] === "token") {
+				if (!telegramLinkManager) { json(res, 503, { error: "Telegram link manager not initialised" }); return; }
+				const agent = await getSubAgent(urlParts[1]);
+				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
+
 				try {
-					const { mkdirSync: mkdir3 } = await import("fs");
-					mkdir3(join(workingDir, "data"), { recursive: true });
-					writeFileSync(tokenFile, token);
-				} catch { /* non-fatal */ }
+					const token = await telegramLinkManager.generateToken(agent.agentId);
+					const tokenFile = join(workingDir, "data", "telegram-link-token.txt");
+					try {
+						mkdirSync(join(workingDir, "data"), { recursive: true });
+						writeFileSync(tokenFile, token, { mode: 0o600 });
+					} catch { /* non-fatal */ }
+					log.logInfo(`[api] POST /agents/${agent.agentId}/telegram/token — claim token issued`);
+					json(res, 200, {
+						token,
+						agentName: agent.name,
+						expiresInSeconds: 600,
+						instructions: `Send this token to your Telegram bot to link it to "${agent.name}". Token expires in 10 minutes.`,
+					});
+				} catch (err) {
+					json(res, 409, { error: String(err) });
+				}
+				return;
+			}
 
-				log.logInfo("[api] POST /internal/claim-token — fresh claim token issued");
-				json(res, 200, { token });
+			// ── DELETE /agents/:id/telegram ───────────────────────────────────────────
+			// Disconnect the Telegram bot from this sub-agent.
+			if (method === "DELETE" && urlParts[0] === "agents" && urlParts[2] === "telegram" && !urlParts[3]) {
+				if (!telegramLinkManager) { json(res, 503, { error: "Telegram link manager not initialised" }); return; }
+				const agent = await getSubAgent(urlParts[1]);
+				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
+
+				const ok = await telegramLinkManager.unlinkAgent(agent.agentId);
+				log.logInfo(`[api] DELETE /agents/${agent.agentId}/telegram → ${ok ? "unlinked" : "failed"}`);
+				json(res, 200, { ok, agentId: agent.agentId });
 				return;
 			}
 
@@ -592,19 +709,24 @@ export function startApiServer(
 					return;
 				}
 
-				const agent = await getAgent(params.agentId);
+				const agent = await getSubAgent(params.agentId);
 				if (!agent) {
 					json(res, 404, { error: `Agent ${params.agentId} not found` });
 					return;
 				}
 
+				// Derive botId from the Telegram link (may be empty if not linked)
+				const botId = telegramLinkManager
+					? (await telegramLinkManager.getBotForAgent(params.agentId)) ?? "unlinked"
+					: "unlinked";
+
 				const task = await createTask({
-					agentId:     params.agentId,
-					botId:       agent.botId,
-					channelId:   params.channelId,
-					payload:     params.payload,
+					agentId:      params.agentId,
+					botId,
+					channelId:    params.channelId,
+					payload:      params.payload,
 					scheduledFor: params.scheduledFor,
-					timezone:    params.timezone,
+					timezone:     params.timezone,
 					localTimeStr: params.localTimeStr,
 				});
 
