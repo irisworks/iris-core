@@ -286,7 +286,7 @@ data/
     ├── events/
     └── channels/
         ├── slack-acme/
-        │   └── C0A34FL8PMH/
+        │   └── <channel-id>/
         │       ├── MEMORY.md
         │       ├── log.jsonl
         │       ├── context.jsonl
