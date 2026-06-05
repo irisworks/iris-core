@@ -38,7 +38,7 @@ import {
 	type Session,
 } from "./sessions.js";
 import { getAgent } from "./agent-registry.js";
-import { createTask } from "./task-queue.js";
+import { createTask, getTask, updateTaskStatus, type TaskStatus } from "./task-queue.js";
 import { scheduleNewTask, type SchedulerCallbacks } from "./scheduler.js";
 
 // Minimal interface so api.ts doesn't import SlackBot directly (avoids circular deps)
@@ -633,6 +633,40 @@ export function startApiServer(
 				}
 
 				json(res, 200, { taskId: task.taskId, type: task.type, status: task.status });
+				return;
+			}
+
+			// ── PATCH /internal/agent-task/:taskId/status ────────────────────────────
+			// Agents mark a task done/failed/skipped after completing it.
+			// body: { status: "done" | "failed" | "skipped", output?: string }
+			if (method === "PATCH" && urlParts[0] === "internal" && urlParts[1] === "agent-task" && urlParts[3] === "status") {
+				const taskId = urlParts[2];
+				if (!taskId) {
+					json(res, 400, { error: "taskId is required" });
+					return;
+				}
+
+				let body: { status?: string; output?: string };
+				try { body = JSON.parse(await readBody(req)); } catch {
+					json(res, 400, { error: "Invalid JSON body" });
+					return;
+				}
+
+				const validStatuses: TaskStatus[] = ["done", "failed", "skipped"];
+				if (!body.status || !validStatuses.includes(body.status as TaskStatus)) {
+					json(res, 400, { error: `status must be one of: ${validStatuses.join(", ")}` });
+					return;
+				}
+
+				const task = await getTask(taskId);
+				if (!task) {
+					json(res, 404, { error: `Task ${taskId} not found` });
+					return;
+				}
+
+				await updateTaskStatus(taskId, body.status as TaskStatus, body.output);
+				log.logInfo(`[api] PATCH /internal/agent-task/${taskId}/status → ${body.status}`);
+				json(res, 200, { taskId, status: body.status });
 				return;
 			}
 

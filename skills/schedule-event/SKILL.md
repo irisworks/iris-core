@@ -14,6 +14,24 @@ Firecracker sandbox and are invisible to the host.**
 
 ---
 
+## STEP 0 — Resolve your channel ID (REQUIRED before every scheduling call)
+
+```bash
+CHANNEL_ID="${OWNER_CHANNEL_ID}"
+echo "Scheduling to: $CHANNEL_ID"
+```
+
+- `$OWNER_CHANNEL_ID` is injected into every sub-agent container and is always
+  the correct Telegram channel for the owner of this agent.
+- **Never substitute a `BRIDGE-` ID** — those are one-time request channels
+  that expire the moment your current response returns. Any event sent to a
+  `BRIDGE-` channel will fire into the void and never reach the user.
+- Always use `$CHANNEL_ID` (resolved above) in the `channelId` field.
+  Single-quoted JSON strings do NOT expand shell variables — always build
+  the JSON with double quotes or a heredoc as shown in the examples below.
+
+---
+
 ## Choosing the right event type
 
 | What you want | Event type |
@@ -47,35 +65,23 @@ Always use `count` or `endsAt` for bounded tasks.
 
 ---
 
-## Channel IDs
-
-- Telegram DM: `tg-{chatId}` (e.g. `tg-8814933356`)
-- Telegram group topic: `tg-{chatId}-{threadId}`
-- Slack channel: the Slack channel ID (e.g. `C01ABC123`)
-
----
-
 ## API endpoint
 
 ```
-POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event
+POST ${IRIS_API_URL}/internal/write-event
 ```
 
-The host is always reachable via `$IRIS_API_URL` (defaults to `http://172.18.0.1:3000`).
+The host is always reachable via `$IRIS_API_URL`.
 
 ---
 
 ## Immediate event — fire right now
 
 ```bash
-curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
+CHANNEL_ID="${OWNER_CHANNEL_ID}"
+curl -s -X POST "${IRIS_API_URL}/internal/write-event" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name":      "check-status",
-    "type":      "immediate",
-    "channelId": "tg-8814933356",
-    "text":      "Task instruction for Iris"
-  }'
+  -d "{\"name\":\"check-status\",\"type\":\"immediate\",\"channelId\":\"${CHANNEL_ID}\",\"text\":\"Task instruction for Iris\"}"
 ```
 
 ---
@@ -83,38 +89,28 @@ curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
 ## One-shot event — fire once at a specific time
 
 ```bash
-curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
+CHANNEL_ID="${OWNER_CHANNEL_ID}"
+AT="2026-06-03T15:00:00Z"   # must be a future ISO 8601 timestamp
+curl -s -X POST "${IRIS_API_URL}/internal/write-event" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name":      "remind-meeting",
-    "type":      "one-shot",
-    "channelId": "tg-8814933356",
-    "text":      "Remind about the 3pm meeting",
-    "at":        "2026-06-03T15:00:00Z"
-  }'
+  -d "{\"name\":\"remind-meeting\",\"type\":\"one-shot\",\"channelId\":\"${CHANNEL_ID}\",\"text\":\"Remind about the 3pm meeting\",\"at\":\"${AT}\"}"
 ```
 
-`at` must be a future ISO 8601 timestamp. Events missed by less than 2 minutes
-on restart will still fire; older ones are dropped.
+Events missed by less than 2 minutes on restart will still fire; older ones are dropped.
 
 ### Timed sequence — N times, T seconds apart
 
 Compute `at` values upfront and write N one-shot events:
 
 ```bash
+CHANNEL_ID="${OWNER_CHANNEL_ID}"
 BASE=$(date -u +%s)
 for i in 1 2 3 4 5 6; do
   AT=$(date -u -d "@$((BASE + i * 10))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
        python3 -c "from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(seconds=$i*10)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
-  curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
+  curl -s -X POST "${IRIS_API_URL}/internal/write-event" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"name\":      \"hi-$i\",
-      \"type\":      \"one-shot\",
-      \"channelId\": \"tg-8814933356\",
-      \"text\":      \"Say hi (greeting $i of 6)\",
-      \"at\":        \"$AT\"
-    }"
+    -d "{\"name\":\"hi-${i}\",\"type\":\"one-shot\",\"channelId\":\"${CHANNEL_ID}\",\"text\":\"Say hi (greeting ${i} of 6)\",\"at\":\"${AT}\"}"
 done
 ```
 
@@ -126,16 +122,10 @@ preserved even if earlier agent runs are still in progress.
 ## Interval event — repeat every N seconds (any interval)
 
 ```bash
-curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
+CHANNEL_ID="${OWNER_CHANNEL_ID}"
+curl -s -X POST "${IRIS_API_URL}/internal/write-event" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name":           "status-ping",
-    "type":           "interval",
-    "channelId":      "tg-8814933356",
-    "text":           "Check system status and report",
-    "intervalSeconds": 30,
-    "count":          10
-  }'
+  -d "{\"name\":\"status-ping\",\"type\":\"interval\",\"channelId\":\"${CHANNEL_ID}\",\"text\":\"Check system status and report\",\"intervalSeconds\":30,\"count\":10}"
 ```
 
 **Fields:**
@@ -168,22 +158,16 @@ Examples:
 ## Periodic event — standard cron schedule (hourly, daily, weekly)
 
 ```bash
-curl -s -X POST ${IRIS_API_URL:-http://172.18.0.1:3000}/internal/write-event \
+CHANNEL_ID="${OWNER_CHANNEL_ID}"
+curl -s -X POST "${IRIS_API_URL}/internal/write-event" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name":      "daily-summary",
-    "type":      "periodic",
-    "channelId": "tg-8814933356",
-    "text":      "Send daily summary",
-    "schedule":  "0 9 * * *",
-    "timezone":  "Asia/Kolkata"
-  }'
+  -d "{\"name\":\"daily-summary\",\"type\":\"periodic\",\"channelId\":\"${CHANNEL_ID}\",\"text\":\"Send daily summary\",\"schedule\":\"0 9 * * *\",\"timezone\":\"Asia/Kolkata\"}"
 ```
 
 ### Common cron schedules
 
 | Schedule       | Meaning               |
-|----------------|-----------------------|
+|----------------|------------------------|
 | `* * * * *`    | Every minute          |
 | `*/5 * * * *`  | Every 5 minutes       |
 | `0 * * * *`    | Every hour            |
