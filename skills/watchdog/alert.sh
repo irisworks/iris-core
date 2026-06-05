@@ -8,7 +8,7 @@ MSG="🚨 Iris watchdog alert: $REASON
 Debug commands:
 - Check runtime: sudo tail -50 /iris/iris-runtime.log
 - Check service: sudo systemctl status iris
-- Check logs: tail -20 /iris/data/D0AS2KC29MH/log.jsonl
+- Check logs: tail -20 /iris/data/${OWNER_CHANNEL_ID:-<channel-id>}/log.jsonl
 - Restart: sudo systemctl restart iris"
 
 # Send via Telegram if configured
