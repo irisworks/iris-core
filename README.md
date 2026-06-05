@@ -771,7 +771,33 @@ irisflow/
 | VM boots but `/health` times out | exec-server not started | Check `journalctl -u iris-fc-<name>` |
 | Jailer fails to chroot | `irisjailer` user missing | `sudo groupadd -g 10000 irisjailer 2>/dev/null; sudo useradd -u 10000 -g 10000 -r -s /usr/sbin/nologin irisjailer` |
 | rootfs missing | Build script not run | `sudo bash scripts/build-firecracker-rootfs.sh` |
+| Sub-agents fail to spawn / `iris-runtime:local` image missing | Image was deleted or never built | Rebuild the image (see below) |
 | `fatal: repository not found` during bootstrap | Upstream remote points to a private repo you don't have access to | Update with: `git remote set-url upstream https://github.com/irisworks/irisflow.git && git fetch upstream` |
+
+### Emergency: rebuild the `iris-runtime:local` Docker image
+
+If sub-agents fail to spawn because the `iris-runtime:local` image is missing or corrupted, rebuild it with:
+
+```bash
+cd /iris/repo/iris-runtime
+npm install          # restore node_modules if needed
+npm run build        # compile TypeScript → dist/
+docker build -t iris-runtime:local .
+```
+
+Expected output: `Successfully tagged iris-runtime:local` (takes ~2–3 minutes on first build, faster on rebuild due to layer cache).
+
+Verify the image exists afterward:
+
+```bash
+docker images iris-runtime:local
+```
+
+If you also use Firecracker sub-agents, rebuild the rootfs after the image is ready:
+
+```bash
+sudo bash /iris/repo/scripts/build-firecracker-rootfs.sh
+```
 
 ---
 
