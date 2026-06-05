@@ -72,10 +72,24 @@ ALTER TABLE agent_tasks DISABLE ROW LEVEL SECURITY;
 
 -- ── Migration notes ───────────────────────────────────────────────────────────
 -- Legacy tables (telegram_claim, telegram_agents) are superseded by sub_agents
--- and sub_agent_telegram_links. Drop them only after all running instances have
--- been updated to the new schema.
+-- and sub_agent_telegram_links.
 --
--- DROP TABLE IF EXISTS agent_tasks;          -- re-created above with new FK
--- DROP TABLE IF EXISTS telegram_agents;
--- DROP TABLE IF EXISTS telegram_claim;
--- DROP TYPE  IF EXISTS agent_status;         -- re-created above
+-- If this schema was applied on a DB that already had agent_tasks pointing to
+-- telegram_agents (old FK), the CREATE TABLE IF NOT EXISTS above will NOT have
+-- recreated agent_tasks. Run the block below in the Supabase SQL editor to
+-- complete the migration. The runtime code includes a compatibility shim
+-- (sub-agent-registry.ts: upsertCompatRow) that keeps telegram_agents in sync
+-- until this migration has been executed.
+--
+-- !! Run in Supabase SQL Editor to complete the migration !!
+--
+-- DROP TABLE IF EXISTS agent_tasks CASCADE;
+-- DROP TABLE IF EXISTS telegram_agents CASCADE;
+-- DROP TABLE IF EXISTS telegram_claim CASCADE;
+-- DROP TYPE  IF EXISTS agent_status CASCADE;   -- re-created above
+--
+-- Then re-run the full schema.sql (all CREATE TABLE statements are idempotent
+-- for the remaining new tables).
+--
+-- After running the migration, remove the upsertCompatRow / deleteCompatRow
+-- shim from src/sub-agent-registry.ts.

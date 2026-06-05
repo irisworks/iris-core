@@ -46,6 +46,58 @@ function noDb(op: string): null {
 }
 
 // ============================================================================
+// Compatibility shim — agent_tasks in the live DB still has an old FK to the
+// legacy telegram_agents table instead of sub_agents. Until the schema migration
+// is run in the Supabase SQL editor, we maintain a mirror row in telegram_agents
+// (and a synthetic telegram_claim entry) so that task inserts don't fail.
+// Remove this entire block once the schema migration has been executed.
+// ============================================================================
+
+async function upsertCompatRow(
+	db: ReturnType<typeof getDb>,
+	agentId: string,
+	name: string,
+	skills: string[],
+	slotIndex: number,
+	status: AgentStatus,
+): Promise<void> {
+	if (!db) return;
+	const compatBotId = `compat-${agentId}`;
+	try {
+		await db.from("telegram_claim").upsert(
+			{ bot_id: compatBotId, claimed: false },
+			{ onConflict: "bot_id", ignoreDuplicates: true },
+		);
+		await db.from("telegram_agents").upsert(
+			{
+				agent_id:   agentId,
+				bot_id:     compatBotId,
+				name,
+				skills,
+				slot_index: slotIndex,
+				status,
+				platform:   "docker",
+			},
+			{ onConflict: "agent_id" },
+		);
+	} catch (err) {
+		// Non-fatal — sub-agent exists; tasks won't persist until schema migration runs
+		log.logWarning("[sub-agent-registry] compat shim upsert failed (schema migration pending)", String(err));
+	}
+}
+
+async function deleteCompatRow(db: ReturnType<typeof getDb>, agentId: string): Promise<void> {
+	if (!db) return;
+	const compatBotId = `compat-${agentId}`;
+	try {
+		await db.from("telegram_agents").delete().eq("agent_id", agentId);
+		await db.from("telegram_claim").delete().eq("bot_id", compatBotId);
+	} catch (err) {
+		log.logWarning("[sub-agent-registry] compat shim delete failed", String(err));
+	}
+}
+
+// ============================================================================
 // Slot management
 // ============================================================================
 
@@ -156,8 +208,10 @@ export async function createSubAgent(params: {
 			.select("*")
 			.single();
 		if (error) throw error;
+		const record = rowToRecord(data as Record<string, unknown>);
 		log.logInfo(`[sub-agent-registry] Created sub-agent "${params.name}" (slot ${slot})`);
-		return rowToRecord(data as Record<string, unknown>);
+		await upsertCompatRow(db, record.agentId, record.name, record.skills, record.slotIndex, record.status);
+		return record;
 	} catch (err) {
 		log.logWarning("[sub-agent-registry] createSubAgent failed", String(err));
 		return null;
@@ -179,6 +233,10 @@ export async function updateSubAgentStatus(
 			.update(patch)
 			.eq("agent_id", agentId);
 		if (error) throw error;
+		// Keep compat mirror in sync
+		try {
+			await db.from("telegram_agents").update({ status, updated_at: new Date().toISOString() }).eq("agent_id", agentId);
+		} catch { /* ignore compat failures */ }
 	} catch (err) {
 		log.logWarning("[sub-agent-registry] updateSubAgentStatus failed", String(err));
 	}
@@ -188,6 +246,8 @@ export async function deleteSubAgent(agentId: string): Promise<boolean> {
 	const db = getDb();
 	if (!db) { noDb("deleteSubAgent"); return false; }
 	try {
+		// Remove compat mirror first so agent_tasks cascade-deletes cleanly
+		await deleteCompatRow(db, agentId);
 		const { error } = await db.from("sub_agents").delete().eq("agent_id", agentId);
 		if (error) throw error;
 		log.logInfo(`[sub-agent-registry] Deleted sub-agent ${agentId}`);
