@@ -133,7 +133,7 @@ function getMemory(channelDir: string): string {
 function loadIrisSkills(channelDir: string, workspacePath: string): Skill[] {
 	const skillMap = new Map<string, Skill>();
 
-	// channelDir is the host path (e.g., /Users/.../data/C0A34FL8PMH)
+	// channelDir is the host path (e.g., /Users/.../data/<channel-id>)
 	// hostWorkspacePath is the parent directory on host
 	// workspacePath is the container path (e.g., /workspace)
 	const hostWorkspacePath = join(channelDir, "..");
