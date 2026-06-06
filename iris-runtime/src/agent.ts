@@ -811,8 +811,13 @@ function createRunner(
 			const memory = getMemory(channelDir);
 			const constitution = loadConstitution(workspaceDir);
 			let skills = loadIrisSkills(channelDir, workspacePath);
-			// SESSION- and tg-* channels — no agent spawning allowed
-			if (channelId.startsWith("SESSION-") || channelId.startsWith("tg-")) {
+			// Sub-agent channels (BRIDGE-*), Telegram channels (tg-*), and sessions (SESSION-) —
+			// spawn-agent is filtered at the AgentRunner level regardless of volume mounts.
+			if (
+				channelId.startsWith("BRIDGE-") ||
+				channelId.startsWith("SESSION-") ||
+				channelId.startsWith("tg-")
+			) {
 				skills = skills.filter((s) => s.name !== "spawn-agent");
 			}
 			const agents = loadAgentRegistry(workspaceDir);

@@ -1,126 +1,161 @@
 # Iris Core
 
-Iris is an always-on AI orchestrator that runs on a cloud VM, listens on Slack or Telegram, and manages a fleet of specialized sub-agents. Each sub-agent runs in an isolated Firecracker microVM — lightweight virtual machines with their own Linux kernel, booting in ~125ms.
-
-This repository is the source of truth for Iris's constitution, runtime, infrastructure, skills, and sub-agent scaffolding.
-
-## What This Repo Contains
-
-- `CONSTITUTION.md` — operator rules injected read-only into every system prompt
-- `MEMORY.md` — Iris's mutable global memory
-- `CLAUDE.md` — repo-level writing rules for infrastructure and documentation
-- `bootstrap.sh` — rebuild Iris from a fresh VM
-- `iris-runtime/` — `@iris-core/runtime`, a provider-agnostic fork of pi-mom
-- `scripts/` — Firecracker VM lifecycle scripts (`fc-up.sh`, `fc-down.sh`, `build-firecracker-rootfs.sh`, `iris-exec-server.py`)
-- `skills/` — Iris's top-level skills (hot-reloaded without restart)
-- `agents/` — sub-agent scaffolds (newsletter, public-sandbox)
-- `data/models.json` — LLM provider and model configuration
-- `terraform/` — dynamic Azure resources Iris provisions on demand
+---
 
 ## Architecture
 
 ```
-You (Slack or Telegram)
-└── Iris  (Azure VM, systemd service)
-    ├── iris-runtime
-    ├── CONSTITUTION.md       read-only operator rules, injected every prompt
-    ├── MEMORY.md             mutable global memory
-    ├── skills/               hot-reloaded capabilities
-    │
-    └── Firecracker MicroVM Layer
-        ├── Static VMs  (Terraform-managed, always-on)
-        │   └── iris-fc-public-sandbox   slot 1 → 172.20.1.2
-        │       jailer + seccomp + ephemeral rootfs
-        │       iris-exec-server :8080  (GET /health, POST /exec)
-        │
-        └── Dynamic pool  (VmManager, on-demand per Slack channel)
-            slot 2 … 254 → booted by fc-up.sh on first bash command
-            released automatically after 30 min of inactivity
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Azure VM  (Ubuntu 22.04)                           │
+│                                                                             │
+│  You ── Slack ─────────────────────────────────────────────────────────►   │
+│  You ── Telegram Bot 1..5 (long-poll) ─────────────────────────────────►   │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │  iris.service  (systemd)                                             │  │
+│  │  Node.js · iris-runtime · --sandbox=host · working dir: /iris/data  │  │
+│  │                                                                      │  │
+│  │  Transports                                                          │  │
+│  │  ├── Slack      Socket Mode (optional)                               │  │
+│  │  │   Iris handles the message herself — full LLM + tools            │  │
+│  │  │                                                                   │  │
+│  │  └── Telegram   Long-poll, up to 5 bots (TELEGRAM_BOT_TOKEN_1..5)  │  │
+│  │      Each bot is a GATEWAY — it does NOT run the LLM itself.        │  │
+│  │      Unlinked bot → accepts only 64-char hex claim tokens           │  │
+│  │      Linked bot   → every message forwarded to sub-agent bridge     │  │
+│  │                                                                      │  │
+│  │  Internal API  :3000  (0.0.0.0 — reachable from Docker network)    │  │
+│  │  ├── GET/POST/DELETE  /agents                 sub-agent CRUD        │  │
+│  │  ├── POST             /agents/:id/telegram/token  claim token       │  │
+│  │  ├── DELETE           /agents/:id/telegram        unlink bot        │  │
+│  │  ├── PATCH            /agents/:id/skills           update skills    │  │
+│  │  ├── POST             /internal/write-event        schedule event   │  │
+│  │  ├── POST             /event                       inject event     │  │
+│  │  ├── POST             /escalate                    sub-agent SOS    │  │
+│  │  └── CRUD             /sessions                    session API      │  │
+│  │                                                                      │  │
+│  │  EventsWatcher  →  slack/events/  telegram/events/  events/         │  │
+│  │  Scheduler      →  croner jobs, Supabase agent_tasks                │  │
+│  │  Watchdog       →  polls every 30s, detects crash / recovery        │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  Sub-Agent Layer  (slots 1–10, one runtime per slot)                       │
+│                                                                             │
+│  ┌─── Docker runtime (default) ────────────────────────────────────────┐  │
+│  │  Container:  iris-agent-{agentId}                                   │  │
+│  │  Bridge URL: http://127.0.0.1:{4200+slot}  (e.g. :4201 for slot 1) │  │
+│  │  • iris-runtime in bridge mode  (IRIS_BRIDGE_PORT set)              │  │
+│  │  • /iris/data/skills mounted read-only  →  hot-reload, no restart   │  │
+│  │  • spawn-agent skill excluded  →  agent creation blocked at OS level│  │
+│  │  • MEMORY.md injected with identity + hard no-agent-creation rule   │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌─── Firecracker runtime (KVM required) ──────────────────────────────┐  │
+│  │  VM name:    iris-fc-{agentId}   (slot N → 172.20.N.2)              │  │
+│  │  Bridge URL: http://172.20.{slot}.2:4200                            │  │
+│  │  • Booted via fc-up.sh, iris-runtime started via exec-server :8080  │  │
+│  │  • Hardware VM boundary  (KVM + jailer + seccomp)                   │  │
+│  │  • Same skill and MEMORY.md setup as Docker                         │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  Telegram message flow                                                      │
+│  User → Bot → TelegramLinkManager.getLinkedAgent(botId)  [cached]          │
+│             → callAgentBridge(bridgeUrl, text, user)                        │
+│             → Sub-agent bridge HTTP server                                  │
+│             → AgentRunner.run()  (LLM + tools)                              │
+│             → response text → Bot sends to user                             │
+│                                                                             │
+│  Iris's own bash sandbox  (separate from sub-agent runtime)                 │
+│  ├── --sandbox=host              full host access  (Iris herself)           │
+│  ├── --sandbox=firecracker:<ip>  static VM at fixed IP                      │
+│  └── --sandbox=firecracker-pool  fresh VM per Slack channel, 30 min TTL    │
+│                                                                             │
+│  Supabase  (external persistence)                                           │
+│  ├── sub_agents               registry: name, runtime, slot, skills, status│
+│  ├── sub_agent_telegram_links bot_id ↔ agent_id  (UNIQUE both sides)       │
+│  └── agent_tasks              task queue: immediate + scheduled             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Sandbox modes
+### Key design decisions
 
-Iris's bash tool can execute commands in four isolation levels, configured via `--sandbox`:
-
-| Mode | Flag | Use case |
-|---|---|---|
-| Host | `--sandbox=host` | Iris herself — trusted ops, full access |
-| Docker | `--sandbox=docker:<name>` | Legacy containers |
-| Static Firecracker | `--sandbox=firecracker:<ip>` | Persistent sub-agent at a fixed IP |
-| Dynamic pool | `--sandbox=firecracker-pool` | One fresh microVM per Slack channel; auto-destroyed after 30 min idle |
-
-### Security layers (per microVM)
-
-| Layer | What it enforces |
+| Decision | Detail |
 |---|---|
-| KVM | Hardware VM boundary — guest kernel cannot touch host kernel |
-| Firecracker | Minimal VMM, no BIOS/PCI — tiny attack surface vs QEMU |
-| Jailer | Chroots Firecracker to `/srv/jailer`, drops to uid 10000, applies seccomp |
-| TAP `/30` | Each VM sees only its own 2-host subnet — no cross-VM traffic |
-| Ephemeral rootfs | Each session starts from a clean copy; dirty state is destroyed with the VM |
+| Telegram bots are gateways | Bots do not run the LLM — they forward to the linked sub-agent's bridge. Iris herself is not exposed via Telegram. |
+| One-to-one bot ↔ agent | UNIQUE constraint on both `bot_id` and `agent_id` in Supabase. One bot cannot serve two agents; one agent cannot be served by two bots. |
+| Claim token workflow | Tokens generated via API (`POST /agents/:id/telegram/token`), single-use, 10-min TTL, 64 hex chars. Never printed to logs. |
+| Sub-agent runtime choice | `docker` (default) or `firecracker`. Docker is simpler; Firecracker gives KVM hardware isolation. |
+| Skills hot-reload | Skills directory (`/iris/data/skills`) is volume-mounted read-only into every sub-agent container. Adding a skill on the host takes effect immediately — no restart. |
+| Agent creation forbidden | Sub-agents cannot create other agents. Enforced at two levels: (1) `spawn-agent` skill is not mounted into sub-agent containers, (2) MEMORY.md constitution hard-blocks it. |
+| Supabase dual-write | Agent records and Telegram links in Supabase survive VM reboots. Pending claim tokens live in a local JSON file (fast, process-restart durable) and expire independently. |
 
-## Current State
+---
 
-Implemented and verified:
+## What This Repo Contains
 
-- `iris-runtime/` fork — provider-agnostic, configurable via `--provider`/`--model` CLI flags or env vars
-- `CONSTITUTION.md` — operator rules injected before all agent memory
-- Firecracker microVM layer — `VmManager`, `fc-up.sh`/`fc-down.sh`, `iris-exec-server.py`
-- `build-firecracker-rootfs.sh` — builds a 2 GiB ext4 rootfs from the iris-runtime Docker image
-- `terraform/modules/firecracker-agent` — provisions static Firecracker VMs via Terraform
-- `agents/public-sandbox` — first Firecracker sub-agent scaffold
-- `skills/firecracker-agent` — skill for managing microVM lifecycle
-- Top-level skills: secrets, storage, Terraform, GitHub, Azure, spawn-agent, promote-skill, self-extend, self-heal, send-email, watchdog, serve-public
-- `agents/newsletter` — newsletter sub-agent scaffold
-- Bootstrap script with interactive first-time setup (Key Vault or `.env` path)
-- Live runtime confirmed on `foundry-e2/Kimi-K2.5`; Slack smoke test passed
-- Native Telegram transport (`--transport=telegram`) — long polling, DMs, groups, topic threads, file downloads, `/reset` `/compact` `/stop` commands
+| Path | Purpose |
+|---|---|
+| `iris-runtime/` | Node.js AI agent runtime — transports, bridge, API, scheduler, watchdog |
+| `skills/` | Hot-reloadable skill directories (symlinked to `/iris/data/skills`) |
+| `supabase/schema.sql` | Canonical Supabase schema — run this to create all tables |
+| `scripts/` | Firecracker VM lifecycle: `fc-up.sh`, `fc-down.sh`, `build-firecracker-rootfs.sh`, `iris-exec-server.py` |
+| `agents/` | Sub-agent scaffolds (newsletter, public-sandbox) |
+| `terraform/` | Dynamic Azure resources Iris provisions on demand |
+| `CONSTITUTION.md` | Operator rules injected read-only into every system prompt |
+| `MEMORY.md` | Iris's mutable global memory |
+| `CLAUDE.md` | Repo-level writing rules (read before making changes) |
+| `bootstrap.sh` | Full VM setup from scratch |
+| `data/models.json` | LLM provider and model configuration |
 
-Still pending:
+---
 
-- Phase 4 internal HTTP API for sub-agent communication
-- Phase 5 hardening and full resurrection test
-- Simultaneous Slack + Telegram in a single process (currently requires two separate service instances)
+## Runtime Source Layout
 
-## Setup
+```
+iris-runtime/src/
+├── main.ts                # Entry point — parses flags, starts transports, API, watchdog
+├── agent.ts               # AgentRunner — LLM calls, tool dispatch, context management
+├── slack.ts               # Slack Socket Mode transport
+├── telegram.ts            # Telegram long-poll transport — gateway to sub-agent bridges
+├── telegram-link.ts       # TelegramLinkManager — claim tokens, bot↔agent cache + Supabase
+├── sub-agent-registry.ts  # Platform-agnostic sub-agent CRUD (Supabase sub_agents table)
+├── agent-provision.ts     # Docker + Firecracker provisioners, bridgeUrlForAgent()
+├── agent-watchdog.ts      # 30s poll — docker inspect / exec-server health check
+├── scheduler.ts           # croner-based task scheduler, missed-task recovery
+├── task-queue.ts          # agent_tasks CRUD (immediate + scheduled)
+├── api.ts                 # Internal HTTP API on :3000
+├── bridge.ts              # Bridge HTTP server (sub-agents) + callAgentBridge() (main Iris)
+├── sandbox.ts             # HostExecutor, DockerExecutor, FirecrackerExecutor, pool
+├── vm-manager.ts          # On-demand Firecracker pool for Iris's own bash sandbox
+├── store.ts               # ChannelStore — per-channel conversation history
+└── events.ts              # EventsWatcher — file-based event dispatch
+```
 
-Pick the path that matches your environment — one command does everything:
+---
 
-| | No Firecracker | With Firecracker (isolated microVMs) |
-|---|---|---|
-| **No Azure** | [Option 1](#option-1--no-azure-no-firecracker) — simplest | [Option 3](#option-3--no-azure-with-firecracker) |
-| **Azure Key Vault** | [Option 2](#option-2--azure-key-vault-no-firecracker) | [Option 4](#option-4--azure-key-vault--firecracker-full-production) — full production |
-
-All options prompt for both Slack and Telegram tokens during setup — answer `Y` to whichever you want. See [Telegram Setup](#telegram-setup) for details.
-
-All four paths start the same way:
+## Quick Start
 
 ```bash
 sudo mkdir -p /iris && sudo chown $USER:$USER /iris
-git clone https://github.com/irisworks/irisflow.git /iris/repo
+git clone https://github.com/irisworks/iris-core.git /iris/repo
 cd /iris/repo
+bash bootstrap.sh --setup --no-keyvault   # simplest path
 ```
 
-Then run the single command for your chosen path below.
+See [Setup Options](#setup-options) for all four install paths.
 
 ---
 
 ## Managing the Iris Service
 
-Once installed, use these commands to control the iris service manually:
-
 ```bash
-# Stop iris (graceful shutdown — stays stopped until you start it again)
 sudo systemctl stop iris
-
-# Start iris
 sudo systemctl start iris
-
-# Restart iris (stop + start in one step)
 sudo systemctl restart iris
+sudo journalctl -u iris -f          # live logs
 ```
 
-> **Note:** If `start` silently does nothing, the built JS may be missing. Rebuild first:
+> If `start` silently does nothing, the compiled JS is missing — run:
 > ```bash
 > cd /iris/repo/iris-runtime && npm install && npm run build
 > sudo systemctl start iris
@@ -128,477 +163,83 @@ sudo systemctl restart iris
 
 ---
 
-## Option 1 — No Azure, No Firecracker
-
-Iris runs on your VM and executes commands directly on the host. No Azure account, no KVM needed.
-
-**Requirements:** Ubuntu 22.04 VM · LLM provider API key · Slack workspace (admin) · GitHub account (optional)
-
-```bash
-bash bootstrap.sh --setup --no-keyvault
-```
-
-**Exactly what you will see:**
-
-```
-[iris-bootstrap] ── System dependencies ──
-(automated: Docker, Node 22, jq, nginx, certbot, GitHub CLI, Terraform)
-
-[iris-bootstrap] ── GitHub login ──
-(gh auth login opens browser or shows device code)
-> Go to https://github.com/login/device and enter the code shown
-
-[iris-bootstrap] Choose LLM provider:
-  1) anthropic       — Claude Sonnet / Opus (recommended)
-  2) openai          — GPT-4o / GPT-4
-  3) foundry-e2      — Azure AI Foundry (Azure OpenAI)
-  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)
-[iris-bootstrap] Choice [1]:
-
-[iris-bootstrap] Anthropic API key (sk-ant-...):
-
-[iris-bootstrap] Set up Slack integration? [Y/n]
-
-  ┌─ Slack App Setup ────────────────────────────────────────────┐
-  │                                                               │
-  │  1. Go to https://api.slack.com/apps → Create New App        │
-  │     → From scratch → name it 'Iris' → pick your workspace    │
-  │                                                               │
-  │  2. Socket Mode (left sidebar)                                │
-  │     → Enable Socket Mode → generate App-Level Token          │
-  │     → name it 'iris-socket' → scope: connections:write       │
-  │     → copy the  xapp-...  token  (App Token)                 │
-  │                                                               │
-  │  3. OAuth & Permissions (left sidebar)                        │
-  │     → Bot Token Scopes → Add:                                 │
-  │         app_mentions:read  channels:history  channels:read    │
-  │         chat:write         groups:history    groups:read      │
-  │         im:history         im:read           im:write         │
-  │         mpim:history       reactions:write   users:read       │
-  │     → Install to Workspace → copy the  xoxb-...  token       │
-  │                                                               │
-  │  4. Event Subscriptions → Enable → subscribe to bot events:   │
-  │         app_mention  message.channels  message.groups        │
-  │         message.im   message.mpim                            │
-  │                                                               │
-  │  5. App Home → enable Messages Tab                           │
-  └───────────────────────────────────────────────────────────────────┘
-
-[iris-bootstrap] Press Enter when your app is created and tokens are ready...
-[iris-bootstrap] Slack App token (xapp-...):
-[iris-bootstrap] Slack Bot token (xoxb-...):
-
-[iris-bootstrap] Set up Telegram integration? [Y/n]
-[iris-bootstrap] Telegram Bot Token:
-
-[iris-bootstrap] Add GitHub token for repo access? [Y/n]
-[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
-[iris-bootstrap] Set up public domain (e.g. iris.example.com)? [y/N]
-[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
-
-[iris-bootstrap] ── Workspace ──
-(automated: writes /iris/.env, symlinks MEMORY.md / CONSTITUTION.md / skills)
-
-[iris-bootstrap] ── Building iris-runtime ──
-(automated: npm install + npm run build)
-
-[iris-bootstrap] ── Installing systemd service ──
-(automated: installs iris.service, starts Iris)
-
-[iris-bootstrap] ── Done ──
-  ✓ Iris is running!
-  Status:    sudo systemctl status iris
-  Logs:      sudo journalctl -u iris -f
-  Secrets:   /iris/.env
-  Slack:     @iris in any channel
-```
-
-**Verify:**
-```bash
-sudo systemctl status iris
-```
-Then in Slack: `@iris what model are you?`
-
----
-
-## Option 2 — Azure Key Vault, No Firecracker
-
-Same as Option 1 but secrets live in Azure Key Vault instead of `/iris/.env`.
-
-**Requirements:** All of Option 1 + Azure account
-
-```bash
-bash bootstrap.sh --setup --keyvault
-```
-
-**Exactly what you will see:**
-
-```
-[iris-bootstrap] ── System dependencies ──
-(automated: same as Option 1 + Azure CLI)
-
-[iris-bootstrap] ── Azure login ──
-(az login opens browser or shows device code)
-(skipped automatically if this VM has a managed identity)
-Active subscription: My-Subscription (xxxxxxxx-xxxx-...)
-
-[iris-bootstrap] ── GitHub login ──
-(gh auth login)
-
-[iris-bootstrap] Choose LLM provider:   (same as Option 1)
-[iris-bootstrap] Anthropic API key (sk-ant-...):
-[iris-bootstrap] Set up Slack integration? [Y/n]
-  (same Slack setup box as Option 1)
-[iris-bootstrap] Slack App token (xapp-...):
-[iris-bootstrap] Slack Bot token (xoxb-...):
-[iris-bootstrap] Add GitHub token for repo access? [Y/n]
-[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
-[iris-bootstrap] Set up public domain? [y/N]
-
-[iris-bootstrap] Key Vault name [iris-kv-myhostname]:
-[iris-bootstrap] Resource group for Key Vault [iris-rg]:
-[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
-
-[iris-bootstrap] ── Key Vault setup ──
-(automated: creates Key Vault, seeds all secrets)
-
-[iris-bootstrap] ── Workspace ──  (automated)
-[iris-bootstrap] ── Building iris-runtime ──  (automated)
-[iris-bootstrap] ── Installing systemd service ──  (automated)
-
-[iris-bootstrap] ── Done ──
-  ✓ Iris is running!
-  Key Vault: iris-kv-myhostname
-  Slack:     @iris in any channel
-```
-
----
-
-## Option 3 — No Azure, With Firecracker
-
-Every bash command Iris runs executes inside an isolated Firecracker microVM. No Azure account needed. Requires a VM with KVM — on Azure use **Ddsv5 series** (e.g. `Standard_D4ds_v5`). B-series and D-series do not have KVM.
-
-**Requirements:** Ubuntu 22.04 VM with `/dev/kvm` · LLM API key · Slack workspace (admin) · GitHub account (optional)
-
-```bash
-bash bootstrap.sh --setup --no-keyvault --firecracker
-```
-
-**Exactly what you will see:**
-
-```
-[iris-bootstrap] ── KVM check ──
-✓ /dev/kvm found
-(if kvm group not yet active, script re-execs itself via sg kvm — no logout needed)
-
-[iris-bootstrap] ── System dependencies ──
-(automated: same as Option 1 + e2fsprogs)
-
-[iris-bootstrap] ── Firecracker setup ──
-(automated: downloading firecracker v1.7.0...)
-(automated: downloading jailer v1.7.0...)
-(automated: creating irisjailer system user uid/gid 10000)
-(automated: adding azureuser to kvm group)
-(automated: downloading Linux kernel → /var/lib/iris/firecracker/vmlinux)
-
-[iris-bootstrap] ── GitHub login ──  (gh auth login)
-
-[iris-bootstrap] Choose LLM provider:   (same as Option 1)
-[iris-bootstrap] Anthropic API key (sk-ant-...):
-[iris-bootstrap] Set up Slack integration? [Y/n]
-  (same Slack setup box as Option 1)
-[iris-bootstrap] Slack App token (xapp-...):
-[iris-bootstrap] Slack Bot token (xoxb-...):
-[iris-bootstrap] Add GitHub token for repo access? [Y/n]
-[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
-[iris-bootstrap] Set up public domain? [y/N]
-[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
-
-[iris-bootstrap] ── Workspace ──
-(automated: writes /iris/.env)
-
-[iris-bootstrap] ── Building iris-runtime ──
-(automated: npm install + npm run build + docker build iris-runtime:local)
-(automated: building rootfs.ext4 from Docker image — takes ~1 minute)
-
-[iris-bootstrap] ── Installing systemd service ──
-(automated: installs iris.service, starts Iris temporarily on --sandbox=host)
-
-[iris-bootstrap] ── Provisioning Firecracker sandbox VM ──
-(automated: writing /var/lib/iris/firecracker/agents/public-sandbox/vm-config.json)
-(automated: writing /etc/systemd/system/iris-fc-public-sandbox.service)
-(automated: starting iris-fc-public-sandbox)
-
-[iris-bootstrap] ── Firecracker health check ──
-Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
-✓ VM is healthy (4s)
-
-[iris-bootstrap] ── Switching Iris to Firecracker sandbox ──
-(automated: writes drop-in /etc/systemd/system/iris.service.d/sandbox.conf)
-(automated: daemon-reload + restart iris)
-
-[iris-bootstrap] ── Done ──
-  ✓ Iris is running!
-  Firecracker: iris-fc-public-sandbox → 172.20.1.2
-  Sandbox:     --sandbox=firecracker:172.20.1.2
-  Secrets:     /iris/.env
-  VM logs:     journalctl -u iris-fc-public-sandbox -f
-  Test:        @iris run: uname -a
-```
-
----
-
-## Option 4 — Azure Key Vault + Firecracker (full production)
-
-Azure Key Vault for secrets + Terraform to manage the sandbox VM lifecycle. Everything automated.
-
-**Requirements:** All of Option 3 + Azure account
-
-```bash
-bash bootstrap.sh --setup --keyvault --firecracker
-```
-
-**Exactly what you will see:**
-
-```
-[iris-bootstrap] ── KVM check ──
-✓ /dev/kvm found
-
-[iris-bootstrap] ── System dependencies ──
-(automated: same as Option 1 + Azure CLI + e2fsprogs)
-
-[iris-bootstrap] ── Firecracker setup ──
-(automated: downloads firecracker + jailer + kernel, creates irisjailer user)
-
-[iris-bootstrap] ── Azure login ──
-(az login — skipped if managed identity detected)
-Active subscription: My-Subscription (xxxxxxxx-xxxx-...)
-
-[iris-bootstrap] ── GitHub login ──  (gh auth login)
-
-[iris-bootstrap] Choose LLM provider:   (same as Option 1)
-[iris-bootstrap] Anthropic API key (sk-ant-...):
-[iris-bootstrap] Set up Slack integration? [Y/n]
-  (same Slack setup box as Option 1)
-[iris-bootstrap] Slack App token (xapp-...):
-[iris-bootstrap] Slack Bot token (xoxb-...):
-[iris-bootstrap] Add GitHub token for repo access? [Y/n]
-[iris-bootstrap] Set up email sending (Resend.com)? [y/N]
-[iris-bootstrap] Set up public domain? [y/N]
-
-[iris-bootstrap] Key Vault name [iris-kv-myhostname]:
-[iris-bootstrap] Resource group for Key Vault [iris-rg]:
-[iris-bootstrap] Terraform state storage account name (lowercase + numbers, max 24 chars) [iristfstatemyhostname]:
-[iris-bootstrap] Git author email for Iris commits [iris@example.com]:
-
-[iris-bootstrap] ── Key Vault setup ──
-(automated: creates Key Vault iris-kv-myhostname, seeds all secrets)
-
-[iris-bootstrap] ── Workspace ──
-(automated: writes /iris/.env)
-
-[iris-bootstrap] ── Building iris-runtime ──
-(automated: npm install + npm run build + docker build + rootfs.ext4 — ~2 minutes)
-
-[iris-bootstrap] ── Installing systemd service ──
-(automated: installs iris.service)
-
-[iris-bootstrap] ── Provisioning Firecracker sandbox VM ──
-(automated: creating Terraform state storage iristfstatemyhostname)
-(automated: terraform init with Azure backend)
-(automated: terraform apply — provisions iris-fc-public-sandbox.service)
-
-[iris-bootstrap] ── Firecracker health check ──
-Waiting for VM at http://172.20.1.2:8080/health (up to 20s)...
-✓ VM is healthy (5s)
-
-[iris-bootstrap] ── Switching Iris to Firecracker sandbox ──
-(automated: writes drop-in, daemon-reload, restarts iris)
-
-[iris-bootstrap] ── Done ──
-  ✓ Iris is running!
-  Firecracker: iris-fc-public-sandbox → 172.20.1.2
-  Sandbox:     --sandbox=firecracker:172.20.1.2
-  Key Vault:   iris-kv-myhostname
-  Terraform:   iris-tfstate-rg / iristfstatemyhostname
-  VM logs:     journalctl -u iris-fc-public-sandbox -f
-  Test:        @iris run: uname -a
-```
-
----
-
-## Telegram Setup
-
-Iris supports Telegram natively. The bot is private by design — it ignores all messages until you claim it with a one-time token.
-
----
-
-**Step 1 — Create a bot via @BotFather**
-
-1. Open Telegram and message `@BotFather`
-2. Send `/newbot`
-3. Enter a display name (e.g. `Iris`)
-4. Enter a username ending in `bot` (e.g. `iris_mybot`)
-5. Copy the token BotFather gives you — looks like `7123456789:AAFxyz...`
-
----
-
-**Step 2 — Add the token**
-
-During bootstrap you will be asked:
-```
-[iris-bootstrap] Set up Telegram integration? [Y/n]
-[iris-bootstrap] Telegram Bot Token: ****
-```
-Bootstrap writes it to `/iris/.env` automatically.
-
-To add it manually after bootstrap:
-```bash
-echo "TELEGRAM_BOT_TOKEN=your-token-here" >> /iris/.env
-sudo systemctl restart iris
-```
-
----
-
-**Step 3 — Claim the bot**
-
-On first startup, Iris prints a one-time claim token to the logs:
-
-```bash
-sudo tail -f /iris/iris-runtime.log
-```
-
-```
-[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:
-
-    a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
-
-[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.
-```
-
-Open Telegram, message your bot with that exact token. Bot replies:
-
-```
-✅ Bot claimed. You're all set — start chatting!
-```
-
-Claim state is saved to disk — persists across restarts.
-
----
-
-**Reclaiming** (e.g. changed Telegram account):
-
-```bash
-echo "IRIS_TELEGRAM_FORCE_RECLAIM=true" >> /iris/.env && sudo systemctl restart iris
-# send the new claim token from your new Telegram account
-# once claimed, remove the flag:
-sed -i '/IRIS_TELEGRAM_FORCE_RECLAIM/d' /iris/.env
-```
-
----
-
-**Bot commands**
-
-| Command | What it does |
-|---|---|
-| `/agents` | List your sub-agents and start a conversation with one |
-| `/status` | Show which agent you're currently talking to |
-| `/back` | Exit agent conversation, return to main Iris |
-| `/delete_agent` | Delete an agent and free its slot |
-| `/task_status` | Show scheduled and recent tasks |
-| `/reset` | Clear conversation history and stop all tasks |
-| `/compact` | Summarise context to save tokens |
-| `/stop` | Abort a currently running response |
-
----
-
-**Running Slack and Telegram simultaneously**
-
-Set all tokens in `/iris/.env` — both transports start in the same process automatically:
-```
-IRIS_SLACK_APP_TOKEN=xapp-...
-IRIS_SLACK_BOT_TOKEN=xoxb-...
-TELEGRAM_BOT_TOKEN=...
-```
-
----
-
 ## Supabase Setup
 
-Iris uses Supabase to store the agent registry, task queue, and bot claim state. Sub-agents will not work without it.
+Supabase is **required** for sub-agents and Telegram linking. Set it up before adding Telegram bots.
 
-**Step 1 — Create a project**
+### Step 1 — Create a project
 
 1. Go to [supabase.com](https://supabase.com) and create a free project
 2. From **Project Settings → API**, copy:
-   - **Project URL** → `SUPABASE_URL`
-   - **service_role** secret key → `SUPABASE_SERVICE_ROLE_KEY`
+   - **Project URL** → `https://<ref>.supabase.co`
+   - **`service_role`** secret key (not the `anon` key)
 
-**Step 2 — Add credentials to env**
+### Step 2 — Add credentials to `/iris/.env`
 
 ```bash
-echo "SUPABASE_URL=https://<your-project>.supabase.co" >> /iris/.env
-echo "SUPABASE_SERVICE_ROLE_KEY=<service-role-key>" >> /iris/.env
+echo "SUPABASE_URL=https://<ref>.supabase.co"                          >> /iris/.env
+echo "SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." >> /iris/.env
 sudo systemctl restart iris
 ```
 
-**Step 3 — Create the tables**
+### Step 3 — Run the schema
 
-In the Supabase dashboard go to **SQL Editor** and run:
+Go to **SQL Editor** in the Supabase dashboard (`/project/<ref>/sql/new`) and run this entire block:
 
 ```sql
 -- ============================================================================
--- Iris Supabase Schema
--- Run this in the Supabase SQL editor for your project.
+-- Iris Supabase Schema  —  safe to re-run (IF NOT EXISTS / exception guards)
 -- ============================================================================
 
--- ── Phase 1: Telegram claim / ownership ──────────────────────────────────────
+-- Sub-agent registry
+DO $$ BEGIN
+    CREATE TYPE agent_status AS ENUM ('running', 'stopped', 'crashed');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TABLE IF NOT EXISTS telegram_claim (
-    bot_id                   TEXT        PRIMARY KEY,
-    claimed                  BOOLEAN     NOT NULL DEFAULT false,
-    chat_id                  BIGINT,
-    pending_token            TEXT,
-    token_expires_at         TIMESTAMPTZ,
-    pending_transfer_chat_id BIGINT,
-    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-ALTER TABLE telegram_claim DISABLE ROW LEVEL SECURITY;
-
--- ── Phase 2: Agent registry ───────────────────────────────────────────────────
-
-CREATE TYPE agent_status AS ENUM ('running', 'stopped', 'crashed');
-
-CREATE TABLE IF NOT EXISTS telegram_agents (
+CREATE TABLE IF NOT EXISTS sub_agents (
     agent_id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    bot_id              TEXT         NOT NULL REFERENCES telegram_claim(bot_id) ON DELETE CASCADE,
-    chat_id             BIGINT       NOT NULL,
     name                TEXT         NOT NULL,
+    runtime             TEXT         NOT NULL DEFAULT 'docker'
+                                     CHECK (runtime IN ('docker', 'firecracker')),
     docker_container_id TEXT,
     status              agent_status NOT NULL DEFAULT 'stopped',
     skills              JSONB        NOT NULL DEFAULT '[]',
-    slot_index          SMALLINT     NOT NULL CHECK (slot_index BETWEEN 1 AND 5),
+    slot_index          SMALLINT     NOT NULL CHECK (slot_index BETWEEN 1 AND 10),
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
-
-    UNIQUE (bot_id, name),
-    UNIQUE (bot_id, slot_index)
+    UNIQUE (name),
+    UNIQUE (slot_index)
 );
+ALTER TABLE sub_agents DISABLE ROW LEVEL SECURITY;
 
-ALTER TABLE telegram_agents DISABLE ROW LEVEL SECURITY;
+-- Telegram bot ↔ sub-agent links  (one-to-one, enforced by UNIQUE on both columns)
+-- linked_at = NULL  →  bot registered but not yet linked to an agent
+-- Pending claim tokens are NOT stored here — they live in a local JSON file
+CREATE TABLE IF NOT EXISTS sub_agent_telegram_links (
+    bot_id      TEXT        PRIMARY KEY,
+    agent_id    UUID        UNIQUE REFERENCES sub_agents(agent_id) ON DELETE SET NULL,
+    linked_at   TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE sub_agent_telegram_links DISABLE ROW LEVEL SECURITY;
 
--- ── Phase 4: Per-agent task queue ─────────────────────────────────────────────
-
-CREATE TYPE task_type   AS ENUM ('immediate', 'scheduled');
-CREATE TYPE task_status AS ENUM ('pending', 'running', 'done', 'failed', 'skipped');
+-- Task queue
+DO $$ BEGIN
+    CREATE TYPE task_type AS ENUM ('immediate', 'scheduled');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    CREATE TYPE task_status AS ENUM ('pending', 'running', 'done', 'failed', 'skipped');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS agent_tasks (
     task_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_id       UUID        NOT NULL REFERENCES telegram_agents(agent_id) ON DELETE CASCADE,
-    bot_id         TEXT        NOT NULL,
-    channel_id     TEXT        NOT NULL,
+    agent_id       UUID        NOT NULL REFERENCES sub_agents(agent_id) ON DELETE CASCADE,
+    bot_id         TEXT        NOT NULL,       -- Telegram bot owning the delivery channel
+    channel_id     TEXT        NOT NULL,       -- tg-{chatId}
     type           task_type   NOT NULL DEFAULT 'immediate',
     payload        TEXT        NOT NULL,
     scheduled_for  TIMESTAMPTZ,
@@ -611,59 +252,347 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     output         TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-CREATE INDEX agent_tasks_agent_idx    ON agent_tasks(agent_id, status);
-CREATE INDEX agent_tasks_schedule_idx ON agent_tasks(scheduled_for) WHERE status = 'pending';
-
+CREATE INDEX IF NOT EXISTS agent_tasks_agent_idx    ON agent_tasks(agent_id, status);
+CREATE INDEX IF NOT EXISTS agent_tasks_schedule_idx ON agent_tasks(scheduled_for) WHERE status = 'pending';
 ALTER TABLE agent_tasks DISABLE ROW LEVEL SECURITY;
 ```
 
-**Viewing your data**
+### Step 4 — Verify
 
-Go to the **Table Editor** in your Supabase dashboard:
-```
-https://supabase.com/dashboard/project/<your-project-id>/editor
+Supabase **Table Editor** should now show three tables: `sub_agents`, `sub_agent_telegram_links`, `agent_tasks`.
+
+### Migrating from old schema (telegram_claim / telegram_agents)
+
+If you previously ran an older schema that had `telegram_claim` and `telegram_agents` tables, the `CREATE TABLE IF NOT EXISTS` above will **not** have recreated `agent_tasks` (it already exists with the old FK pointing to `telegram_agents` instead of `sub_agents`). Task creation will fail with a FK violation until this is resolved.
+
+**Runtime workaround (already in place):** `sub-agent-registry.ts` contains a compatibility shim that mirrors every sub-agent into `telegram_agents` so task inserts pass the old FK check. Tasks work correctly while the shim is active.
+
+**To permanently fix** — run this in the Supabase SQL Editor, then re-run the full schema block above:
+
+```sql
+-- Drops legacy tables and stale types — then re-run the full schema block above
+DROP TABLE IF EXISTS agent_tasks     CASCADE;
+DROP TABLE IF EXISTS telegram_agents CASCADE;
+DROP TABLE IF EXISTS telegram_claim  CASCADE;
+DROP TYPE  IF EXISTS agent_status    CASCADE;
+DROP TYPE  IF EXISTS task_type       CASCADE;
+DROP TYPE  IF EXISTS task_status     CASCADE;
 ```
 
-| Table | Contents |
-|---|---|
-| `telegram_claim` | Bot ownership / claim state |
-| `telegram_agents` | Provisioned sub-agent records (name, slot, skills) |
-| `agent_tasks` | Task queue — what agents have been asked to do |
+After running the migration, remove the `upsertCompatRow` / `deleteCompatRow` shim from `src/sub-agent-registry.ts`.
 
 ---
 
-## Runtime and Models
+## Telegram Setup
 
-The runtime reads `IRIS_PROVIDER` and `IRIS_MODEL` env vars and loads provider config from `data/models.json`.
+Each Telegram bot is a **gateway**. It only responds to messages once linked to a sub-agent via a claim token.
 
-Default: `foundry-e2/Kimi-K2.5` (Azure AI Foundry).
+> Supabase must be configured first — see [Supabase Setup](#supabase-setup).
+
+### Step 1 — Create bots via @BotFather
+
+1. Message `@BotFather` on Telegram
+2. Send `/newbot`, pick a name and username (must end in `bot`)
+3. Copy the token: `7123456789:AAFxyz...`
+
+Repeat for each bot you want (max 5).
+
+### Step 2 — Add tokens to `/iris/.env`
 
 ```bash
-# CLI flags
-iris-runtime --provider foundry-e2 --model Kimi-K2.5 /iris/data
-
-# Env vars (preferred in production, set in /iris/.env)
-IRIS_PROVIDER=foundry-e2
-IRIS_MODEL=Kimi-K2.5
-IRIS_ENV=prod          # preview | prod
-IRIS_API_PORT=3001     # 0 = disabled (default)
-IRIS_TRANSPORT=slack   # slack (default) | telegram
+echo "TELEGRAM_BOT_TOKEN=7123456789:AAFxyz..."   >> /iris/.env
+echo "TELEGRAM_BOT_TOKEN_2=7987654321:BBGabc..." >> /iris/.env   # optional
+echo "TELEGRAM_BOT_TOKEN_3=7111222333:CCHdef..." >> /iris/.env   # optional
+# _4 and _5 also supported
+sudo systemctl restart iris
 ```
 
-Supported providers out of the box (configure in `data/models.json`):
+Verify bots started:
+```bash
+sudo journalctl -u iris | grep telegram
+# [telegram:123456789] Started. Send a sub-agent claim token to this bot to link it.
+```
 
-| Provider key | Backend |
+Bots are now **running but unlinked** — they ignore all messages except 64-char hex claim tokens.
+
+### Step 3 — Create a sub-agent
+
+```bash
+# Docker runtime (default — recommended)
+curl -s -X POST http://localhost:3000/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name":"MyAgent","skills":["search-web","send-email"],"runtime":"docker"}' | jq .
+
+# Firecracker runtime (KVM isolation — requires /dev/kvm)
+curl -s -X POST http://localhost:3000/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name":"MyAgent","skills":["search-web","send-email"],"runtime":"firecracker"}' | jq .
+```
+
+Response:
+```json
+{
+  "agentId": "a1b2c3d4-...",
+  "name": "MyAgent",
+  "runtime": "docker",
+  "slotIndex": 1,
+  "status": "running",
+  "skills": ["search-web", "send-email"]
+}
+```
+
+| Runtime | Bridge URL (slot 1) | Isolation | Requires |
+|---|---|---|---|
+| `docker` | `http://127.0.0.1:4201` | Docker namespace + seccomp | Docker |
+| `firecracker` | `http://172.20.1.2:4200` | KVM hardware VM boundary | `/dev/kvm` + rootfs |
+
+### Step 4 — Generate a claim token
+
+```bash
+curl -s -X POST http://localhost:3000/agents/a1b2c3d4-.../telegram/token | jq .
+```
+
+```json
+{
+  "token": "a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1",
+  "expiresIn": "10 minutes"
+}
+```
+
+Token also written to `/iris/data/telegram-link-token.txt`. Expires after 10 minutes; regenerating invalidates the previous one immediately.
+
+### Step 5 — Send the token to the bot
+
+Paste the 64-char hex token as a plain message to your Telegram bot:
+
+```
+a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1
+```
+
+Bot replies: `✅ Linked to sub-agent "MyAgent". You can start chatting now!`
+
+### Step 6 — Verify
+
+```bash
+curl -s http://localhost:3000/agents/a1b2c3d4-... | jq '{name,runtime,status,slotIndex}'
+```
+
+Send `/status` to the bot in Telegram:
+```
+🤖 MyAgent  (docker · slot 1)
+Bridge: http://127.0.0.1:4201
+Skills: search-web, send-email
+Status: running
+```
+
+### Telegram linking rules
+
+| Rule | Detail |
 |---|---|
-| `anthropic` | Claude Sonnet / Opus |
-| `openai` | GPT-4o / GPT-4o-mini |
-| `foundry-e2` | Azure AI Foundry (chat/completions) |
-| `foundry-e2-responses` | Azure AI Foundry (Responses API) |
-| `amazon-bedrock` | AWS Bedrock (Claude, Nova, Llama) |
+| One-to-one | One bot ↔ one agent. Neither side can be shared. |
+| Unlinked bot | Ignores all messages except a valid claim token. |
+| Token expiry | 10 minutes, single-use. Re-generate to get a fresh one. |
+| Unlinking via Telegram | Send `/unlink` then `/unlink confirm` |
+| Unlinking via API | `DELETE /agents/:id/telegram` |
+| Re-linking | Unlink first, then generate a new token. |
+
+### Telegram bot commands
+
+| Command | What it does |
+|---|---|
+| `/status` | Show linked agent name, runtime, bridge URL, skills, status |
+| `/skills` | List declared skills for this agent |
+| `/install <skill>` | Add a skill (confirmation dialog shown first) |
+| `/reset` | Clear conversation history |
+| `/compact` | Summarise context to save tokens |
+| `/stop` | Abort a running response |
+| `/unlink` | Disconnect this bot from its sub-agent |
+
+### Adding skills to an existing agent
+
+Skills are volume-mounted from the host — no container restart needed:
+
+```bash
+# Add skill files on the host
+cp -r my-new-skill /iris/data/skills/
+
+# Update the agent's declared skill list
+curl -s -X PATCH http://localhost:3000/agents/a1b2c3d4-.../skills \
+  -H "Content-Type: application/json" \
+  -d '{"skills": ["search-web", "send-email", "my-new-skill"]}'
+```
+
+Or from Telegram: `/install my-new-skill`
 
 ---
 
-## Resetting a VM Between Sessions
+## Sub-Agent API Reference
+
+Base URL: `http://localhost:3000`
+
+### Sub-agent CRUD
+
+| Method | Path | Body / Notes |
+|---|---|---|
+| `GET` | `/agents` | List all sub-agents |
+| `POST` | `/agents` | `{name, skills?, runtime?}` — create + provision |
+| `GET` | `/agents/:id` | Get one sub-agent |
+| `DELETE` | `/agents/:id` | Stop container/VM, unlink Telegram, delete record |
+| `PATCH` | `/agents/:id/skills` | `{skills: [...]}` — replace skill list |
+
+### Telegram linking
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/agents/:id/telegram/token` | Generate claim token (10 min TTL, single-use) |
+| `DELETE` | `/agents/:id/telegram` | Unlink bot from agent |
+
+### Full lifecycle example
+
+```bash
+# 1. Create agent
+AGENT=$(curl -s -X POST http://localhost:3000/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Research","skills":["search-web","github"],"runtime":"docker"}')
+ID=$(echo $AGENT | jq -r .agentId)
+
+# 2. Link to Telegram
+TOKEN=$(curl -s -X POST http://localhost:3000/agents/$ID/telegram/token | jq -r .token)
+echo "Send this to your bot: $TOKEN"
+
+# 3. Update skills later (no restart needed)
+curl -s -X PATCH http://localhost:3000/agents/$ID/skills \
+  -H "Content-Type: application/json" \
+  -d '{"skills":["search-web","github","send-email"]}'
+
+# 4. Unlink Telegram
+curl -s -X DELETE http://localhost:3000/agents/$ID/telegram
+
+# 5. Delete agent
+curl -s -X DELETE http://localhost:3000/agents/$ID
+```
+
+---
+
+## Setup Options
+
+| | No Firecracker | With Firecracker |
+|---|---|---|
+| **No Azure** | Option 1 — simplest | Option 3 |
+| **Azure Key Vault** | Option 2 | Option 4 — full production |
+
+```bash
+# Option 1 — no Azure, no Firecracker
+bash bootstrap.sh --setup --no-keyvault
+
+# Option 2 — Azure Key Vault, no Firecracker
+bash bootstrap.sh --setup --keyvault
+
+# Option 3 — no Azure, with Firecracker (requires /dev/kvm — use Ddsv5 on Azure)
+bash bootstrap.sh --setup --no-keyvault --firecracker
+
+# Option 4 — Azure Key Vault + Firecracker (full production)
+bash bootstrap.sh --setup --keyvault --firecracker
+```
+
+All options start from:
+```bash
+sudo mkdir -p /iris && sudo chown $USER:$USER /iris
+git clone https://github.com/irisworks/iris-core.git /iris/repo
+cd /iris/repo
+```
+
+Bootstrap installs: Docker, Node 22, GitHub CLI, Terraform, Azure CLI (if needed), Firecracker (if requested). It prompts for LLM provider key, Slack tokens, Telegram token, and optional integrations.
+
+---
+
+## Environment Variables (`/iris/.env`)
+
+```bash
+# LLM provider (required)
+IRIS_PROVIDER=anthropic
+IRIS_MODEL=claude-sonnet-4-5
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Supabase (required for sub-agents + Telegram linking)
+SUPABASE_URL=https://<ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJ...
+
+# Slack (optional)
+IRIS_SLACK_APP_TOKEN=xapp-...
+IRIS_SLACK_BOT_TOKEN=xoxb-...
+
+# Telegram (optional, up to 5 bots)
+TELEGRAM_BOT_TOKEN=7123456789:AAF...
+TELEGRAM_BOT_TOKEN_2=798765...
+TELEGRAM_BOT_TOKEN_3=711122...
+
+# API / runtime
+IRIS_API_PORT=3000
+IRIS_API_URL=http://127.0.0.1:3000
+IRIS_ENV=prod
+
+# Optional integrations
+GITHUB_TOKEN=ghp_...
+RESEND_API_KEY=re_...
+IRIS_KEY_VAULT=iris-kv-hostname     # Azure Key Vault name
+```
+
+Never commit `/iris/.env` to git.
+
+---
+
+## Secrets via Azure Key Vault
+
+```bash
+KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)
+az keyvault secret set --vault-name "$KV" --name "ANTHROPIC-API-KEY"         --value "sk-ant-..."
+az keyvault secret set --vault-name "$KV" --name "SUPABASE-URL"              --value "https://..."
+az keyvault secret set --vault-name "$KV" --name "SUPABASE-SERVICE-ROLE-KEY" --value "eyJ..."
+az keyvault secret set --vault-name "$KV" --name "SLACK-APP-TOKEN"           --value "xapp-..."
+az keyvault secret set --vault-name "$KV" --name "SLACK-BOT-TOKEN"           --value "xoxb-..."
+az keyvault secret set --vault-name "$KV" --name "TELEGRAM-BOT-TOKEN"        --value "7123..."
+az keyvault secret set --vault-name "$KV" --name "GITHUB-TOKEN"              --value "ghp_..."
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `iris.service` fails to start | Missing env vars | `journalctl -u iris` + check `/iris/.env` |
+| Telegram bot ignores all messages | Bot is unlinked | Generate a claim token and send it to the bot |
+| Claim token rejected | Expired or already used | `POST /agents/:id/telegram/token` — generates a fresh one |
+| `already_linked` on token send | Bot or agent already linked | `/unlink confirm` in Telegram or `DELETE /agents/:id/telegram` |
+| Sub-agent container not starting | `iris-runtime:local` missing | Rebuild image (see below) |
+| Firecracker VM not booting | `/dev/kvm` unavailable | Resize VM to Ddsv5 series on Azure (B/D/F series have no KVM) |
+| `firecracker: permission denied` | Not in kvm group | `sudo usermod -aG kvm $USER` then re-login |
+| Supabase errors | Missing credentials | Add `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` to `.env` |
+| Schema mismatch / task FK error | `agent_tasks` still has old FK to `telegram_agents` | Run migration block in Supabase SQL Editor then re-run schema (compat shim in code handles this in the meantime) |
+| `fatal: repository not found` | Wrong remote URL | `git remote set-url origin https://github.com/irisworks/iris-core.git` |
+
+### Rebuild the `iris-runtime:local` Docker image
+
+```bash
+cd /iris/repo/iris-runtime
+npm install && npm run build
+docker build -t iris-runtime:local .
+docker images iris-runtime:local   # verify
+```
+
+After rebuild, restart crashed sub-agent containers:
+```bash
+docker ps -a --filter name=iris-agent --format '{{.Names}}'
+docker restart <container-name>
+```
+
+For Firecracker sub-agents, also rebuild the rootfs:
+```bash
+sudo bash /iris/repo/scripts/build-firecracker-rootfs.sh
+```
+
+### Reset a Firecracker public-sandbox VM
 
 ```bash
 sudo systemctl stop iris-fc-public-sandbox
@@ -673,159 +602,25 @@ sudo cp --sparse=always \
 sudo systemctl start iris-fc-public-sandbox
 ```
 
-For dynamic pool VMs, `VmManager` calls `fc-down.sh` automatically on session reset or idle timeout — no manual steps needed.
-
----
-
-## Secrets
-
-Iris supports two secret storage backends:
-
-**Azure Key Vault** (recommended for production):
-
-```bash
-KV=$(grep ^IRIS_KEY_VAULT /iris/.env | cut -d= -f2)   # set by bootstrap --setup
-az keyvault secret set --vault-name "$KV" --name "FOUNDRY-E2-KEY"   --value "<key>"
-az keyvault secret set --vault-name "$KV" --name "SLACK-APP-TOKEN"  --value "xapp-..."
-az keyvault secret set --vault-name "$KV" --name "SLACK-BOT-TOKEN"  --value "xoxb-..."
-az keyvault secret set --vault-name "$KV" --name "GITHUB-TOKEN"     --value "ghp_..."
-```
-
-**`/iris/.env`** (simpler, no Azure required):
-
-Run `bash bootstrap.sh --setup --no-keyvault` and the script will prompt for all values and write `/iris/.env` (chmod 600). Never commit this file.
-
-Optional secrets (all providers):
-
-- `ANTHROPIC-API-KEY` / `OPENAI-API-KEY` / `RESEND-API-KEY`
-- `TELEGRAM-BOT-TOKEN` — required when `IRIS_TRANSPORT=telegram`
-
----
-
-## Repository Layout
-
-```
-irisflow/
-├── bootstrap.sh                    # rebuild Iris on a fresh VM
-├── CLAUDE.md                       # repo-level writing rules
-├── CONSTITUTION.md                 # operator rules — injected into every prompt
-├── MEMORY.md                       # Iris's mutable global memory
-├── README.md
-├── data/
-│   └── models.json.template        # template — bootstrap generates models.json from this
-├── iris-runtime/                   # @iris-core/runtime — fork of pi-mom
-│   └── src/
-│       ├── main.ts                 # --provider, --model, --sandbox, --transport flags
-│       ├── agent.ts                # configurable model, constitution loading
-│       ├── slack.ts                # Slack Socket Mode transport
-│       ├── telegram.ts             # Telegram Bot API transport (long polling)
-│       ├── sandbox.ts              # HostExecutor, DockerExecutor, FirecrackerExecutor, pool
-│       ├── vm-manager.ts           # VmManager — on-demand Firecracker pool
-│       ├── api.ts                  # internal HTTP API stub
-│       └── bridge.ts               # sub-agent bridge
-├── scripts/
-│   ├── fc-up.sh                    # boot a Firecracker microVM for a given slot
-│   ├── fc-down.sh                  # kill VM, remove tap, clean state
-│   ├── build-firecracker-rootfs.sh # build base rootfs from Docker image
-│   └── iris-exec-server.py         # HTTP exec server baked into the rootfs
-├── skills/
-│   ├── azure/
-│   ├── firecracker-agent/          # manage microVM lifecycle
-│   ├── get-secret/
-│   ├── github/
-│   ├── promote-skill/
-│   ├── search-web/
-│   ├── self-extend/
-│   ├── self-heal/
-│   ├── send-email/
-│   ├── serve-public/
-│   ├── spawn-agent/
-│   ├── store-file/
-│   ├── terraform/
-│   ├── transcribe-audio/
-│   └── watchdog/
-├── agents/
-│   ├── newsletter/                 # newsletter sub-agent scaffold
-│   └── public-sandbox/             # Firecracker-isolated public sub-agent
-└── terraform/
-    ├── agents.tf                   # sub-agent definitions (uncomment to provision)
-    ├── backend.tf
-    ├── main.tf
-    ├── providers.tf
-    ├── variables.tf
-    ├── outputs.tf
-    └── modules/
-        ├── agent/                  # Docker sub-agent module (legacy)
-        └── firecracker-agent/      # Firecracker microVM module
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `iris.service` fails to start | Missing env vars | Check `/iris/.env` and `journalctl -u iris` |
-| `/dev/kvm` not found | Wrong Azure VM series | Resize to Ddsv5 series (e.g. `Standard_D4ds_v5`) — B-series, D-series, F-series do not support KVM |
-| `firecracker: permission denied` | Not in kvm group | `sudo usermod -aG kvm $USER` then log out and SSH back in |
-| VM boots but `/health` times out | exec-server not started | Check `journalctl -u iris-fc-<name>` |
-| Jailer fails to chroot | `irisjailer` user missing | `sudo groupadd -g 10000 irisjailer 2>/dev/null; sudo useradd -u 10000 -g 10000 -r -s /usr/sbin/nologin irisjailer` |
-| rootfs missing | Build script not run | `sudo bash scripts/build-firecracker-rootfs.sh` |
-| Sub-agents fail to spawn / `iris-runtime:local` image missing | Image was deleted or never built | Rebuild the image (see below) |
-| `fatal: repository not found` during bootstrap | Upstream remote points to a private repo you don't have access to | Update with: `git remote set-url upstream https://github.com/irisworks/irisflow.git && git fetch upstream` |
-
-### Emergency: rebuild the `iris-runtime:local` Docker image
-
-If sub-agents fail to spawn because the `iris-runtime:local` image is missing or corrupted, rebuild it with:
-
-```bash
-cd /iris/repo/iris-runtime
-npm install          # restore node_modules if needed
-npm run build        # compile TypeScript → dist/
-docker build -t iris-runtime:local .
-```
-
-Expected output: `Successfully tagged iris-runtime:local` (takes ~2–3 minutes on first build, faster on rebuild due to layer cache).
-
-Verify the image exists afterward:
-
-```bash
-docker images iris-runtime:local
-```
-
-If you also use Firecracker sub-agents, rebuild the rootfs after the image is ready:
-
-```bash
-sudo bash /iris/repo/scripts/build-firecracker-rootfs.sh
-```
-
----
-
-## Company-Specific Extensions
-
-```bash
-gh repo create iris-yourcompany --private
-cd iris-yourcompany
-git submodule add https://github.com/irisworks/irisflow.git core
-mkdir -p overlay/{agents,skills,data}
-```
-
-Add company-specific agents, skills, and a `bootstrap.sh` wrapper that sets `REPO_DIR` before calling `core/bootstrap.sh`.
-
 ---
 
 ## Operational Notes
 
-- `SKILL.md` edits hot-reload through pi-mom without a service restart.
-- The live VM workspace uses `/iris/data` with symlinks back to the repo for hot reload.
-- GitHub is the durable source of truth. The VM is disposable — a full rebuild from this README should produce an identical running system.
-- Do not store secrets in the repo, `.env` committed to git, or Terraform state.
+- **Skills hot-reload**: drop a skill directory into `/iris/data/skills/` on the host — all running sub-agent containers see it immediately (volume-mounted `:ro`). No restart needed.
+- **Sub-agent naming**: Docker containers are `iris-agent-{agentId}`; Firecracker VMs are `iris-fc-{agentId}`. Bridge ports: Docker uses `127.0.0.1:420{1..10}`; Firecracker uses `172.20.{slot}.2:4200`.
+- **Watchdog**: checks Docker via `docker inspect`, Firecracker via exec-server `/health`. On crash, notifies the linked Telegram bot. On recovery, marks missed scheduled tasks as skipped.
+- **Telegram state**: active links in Supabase (survive reboots). Pending claim tokens in `/iris/data/telegram-link-tokens.json` (expire after 10 min regardless).
+- **Agent creation restriction**: enforced at three independent levels — (1) `spawn-agent` skill filtered out of AgentRunner for all `BRIDGE-*`, `tg-*`, and `SESSION-*` channels; (2) `spawn-agent` skill directory not accessible to sub-agent containers in Firecracker VMs; (3) MEMORY.md constitution explicitly forbids it. No user instruction can override any of these.
+- **VM is disposable**: GitHub is the source of truth. A full rebuild from this README produces an identical running system.
+- **Never commit** secrets to git (`.env`, `models.json` with keys, etc.).
+
+---
 
 ## Source Documents
 
-If resuming work, read these first:
+Read these before making changes:
 
-- [CLAUDE.md](CLAUDE.md)
-- [CONSTITUTION.md](CONSTITUTION.md)
-- [MEMORY.md](MEMORY.md)
-
+- [CLAUDE.md](CLAUDE.md) — code writing rules and conventions
+- [CONSTITUTION.md](CONSTITUTION.md) — operator rules injected into every prompt
+- [MEMORY.md](MEMORY.md) — Iris's current global memory
+- [supabase/schema.sql](supabase/schema.sql) — canonical database schema

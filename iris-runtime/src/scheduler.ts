@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import * as log from "./log.js";
-import { listAgents } from "./agent-registry.js";
+import { listSubAgents } from "./sub-agent-registry.js";
 import {
 	getAllPendingScheduled,
 	getMissedTasks,
@@ -16,8 +16,10 @@ import {
 // ============================================================================
 
 export interface SchedulerCallbacks {
-	/** Called when an agent has missed tasks. Send a message to the bot owner. */
+	/** Called when an agent has missed tasks — delivers the notification. */
 	notifyOwner: (botId: string, channelId: string, text: string) => void;
+	/** Look up the Telegram bot linked to a sub-agent. Returns null if unlinked. */
+	getBotForAgent?: (agentId: string) => Promise<string | null>;
 	/** Working directory for writing event files. */
 	workingDir: string;
 }
@@ -102,39 +104,38 @@ export function cancelScheduledTask(taskId: string): void {
 
 /**
  * Start the scheduler:
- * 1. For every agent registered in the bot's registry, check for missed tasks
- *    (status=pending, scheduled_for < now()). Mark them skipped and notify owner.
+ * 1. For every registered sub-agent, check for missed tasks (status=pending,
+ *    scheduled_for < now()). Mark them skipped and notify the linked bot if any.
  * 2. Load all future pending scheduled tasks and register croner jobs for them.
  *
  * Call this once after all Telegram bots have started.
  */
-export async function startScheduler(
-	botIds: string[],
-	callbacks: SchedulerCallbacks,
-): Promise<void> {
-	if (!botIds.length) return;
-	log.logInfo(`[scheduler] Starting for bots: ${botIds.join(", ")}`);
+export async function startScheduler(callbacks: SchedulerCallbacks): Promise<void> {
+	log.logInfo("[scheduler] Starting");
+
+	const agents = await listSubAgents();
 
 	// ── Step 1: Handle missed tasks ──────────────────────────────────────────
-	for (const botId of botIds) {
-		const agents = await listAgents(botId);
-		for (const agent of agents) {
-			const missed = await getMissedTasks(agent.agentId);
-			if (missed.length === 0) continue;
+	for (const agent of agents) {
+		const missed = await getMissedTasks(agent.agentId);
+		if (missed.length === 0) continue;
 
-			// Mark all missed tasks as skipped
-			await Promise.all(missed.map((t) => updateTaskStatus(t.taskId, "skipped")));
+		await Promise.all(missed.map((t) => updateTaskStatus(t.taskId, "skipped")));
+		log.logInfo(`[scheduler] Marked ${missed.length} missed tasks skipped for agent ${agent.name}`);
 
-			// Notify the owner via their Telegram channel
-			const ownerChannelId = `tg-${agent.chatId}`;
-			const noun = missed.length === 1 ? "task" : "tasks";
-			callbacks.notifyOwner(
-				botId,
-				ownerChannelId,
-				`⚠️ <b>${agent.name}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
-				missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n"),
-			);
-			log.logInfo(`[scheduler] Marked ${missed.length} missed tasks skipped for agent ${agent.name}`);
+		// Notify via Telegram if the agent is linked to a bot
+		if (callbacks.getBotForAgent) {
+			const botId = await callbacks.getBotForAgent(agent.agentId);
+			if (botId) {
+				const channelId = missed[0].channelId;
+				const noun = missed.length === 1 ? "task" : "tasks";
+				callbacks.notifyOwner(
+					botId,
+					channelId,
+					`⚠️ <b>${agent.name}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
+					missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n"),
+				);
+			}
 		}
 	}
 
@@ -142,12 +143,7 @@ export async function startScheduler(
 	const futureTasks = await getAllPendingScheduled();
 	log.logInfo(`[scheduler] Loading ${futureTasks.length} pending scheduled task(s)`);
 
-	// Build agent name lookup (agentId → name) from all agents
-	const agentNameMap = new Map<string, string>();
-	for (const botId of botIds) {
-		const agents = await listAgents(botId);
-		for (const a of agents) agentNameMap.set(a.agentId, a.name);
-	}
+	const agentNameMap = new Map(agents.map((a) => [a.agentId, a.name]));
 
 	for (const task of futureTasks) {
 		const agentName = agentNameMap.get(task.agentId) ?? "Agent";
