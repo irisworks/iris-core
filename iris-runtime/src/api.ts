@@ -19,6 +19,8 @@
  *   PATCH  /agents/:id/skills             — add/remove skills
  *   POST   /agents/:id/telegram/token     — generate Telegram link token
  *   DELETE /agents/:id/telegram           — unlink Telegram from sub-agent
+ *   POST   /agents/:id/slack/token        — generate Slack link token
+ *   DELETE /agents/:id/slack              — unlink Slack from sub-agent
  *   POST /internal/write-event           — write an event file (immediate/one-shot/periodic/interval)
  *                                          body: { name, type, channelId, text, ...type-specific fields }
  *
@@ -47,8 +49,15 @@ import {
 import { getSubAgent, listSubAgents, createSubAgent, deleteSubAgent, updateSubAgentStatus } from "./sub-agent-registry.js";
 import { createTask, getTask, updateTaskStatus, type TaskStatus } from "./task-queue.js";
 import { scheduleNewTask, type SchedulerCallbacks } from "./scheduler.js";
-import { deprovisionAgent, deprovisionFirecrackerAgent, getAvailableSkills, provisionAgent, registerAgentBridge, unregisterAgentBridge } from "./agent-provision.js";
+import { addSkillToAgent, buildMemoryContentForAgent, deprovisionAgent, deprovisionFirecrackerAgent, getAvailableSkills, provisionAgent, registerAgentBridge, removeSkillFromAgent, unregisterAgentBridge } from "./agent-provision.js";
 import type { TelegramLinkManager } from "./telegram-link.js";
+import type { SlackLinkManager } from "./slack-link.js";
+import { handleV2Request } from "./routes/v2-router.js";
+import { SessionManager } from "./managers/session.js";
+import { MemoryManager } from "./managers/memory.js";
+import { SkillManager } from "./managers/skill.js";
+import { ThreadManager } from "./managers/thread.js";
+import { IntegrationManager } from "./managers/integration.js";
 
 // Minimal interface so api.ts doesn't import SlackBot directly (avoids circular deps)
 interface SessionInjector {
@@ -90,12 +99,40 @@ export function startApiServer(
 	getBot: () => SessionInjector | null = () => null,
 	telegramLinkManager: TelegramLinkManager | null = null,
 	schedulerCallbacks: SchedulerCallbacks | null = null,
+	slackLinkManager: SlackLinkManager | null = null,
 ): void {
 	const eventsDir = join(workingDir, "events");
+
+	// ── v2 managers (instantiated once, shared across all /v2/* requests) ───
+	const sessionMgr     = new SessionManager(workingDir);
+	const memoryMgr      = new MemoryManager(workingDir);
+	const skillMgr       = new SkillManager();
+	const threadMgr      = new ThreadManager(workingDir);
+	const integrationMgr = new IntegrationManager(telegramLinkManager, slackLinkManager);
+
+	const v2BaseDeps = {
+		workingDir,
+		getBot,
+		telegramLinkManager,
+		slackLinkManager,
+		schedulerCallbacks,
+		channelStates,
+		sessionManager:     sessionMgr,
+		memoryManager:      memoryMgr,
+		skillManager:       skillMgr,
+		threadManager:      threadMgr,
+		integrationManager: integrationMgr,
+	};
 
 	const server = createServer(async (req, res) => {
 		const url = req.url ?? "/";
 		const method = req.method ?? "GET";
+
+		// ── /v2/* — Gateway-compatible routes (additive, does not affect v1) ──
+		if (url.startsWith("/v2")) {
+			const handled = await handleV2Request(method, url, req, res, v2BaseDeps);
+			if (handled) return;
+		}
 		// URL parts without leading slash, e.g. ["sessions", "uuid", "message"]
 		const urlParts = url.replace(/^\//, "").split("/").map((p) => decodeURIComponent(p));
 
@@ -595,8 +632,9 @@ export function startApiServer(
 				const agent = await getSubAgent(urlParts[1]);
 				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
 
-				// Unlink Telegram if linked
+				// Unlink Telegram and Slack if linked
 				if (telegramLinkManager) await telegramLinkManager.unlinkAgent(agent.agentId);
+				if (slackLinkManager) await slackLinkManager.unlinkAgent(agent.agentId);
 
 				if (agent.runtime === "firecracker") {
 					await deprovisionFirecrackerAgent(agent.slotIndex);
@@ -631,7 +669,6 @@ export function startApiServer(
 					json(res, 400, { error: `Unknown skills: ${invalidSkills.join(", ")}. Available: ${available.join(", ")}` }); return;
 				}
 
-				// Skills are mounted via volume — just update the registry record
 				let updatedSkills = [...agent.skills];
 				if (body.add) updatedSkills = [...new Set([...updatedSkills, ...body.add])];
 				if (body.remove) updatedSkills = updatedSkills.filter(s => !(body.remove ?? []).includes(s));
@@ -642,9 +679,28 @@ export function startApiServer(
 					await db.from("sub_agents").update({ skills: updatedSkills, updated_at: new Date().toISOString() }).eq("agent_id", agent.agentId);
 				}
 
-				// Invalidate Telegram link cache so next message sees updated skill list
+				// Sync skills to the agent's workspace dir so the container sees them immediately
+				const agentWorkspaceDir = `${process.env.IRIS_DIR ?? "/iris"}/data/agents/${agent.agentId}`;
+				const globalSkillsDir   = process.env.IRIS_SKILLS_DIR ?? `${process.env.IRIS_DIR ?? "/iris"}/data/skills`;
+				for (const skill of (body.add ?? [])) {
+					try { await addSkillToAgent(agentWorkspaceDir, skill, globalSkillsDir); } catch (e) { log.logWarning(`[api] addSkillToAgent ${skill}`, String(e)); }
+				}
+				for (const skill of (body.remove ?? [])) {
+					try { removeSkillFromAgent(agentWorkspaceDir, skill); } catch (e) { log.logWarning(`[api] removeSkillFromAgent ${skill}`, String(e)); }
+				}
+
+				// Rebuild MEMORY.md so the agent's authorization rules reflect the new skill list
+				try {
+					const memoryPath = join(agentWorkspaceDir, "MEMORY.md");
+					writeFileSync(memoryPath, buildMemoryContentForAgent(agent.name, updatedSkills, agent.runtime));
+				} catch (e) { log.logWarning("[api] MEMORY.md rebuild failed", String(e)); }
+
+				// Invalidate Telegram and Slack link caches so next message sees updated skill list
 				if (telegramLinkManager) telegramLinkManager.invalidateCache(
 					(await telegramLinkManager.getBotForAgent(agent.agentId)) ?? ""
+				);
+				if (slackLinkManager) slackLinkManager.invalidateCache(
+					(await slackLinkManager.getWorkspaceForAgent(agent.agentId)) ?? ""
 				);
 
 				log.logInfo(`[api] PATCH /agents/${agent.agentId}/skills → ${updatedSkills.join(", ")}`);
@@ -689,6 +745,42 @@ export function startApiServer(
 
 				const ok = await telegramLinkManager.unlinkAgent(agent.agentId);
 				log.logInfo(`[api] DELETE /agents/${agent.agentId}/telegram → ${ok ? "unlinked" : "failed"}`);
+				json(res, 200, { ok, agentId: agent.agentId });
+				return;
+			}
+
+			// ── POST /agents/:id/slack/token ──────────────────────────────────────────
+			// Generate a claim token for connecting a Slack workspace to this sub-agent.
+			// Returns the token the user must send to the Slack bot as a direct message.
+			if (method === "POST" && urlParts[0] === "agents" && urlParts[2] === "slack" && urlParts[3] === "token") {
+				if (!slackLinkManager) { json(res, 503, { error: "Slack link manager not initialised" }); return; }
+				const agent = await getSubAgent(urlParts[1]);
+				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
+
+				try {
+					const token = await slackLinkManager.generateToken(agent.agentId);
+					log.logInfo(`[api] POST /agents/${agent.agentId}/slack/token — claim token issued`);
+					json(res, 200, {
+						token,
+						agentName: agent.name,
+						expiresInSeconds: 600,
+						instructions: `Send this token as a direct message to your Slack bot to link the workspace to "${agent.name}". Token expires in 10 minutes.`,
+					});
+				} catch (err) {
+					json(res, 409, { error: String(err) });
+				}
+				return;
+			}
+
+			// ── DELETE /agents/:id/slack ──────────────────────────────────────────────
+			// Disconnect the Slack workspace from this sub-agent.
+			if (method === "DELETE" && urlParts[0] === "agents" && urlParts[2] === "slack" && !urlParts[3]) {
+				if (!slackLinkManager) { json(res, 503, { error: "Slack link manager not initialised" }); return; }
+				const agent = await getSubAgent(urlParts[1]);
+				if (!agent) { json(res, 404, { error: "Agent not found" }); return; }
+
+				const ok = await slackLinkManager.unlinkAgent(agent.agentId);
+				log.logInfo(`[api] DELETE /agents/${agent.agentId}/slack → ${ok ? "unlinked" : "failed"}`);
 				json(res, 200, { ok, agentId: agent.agentId });
 				return;
 			}

@@ -5,6 +5,7 @@ import { TelegramBotRegistry } from "./telegram-bot-registry.js";
 import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
 import { callAgentBridge } from "./bridge.js";
+import { readHistory, appendHistory, makeUserEntry, makeBotEntry } from "./azure-history.js";
 import { type TelegramLinkManager } from "./telegram-link.js";
 import { getSubAgent } from "./sub-agent-registry.js";
 import { bridgePortForSlot, getAvailableSkills, provisionAgent, registerAgentBridge } from "./agent-provision.js";
@@ -952,7 +953,7 @@ export class TelegramBot {
 		};
 
 		const result = queue.enqueueUser(
-			() => this.routeUserMessageToAgent(event, linkedAgent.agentName, linkedAgent.bridgeUrl),
+			() => this.routeUserMessageToAgent(event, linkedAgent.agentName, linkedAgent.bridgeUrl, linkedAgent.agentId),
 			text,
 		);
 
@@ -970,13 +971,23 @@ export class TelegramBot {
 		event: TelegramEvent,
 		agentName: string,
 		bridgeUrl: string,
+		agentId?: string,
 	): Promise<void> {
 		log.logInfo(`[telegram:${this.botId}] Routing to agent "${agentName}" (${event.channel}): ${event.text.substring(0, 60)}`);
+
+		// Read conversation history from Azure Blob Storage so the sub-agent
+		// has full context for this Telegram channel across all previous exchanges.
+		const history = agentId
+			? await readHistory(agentId, "telegram", event.channel)
+			: [];
 
 		const typingId = await this.postMessage(event.channel, `_Thinking..._`).catch(() => null);
 
 		try {
-			const response = await callAgentBridge(bridgeUrl, event.text, event.user ?? "user");
+			const response = await callAgentBridge(
+				bridgeUrl, event.text, event.user ?? "user",
+				310_000, event.channel, history,
+			);
 
 			// Strip "[AgentName]:" prefix agents may prepend
 			const stripped = response.startsWith(`[${agentName}]`)
@@ -990,6 +1001,14 @@ export class TelegramBot {
 			}
 
 			this.logBotResponse(event.channel, stripped, typingId ?? String(Date.now()));
+
+			// Persist this exchange to Azure Blob Storage (non-blocking)
+			if (agentId) {
+				void appendHistory(agentId, "telegram", event.channel, [
+					makeUserEntry(event.user ?? "user", event.text),
+					makeBotEntry(stripped),
+				]);
+			}
 
 			// Resolve SESSION- requests
 			if (event.channel.startsWith("SESSION-")) {
@@ -1151,7 +1170,7 @@ export class TelegramBot {
 				if (linked) {
 					const event: TelegramEvent = { type: "message", channel: channelId, ts: String(Date.now()), user: "user", text: state.originalText, chatId: 0, attachments: [] };
 					const queue = this.getQueue(channelId);
-					queue.enqueueUser(() => this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl), state.originalText);
+					queue.enqueueUser(() => this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl, linked.agentId), state.originalText);
 				}
 			}
 		} catch (err) {
@@ -1177,7 +1196,7 @@ export class TelegramBot {
 			if (!linked) { await this.postMessage(channelId, "⚠️ No linked agent found."); return; }
 			await this.postMessage(channelId, "_Continuing with alternative workflow..._");
 			const event: TelegramEvent = { type: "message", channel: channelId, ts: String(Date.now()), user: "user", text: state.originalText, chatId: 0, attachments: [] };
-			await this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl);
+			await this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl, linked.agentId);
 		} else {
 			await this.postMessage(channelId, "Cancelled.");
 		}

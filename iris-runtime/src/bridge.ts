@@ -22,7 +22,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import * as log from "./log.js";
@@ -39,8 +39,12 @@ interface PendingRequest {
 
 const pendingRequests = new Map<string, PendingRequest>();
 
+// Maps a stable channelId (e.g. "D0B8NQV8M9U", "tg-8814933356") → requestId.
+// Used when the bridge routes through a persistent channel instead of BRIDGE-*.
+const channelToPendingRequest = new Map<string, string>();
+
 /**
- * Called by slack.ts when a message is posted to a BRIDGE-{requestId} channel.
+ * Called when a message is posted to a BRIDGE-{requestId} channel.
  * Resolves the waiting HTTP request.
  */
 export function resolveBridgeRequest(requestId: string, text: string): boolean {
@@ -50,6 +54,18 @@ export function resolveBridgeRequest(requestId: string, text: string): boolean {
 	pendingRequests.delete(requestId);
 	pending.resolve(text);
 	return true;
+}
+
+/**
+ * Resolve a bridge request by stable channelId.
+ * Called by the sub-agent stub when postMessage/finalizeMessage fires on a
+ * persistent Slack or Telegram channel that has a waiting bridge request.
+ */
+export function resolveBridgeByChannel(channelId: string, text: string): boolean {
+	const requestId = channelToPendingRequest.get(channelId);
+	if (!requestId) return false;
+	channelToPendingRequest.delete(channelId);
+	return resolveBridgeRequest(requestId, text);
 }
 
 // ============================================================================
@@ -84,7 +100,13 @@ export function startBridgeServer(port: number, workingDir: string): void {
 			return;
 		}
 
-		let body: { text?: string; user?: string; requestId?: string };
+		let body: {
+			text?: string;
+			user?: string;
+			requestId?: string;
+			channelId?: string;
+			history?: Array<{ date: string; ts: string; user: string; text: string; attachments: never[]; isBot: boolean }>;
+		};
 		try {
 			body = JSON.parse(await readBody(req));
 		} catch {
@@ -92,23 +114,49 @@ export function startBridgeServer(port: number, workingDir: string): void {
 			return;
 		}
 
-		const { text, user = "iris", requestId = randomBytes(8).toString("hex") } = body;
+		const {
+			text,
+			user = "iris",
+			requestId = randomBytes(8).toString("hex"),
+			channelId: persistentChannelId,
+			history = [],
+		} = body;
 		if (!text) {
 			jsonResponse(res, 400, { error: "text is required" });
 			return;
 		}
 
-		const channelId = `BRIDGE-${requestId}`;
-		log.logInfo(`[bridge] Received request ${requestId}: ${text.substring(0, 60)}`);
+		// Use persistent channel if provided, else fall back to ephemeral BRIDGE-* channel
+		const channelId = persistentChannelId ?? `BRIDGE-${requestId}`;
+		log.logInfo(`[bridge] Received request ${requestId} on channel ${channelId}: ${text.substring(0, 60)}`);
 
-		// Register pending request BEFORE writing event file to avoid race
+		// Seed the channel's log.jsonl with history entries BEFORE processing so
+		// the AgentRunner has full conversation context when it loads the channel.
+		if (persistentChannelId && history.length > 0) {
+			try {
+				// Resolve the channel dir the same way resolveChannelDir() in store.ts does
+				const channelSubdir = persistentChannelId.startsWith("tg-") ? "telegram" : "slack";
+				const channelDir = join(workingDir, channelSubdir, persistentChannelId);
+				if (!existsSync(channelDir)) mkdirSync(channelDir, { recursive: true });
+				const logPath = join(channelDir, "log.jsonl");
+				// Write the full history (overwrite so we always have a clean, consistent log)
+				writeFileSync(logPath, history.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf-8");
+			} catch (err) {
+				log.logWarning("[bridge] Failed to seed history log", err instanceof Error ? err.message : String(err));
+			}
+		}
+
+		// Register pending request BEFORE writing event file to avoid race.
+		// For persistent channels also store channelId → requestId mapping.
 		const responsePromise = new Promise<string>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				pendingRequests.delete(requestId);
+				if (persistentChannelId) channelToPendingRequest.delete(persistentChannelId);
 				reject(new Error(`Bridge request ${requestId} timed out after ${BRIDGE_TIMEOUT_MS / 1000}s`));
 			}, BRIDGE_TIMEOUT_MS);
 			pendingRequests.set(requestId, { resolve, reject, timer });
 		});
+		if (persistentChannelId) channelToPendingRequest.set(persistentChannelId, requestId);
 
 		// Write event file to trigger agent processing
 		const eventsDir = join(workingDir, "events");
@@ -122,6 +170,7 @@ export function startBridgeServer(port: number, workingDir: string): void {
 			}));
 		} catch (err) {
 			pendingRequests.delete(requestId);
+			if (persistentChannelId) channelToPendingRequest.delete(persistentChannelId);
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] Failed to write event file: ${msg}`);
 			jsonResponse(res, 500, { error: `Failed to write event: ${msg}` });
@@ -177,6 +226,11 @@ export function loadAgentRegistry(workingDir: string): AgentRegistry {
 
 /**
  * Forward a message to a sub-agent via its bridge server.
+ * channelId: stable platform channel (e.g. "D0B8NQV8M9U", "tg-8814933356").
+ *            When provided the sub-agent processes in that persistent channel
+ *            so it accumulates conversation history across requests.
+ * history:   prior log entries read from Azure Blob; injected into the
+ *            channel's log.jsonl before the sub-agent runs.
  * Returns the agent's response text, or throws on timeout/error.
  */
 export async function callAgentBridge(
@@ -184,6 +238,8 @@ export async function callAgentBridge(
 	text: string,
 	user: string,
 	timeoutMs = 310_000, // slightly above server-side 300s so server error reaches caller before abort
+	channelId?: string,
+	history?: object[],
 ): Promise<string> {
 	const requestId = randomBytes(8).toString("hex");
 
@@ -194,7 +250,7 @@ export async function callAgentBridge(
 		const response = await fetch(`${bridgeUrl}/bridge`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ text, user, requestId }),
+			body: JSON.stringify({ text, user, requestId, channelId, history }),
 			signal: controller.signal,
 		});
 

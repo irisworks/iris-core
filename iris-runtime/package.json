@@ -20,6 +20,7 @@
 	},
 	"dependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.16",
+		"@azure/storage-blob": "^12.32.0",
 		"@mariozechner/pi-agent-core": "0.66.1",
 		"@mariozechner/pi-ai": "0.66.1",
 		"@mariozechner/pi-coding-agent": "0.66.1",

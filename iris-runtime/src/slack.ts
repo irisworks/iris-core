@@ -5,18 +5,43 @@ import { basename, join } from "path";
 import * as log from "./log.js";
 import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
 import { resolveChannelDir, type Attachment, type ChannelStore } from "./store.js";
+import { callAgentBridge } from "./bridge.js";
+import { getAvailableSkills } from "./agent-provision.js";
+import type { SlackLinkManager, LinkedAgentInfo } from "./slack-link.js";
+import { readHistory, appendHistory, makeUserEntry, makeBotEntry } from "./azure-history.js";
 
-// Slack has a 40,000 character limit for message text
-const SLACK_MAX_LENGTH = 40000;
+// Slack's effective per-message limit. Long responses are split into
+// continuation messages rather than truncated (see splitForSlack).
+const SLACK_MAX_LENGTH = 3800;
 
 /**
- * Truncate text to fit within Slack's message limit.
- * If truncated, adds "\n\n[message truncated]" at the end.
+ * Truncate text to fit within Slack's per-message limit.
+ * Used for short system messages (status, errors) that should never split.
  */
 function truncateForSlack(text: string): string {
 	if (text.length <= SLACK_MAX_LENGTH) return text;
 	const suffix = "\n\n[message truncated]";
 	return text.slice(0, SLACK_MAX_LENGTH - suffix.length) + suffix;
+}
+
+/**
+ * Split a long response into sequential Slack messages.
+ * Tries to break at newlines so code blocks and paragraphs stay intact.
+ * Returns an array of strings each ≤ SLACK_MAX_LENGTH chars.
+ */
+function splitForSlack(text: string): string[] {
+	if (text.length <= SLACK_MAX_LENGTH) return [text];
+	const chunks: string[] = [];
+	let remaining = text;
+	while (remaining.length > SLACK_MAX_LENGTH) {
+		// Prefer a newline boundary within the upper half of the window
+		let cut = remaining.lastIndexOf("\n", SLACK_MAX_LENGTH);
+		if (cut < SLACK_MAX_LENGTH * 0.5) cut = SLACK_MAX_LENGTH;
+		chunks.push(remaining.slice(0, cut));
+		remaining = remaining.slice(cut).replace(/^\n/, "");
+	}
+	if (remaining.length > 0) chunks.push(remaining);
+	return chunks;
 }
 
 // ============================================================================
@@ -130,6 +155,10 @@ class ChannelQueue {
 		return this.queue.length;
 	}
 
+	drain(): void {
+		this.queue = [];
+	}
+
 	private async processNext(): Promise<void> {
 		if (this.processing || this.queue.length === 0) return;
 		this.processing = true;
@@ -156,8 +185,14 @@ export class SlackBot {
 	private store: ChannelStore;
 	private botUserId: string | null = null;
 	private botId: string | null = null; // bot_id (different from user_id) — used to filter own messages in leads channels
+	private workspaceId: string | null = null; // Slack team ID — used as the workspace identifier for linking
 	private startupTs: string | null = null; // Messages older than this are just logged, not processed
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+	// Sub-agent link manager — when set, Slack routes to linked sub-agent instead of Iris
+	private linkManager: SlackLinkManager | null;
+	private irisApiUrl: string;
+	private skillsDir: string;
 
 	private users = new Map<string, SlackUser>();
 	private channels = new Map<string, SlackChannel>();
@@ -174,11 +209,21 @@ export class SlackBot {
 
 	constructor(
 		handler: IrisHandler,
-		config: { appToken: string; botToken: string; workingDir: string; store: ChannelStore },
+		config: {
+			appToken: string;
+			botToken: string;
+			workingDir: string;
+			store: ChannelStore;
+			linkManager?: SlackLinkManager | null;
+			irisApiUrl?: string;
+		},
 	) {
 		this.handler = handler;
 		this.workingDir = config.workingDir;
 		this.store = config.store;
+		this.linkManager = config.linkManager ?? null;
+		this.irisApiUrl = config.irisApiUrl ?? process.env.IRIS_API_URL ?? "http://172.18.0.1:3000";
+		this.skillsDir = process.env.IRIS_SKILLS_DIR ?? `${process.env.IRIS_DIR ?? "/iris"}/data/skills`;
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
 
@@ -289,6 +334,10 @@ export class SlackBot {
 		const auth = await this.webClient.auth.test();
 		this.botUserId = auth.user_id as string;
 		this.botId = auth.bot_id as string | null;
+		this.workspaceId = (auth.team_id as string | null) ?? null;
+		if (this.workspaceId) {
+			log.logInfo(`[slack] Workspace ID: ${this.workspaceId}${this.linkManager ? " (sub-agent link mode active)" : ""}`);
+		}
 
 		this.loadChannelModes();
 		await Promise.all([this.fetchUsers(), this.fetchChannels()]);
@@ -562,6 +611,20 @@ export class SlackBot {
 
 			// Only respond to allowed channels (if filter is configured)
 			if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) {
+				ack();
+				return;
+			}
+
+			// Sub-agent link mode — when linkManager is set, intercept before channel-mode routing.
+			// All real Slack channel messages route to the linked sub-agent (or show "not linked").
+			// Virtual channels (BRIDGE-, SESSION-, etc.) fall through to the Iris handler as always.
+			if (this.linkManager && this.workspaceId && !this.isVirtualChannel(slackEvent.channel)) {
+				const queue = this.getQueue(slackEvent.channel);
+				if (queue.size() >= 5) {
+					void this.postMessage(slackEvent.channel, "_Too many messages queued._");
+				} else {
+					queue.enqueue(() => this.dispatchEvent(slackEvent));
+				}
 				ack();
 				return;
 			}
@@ -953,6 +1016,18 @@ export class SlackBot {
 
 			// Only trigger handler for DMs
 			if (isDM) {
+				// Sub-agent link mode — route DM to linked sub-agent (or show unlinked instructions)
+				if (this.linkManager && this.workspaceId) {
+					const dmQueue = this.getQueue(e.channel);
+					if (dmQueue.size() >= 5) {
+						void this.postMessage(e.channel, "_Too many messages queued._");
+					} else {
+						dmQueue.enqueue(() => this.dispatchEvent(slackEvent));
+					}
+					ack();
+					return;
+				}
+
 				const channelMode = this.getChannelMode(e.channel);
 				// Check for stop/compact/reset commands — only allowed in "admin" mode
 				const dmCmdText = slackEvent.text.toLowerCase().trim();
@@ -993,6 +1068,255 @@ export class SlackBot {
 
 			ack();
 		});
+	}
+
+	// ==========================================================================
+	// Private — sub-agent link mode dispatch
+	// ==========================================================================
+
+	/**
+	 * Dispatched from the queue when linkManager is active.
+	 * Checks link status and routes to sub-agent or shows unlinked instructions.
+	 */
+	private async dispatchEvent(event: SlackEvent): Promise<void> {
+		if (!this.linkManager || !this.workspaceId) {
+			await this.handler.handleEvent(event, this);
+			return;
+		}
+		const linked = await this.linkManager.getLinkedAgent(this.workspaceId);
+		if (linked) {
+			await this.routeToLinkedAgent(event, linked);
+		} else {
+			await this.handleUnlinkedMessage(event);
+		}
+	}
+
+	/**
+	 * Route a message to the linked sub-agent's bridge.
+	 * Handles commands (/status, /skills, /install, /unlink, stop, reset).
+	 */
+	private async routeToLinkedAgent(event: SlackEvent, linked: LinkedAgentInfo): Promise<void> {
+		const text = event.text.trim();
+
+		// Detect commands (with or without leading slash)
+		const cmdMatch = text.match(/^\/?(status|skills|unlink|stop|reset|install(?:\s+\S+)?)$/i);
+		if (cmdMatch) {
+			const parts = text.replace(/^\//, "").trim().split(/\s+/);
+			const cmd = parts[0].toLowerCase();
+			const rest = parts.slice(1).join(" ");
+			await this.handleLinkedCommand(cmd, rest, event, linked);
+			return;
+		}
+
+		log.logInfo(`[slack:${this.workspaceId}] Routing to agent "${linked.agentName}" (${event.channel}): ${text.substring(0, 60)}`);
+
+		// Read conversation history from Azure Blob Storage so the sub-agent
+		// has full context for this Slack channel across all previous exchanges.
+		const history = await readHistory(linked.agentId, "slack", event.channel);
+
+		const typingTs = await this.postMessage(event.channel, `_Thinking..._`).catch(() => null);
+
+		try {
+			const response = await callAgentBridge(
+				linked.bridgeUrl, text, event.user ?? "user",
+				310_000, event.channel, history,
+			);
+			const stripped = response.startsWith(`[${linked.agentName}]`)
+				? response.slice(`[${linked.agentName}]`.length).replace(/^:\s*/, "")
+				: response;
+
+			const chunks = splitForSlack(stripped);
+			const [first, ...rest] = chunks;
+			if (typingTs) {
+				await this.finalizeMessage(event.channel, typingTs, first);
+			} else {
+				await this.postMessage(event.channel, first);
+			}
+			// Post continuation chunks sequentially
+			for (const chunk of rest) {
+				await this.postMessage(event.channel, chunk);
+			}
+			this.logBotResponse(event.channel, stripped, typingTs ?? String(Date.now()));
+
+			// Persist this exchange to Azure Blob Storage (non-blocking)
+			void appendHistory(linked.agentId, "slack", event.channel, [
+				makeUserEntry(event.user ?? "user", text),
+				makeBotEntry(stripped),
+			]);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			log.logWarning(`[slack:${this.workspaceId}] Bridge routing failed`, msg);
+			const errMsg = `⚠️ *${linked.agentName}* is not responding.\n\n\`${msg}\``;
+			if (typingTs) {
+				await this.finalizeMessage(event.channel, typingTs, errMsg).catch(() => {});
+			} else {
+				await this.postMessage(event.channel, errMsg).catch(() => {});
+			}
+		}
+	}
+
+	/** Handle slash/text commands when in linked sub-agent mode. */
+	private async handleLinkedCommand(
+		cmd: string,
+		rest: string,
+		event: SlackEvent,
+		linked: LinkedAgentInfo,
+	): Promise<void> {
+		switch (cmd) {
+			case "status":
+				await this.handleSlackStatus(event.channel, linked.agentName, linked.skills);
+				break;
+			case "skills":
+				await this.handleSlackSkillsList(event.channel, linked.agentId, linked.skills);
+				break;
+			case "install":
+				if (rest) {
+					await this.startSlackSkillInstall(event.channel, rest.trim(), linked.agentId, linked.skills);
+				} else {
+					await this.postMessage(event.channel, "Usage: `install <skill-name>`");
+				}
+				break;
+			case "unlink":
+				await this.handleSlackUnlink(event.channel);
+				break;
+			case "stop":
+			case "reset":
+				this.getQueue(event.channel).drain();
+				await this.postMessage(event.channel, "_Messages cleared._");
+				break;
+			default:
+				// Unrecognised command — treat as regular message to sub-agent
+				await this.routeToLinkedAgent(event, linked);
+		}
+	}
+
+	/** Show linked agent status info. */
+	private async handleSlackStatus(channelId: string, agentName: string, skills: string[]): Promise<void> {
+		const skillList = skills.length > 0 ? skills.join(", ") : "general-purpose (no specific skills)";
+		await this.postMessage(
+			channelId,
+			`*Linked agent:* ${agentName}\n\n` +
+			`*Skills:* _${skillList}_\n\n` +
+			`Type \`skills\` to see available skills, or \`install <skill>\` to add one.\n` +
+			`Type \`unlink\` to disconnect this workspace from the sub-agent.`,
+		);
+	}
+
+	/** List current and available skills. */
+	private async handleSlackSkillsList(channelId: string, _agentId: string, currentSkills: string[]): Promise<void> {
+		const available = getAvailableSkills(this.skillsDir);
+		const notInstalled = available.filter((s) => !currentSkills.includes(s));
+
+		const currentList = currentSkills.length > 0
+			? currentSkills.map((s) => `• ${s} ✅`).join("\n")
+			: "_none — general-purpose_";
+		const availableList = notInstalled.length > 0
+			? notInstalled.map((s) => `• ${s}`).join("\n")
+			: "_none — all available skills are installed_";
+
+		await this.postMessage(
+			channelId,
+			`*Current skills:*\n${currentList}\n\n` +
+			`*Available to install:*\n${availableList}\n\n` +
+			`Type \`install <skill-name>\` to add a skill.`,
+		);
+	}
+
+	/** Install a skill on the linked sub-agent via the Iris API. */
+	private async startSlackSkillInstall(
+		channelId: string,
+		skillName: string,
+		agentId: string,
+		currentSkills: string[],
+	): Promise<void> {
+		const available = getAvailableSkills(this.skillsDir);
+		if (!available.includes(skillName)) {
+			await this.postMessage(
+				channelId,
+				`⚠️ Skill *${skillName}* is not available.\n\nAvailable: ${available.join(", ")}`,
+			);
+			return;
+		}
+		if (currentSkills.includes(skillName)) {
+			await this.postMessage(channelId, `✅ The *${skillName}* skill is already installed for this agent.`);
+			return;
+		}
+		try {
+			const resp = await fetch(`${this.irisApiUrl}/agents/${agentId}/skills`, {
+				method: "PATCH",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ add: [skillName] }),
+			});
+			if (!resp.ok) throw new Error(`API returned ${resp.status}`);
+			if (this.workspaceId) this.linkManager?.invalidateCache(this.workspaceId);
+			await this.postMessage(
+				channelId,
+				`✅ *${skillName}* has been added to this agent's runtime.\n\n` +
+				`Both this Slack workspace and the Sub-Agent UI now have access to it.`,
+			);
+		} catch (err) {
+			await this.postMessage(channelId, `⚠️ Failed to install skill: ${String(err)}`);
+		}
+	}
+
+	/** Unlink this Slack workspace from its sub-agent. */
+	private async handleSlackUnlink(channelId: string): Promise<void> {
+		if (!this.workspaceId || !this.linkManager) return;
+		const linked = await this.linkManager.getLinkedAgent(this.workspaceId);
+		if (!linked) {
+			await this.postMessage(channelId, "This workspace is not linked to any sub-agent.");
+			return;
+		}
+		const success = await this.linkManager.unlink(this.workspaceId);
+		if (success) {
+			await this.postMessage(
+				channelId,
+				`🔓 Disconnected from *${linked.agentName}*.\n\n` +
+				`This workspace is now unlinked. Send a new claim token to link it to a sub-agent again.`,
+			);
+			log.logInfo(`[slack:${this.workspaceId}] Unlinked from agent "${linked.agentName}" by user command`);
+		} else {
+			await this.postMessage(channelId, "⚠️ Failed to unlink. Check Supabase connection.");
+		}
+	}
+
+	/**
+	 * Handle a message when no sub-agent is linked.
+	 * Accepts 64-char hex claim tokens (DM only); otherwise shows linking instructions.
+	 */
+	private async handleUnlinkedMessage(event: SlackEvent): Promise<void> {
+		const isDM = event.channel.startsWith("D") || event.type === "dm";
+		const text = event.text?.trim() ?? "";
+
+		if (isDM && /^[0-9a-f]{64}$/.test(text)) {
+			const result = await this.linkManager!.validateAndLink(this.workspaceId!, text);
+			if (result && typeof result === "object") {
+				await this.postMessage(
+					event.channel,
+					`✅ *Linked to ${result.agentName}.*\n\n` +
+					`This Slack workspace is now connected to that sub-agent. Start messaging to interact with it.`,
+				);
+				log.logInfo(`[slack:${this.workspaceId}] Linked to agent "${result.agentName}" via claim token`);
+			} else if (result === "expired") {
+				await this.postMessage(event.channel, "❌ Token expired. Generate a new one via *Connect Slack* on the sub-agent.");
+			} else if (result === "already_linked") {
+				await this.postMessage(event.channel, "⚠️ This workspace or that agent is already linked to another. Unlink first.");
+			} else {
+				await this.postMessage(event.channel, this.getUnlinkedInstructions());
+			}
+		} else {
+			await this.postMessage(event.channel, this.getUnlinkedInstructions());
+		}
+	}
+
+	private getUnlinkedInstructions(): string {
+		return (
+			`This Slack workspace is not linked to any sub-agent.\n\n` +
+			`To link it:\n` +
+			`1. Create a sub-agent in Iris\n` +
+			`2. Click *Connect Slack* on the sub-agent\n` +
+			`3. Send the generated token here as a direct message`
+		);
 	}
 
 	/**

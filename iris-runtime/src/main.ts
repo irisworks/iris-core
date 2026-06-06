@@ -12,9 +12,10 @@ import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
 import { TelegramBot, type TelegramEvent } from "./telegram.js";
 import { TelegramLinkManager } from "./telegram-link.js";
+import { SlackLinkManager } from "./slack-link.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
 import { startScheduler, type SchedulerCallbacks } from "./scheduler.js";
-import { resolveBridgeRequest } from "./bridge.js";
+import { resolveBridgeRequest, resolveBridgeByChannel } from "./bridge.js";
 import { startWatchdog } from "./agent-watchdog.js";
 import { getMissedTasks, updateTaskStatus } from "./task-queue.js";
 
@@ -490,6 +491,9 @@ const tgBotsForApi: TelegramBot[] = []; // populated after bot construction
 // Single TelegramLinkManager shared across all bots and the API server
 const telegramLinkManager = new TelegramLinkManager(workingDir);
 
+// Single SlackLinkManager shared across the Slack bot and the API server
+const slackLinkManager = new SlackLinkManager(workingDir);
+
 // Scheduler callbacks — notifyOwner posts a message via the owning bot
 const schedulerCallbacks: SchedulerCallbacks = {
 	workingDir,
@@ -509,6 +513,7 @@ startApiServer(
 	() => botRef as any,
 	telegramLinkManager,
 	schedulerCallbacks,
+	slackLinkManager,
 );
 
 // Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
@@ -525,6 +530,8 @@ const eventsWatcherBot = SLACK_ENABLED
 			botToken: IRIS_SLACK_BOT_TOKEN,
 			workingDir,
 			store: sharedStore,
+			linkManager: slackLinkManager,
+			irisApiUrl: effectiveApiUrl,
 		});
 		botRef = bot;
 		bot.start();
@@ -559,6 +566,13 @@ const eventsWatcherBot = SLACK_ENABLED
 							});
 						} catch { /* non-fatal — main Iris bridge will timeout */ }
 					}
+				} else if (bridgePort > 0) {
+					// Persistent platform channel (e.g. "D0B8NQV8M9U", "tg-8814933356").
+					// Skip typing indicators; resolve the waiting bridge request on real output.
+					const isTypingIndicator = text.includes("_Thinking_") || text.startsWith("_Starting event:");
+					if (!isTypingIndicator) {
+						resolveBridgeByChannel(channel, text);
+					}
 				}
 				return Date.now().toString();
 			},
@@ -569,6 +583,9 @@ const eventsWatcherBot = SLACK_ENABLED
 				if (channel.startsWith("BRIDGE-") && bridgePort > 0) {
 					const requestId = channel.slice("BRIDGE-".length);
 					resolveBridgeRequest(requestId, text);
+				} else if (bridgePort > 0) {
+					// Persistent platform channel — resolve by channelId.
+					resolveBridgeByChannel(channel, text);
 				}
 			},
 			deleteMessage: async () => {},

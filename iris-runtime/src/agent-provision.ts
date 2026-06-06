@@ -1,5 +1,5 @@
 import { exec } from "child_process";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { promisify } from "util";
 import * as log from "./log.js";
@@ -33,7 +33,7 @@ export function bridgeUrlForAgent(slotIndex: number, runtime: AgentRuntime): str
 }
 
 // ============================================================================
-// Skill discovery
+// Skill discovery + per-agent skill management
 // ============================================================================
 
 export function getAvailableSkills(skillsDir: string): string[] {
@@ -49,9 +49,61 @@ export function getAvailableSkills(skillsDir: string): string[] {
 	}
 }
 
+/**
+ * Populate an agent's own skills dir with copies of the assigned skills.
+ * Only assigned skills are present — the agent has no access to others.
+ * Safe to call on an already-populated dir: new skills are added, unlisted
+ * ones are left alone (callers remove explicitly via removeSkillFromAgent).
+ */
+export async function populateAgentSkills(
+	workspaceDir: string,
+	assignedSkills: string[],
+	globalSkillsDir: string,
+): Promise<void> {
+	const agentSkillsDir = join(workspaceDir, "skills");
+	mkdirSync(agentSkillsDir, { recursive: true });
+	for (const skill of assignedSkills) {
+		const src = join(globalSkillsDir, skill);
+		const dst = join(agentSkillsDir, skill);
+		if (existsSync(src) && !existsSync(dst)) {
+			await execAsync(`cp -r "${src}" "${dst}"`);
+		}
+	}
+}
+
+/**
+ * Copy a single skill into an agent's workspace skills dir.
+ * Used by the PATCH /agents/:id/skills endpoint when adding a skill live.
+ */
+export async function addSkillToAgent(
+	workspaceDir: string,
+	skillName: string,
+	globalSkillsDir: string,
+): Promise<void> {
+	const src = join(globalSkillsDir, skillName);
+	const dst = join(join(workspaceDir, "skills"), skillName);
+	if (!existsSync(src)) throw new Error(`Skill "${skillName}" not found in global skills dir`);
+	if (!existsSync(dst)) {
+		await execAsync(`cp -r "${src}" "${dst}"`);
+	}
+}
+
+/**
+ * Remove a skill from an agent's workspace skills dir.
+ * Used by the PATCH /agents/:id/skills endpoint when removing a skill live.
+ */
+export function removeSkillFromAgent(workspaceDir: string, skillName: string): void {
+	const dst = join(join(workspaceDir, "skills"), skillName);
+	if (existsSync(dst)) rmSync(dst, { recursive: true, force: true });
+}
+
 // ============================================================================
 // Shared MEMORY.md content generator
 // ============================================================================
+
+export function buildMemoryContentForAgent(agentName: string, skills: string[], runtime: AgentRuntime): string {
+	return buildMemoryContent(agentName, skills, runtime);
+}
 
 function buildMemoryContent(agentName: string, skills: string[], runtime: AgentRuntime): string {
 	const skillList = skills.length > 0 ? skills.join(", ") : "none — general purpose";
@@ -80,6 +132,13 @@ function buildMemoryContent(agentName: string, skills: string[], runtime: AgentR
 		"",
 		"## Assigned skills",
 		skillList,
+		"",
+		"## Skill authorization — CRITICAL",
+		"You are authorized to use ONLY the skills listed above.",
+		"If a user asks you to perform a task that is covered by a skill NOT in your list — even if you could attempt it via bash — you MUST respond:",
+		"\"Not authorized — I don't have the [skill name] capability assigned to me. Ask Iris to add it if needed.\"",
+		"This applies to: terraform, azure CLI provisioning, GitHub operations, spawning agents, serving public ports, audio transcription, and any capability not in your assigned list.",
+		"Never bypass this restriction by running the equivalent bash commands directly.",
 		"",
 		"## Persistent state — CRITICAL",
 		"Every message arrives on a fresh BRIDGE-* channel with no prior context. You MUST load state at the start of every response:",
@@ -164,13 +223,19 @@ async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 		buildMemoryContent(params.agentName, params.skills, "docker"),
 	);
 
+	// Populate per-agent skills dir with only assigned skills (not the full global set)
+	const globalSkillsDir = `${irisDir}/data/skills`;
+	await populateAgentSkills(workspaceDir, params.skills, globalSkillsDir);
+
 	await execAsync(`docker volume create ${logVolume} 2>/dev/null || true`);
 	await execAsync(`docker rm -f ${containerName} 2>/dev/null || true`);
 
 	const { provider, model, keyEnvVar, apiKey } = resolveLlmKey(irisDir);
 	const llmKeyEnv = apiKey ? `-e ${keyEnvVar}=${apiKey}` : "";
 
-	// spawn-agent deliberately excluded — enforces no-agent-creation at capability level
+	// spawn-agent deliberately excluded — enforces no-agent-creation at capability level.
+	// Skills are served from the agent's own workspace dir (/workspace/skills), which is
+	// part of the /workspace volume mount — no separate global skills mount here.
 	const cmd = [
 		"docker run -d",
 		`--name ${containerName}`,
@@ -186,7 +251,6 @@ async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 		`-e IRIS_API_URL=${irisApiUrl}`,
 		`-e IRIS_BRIDGE_PORT=${bridgePort}`,
 		`-v "${workspaceDir}:/workspace"`,
-		`-v "${irisDir}/data/skills:/workspace/skills:ro"`,
 		`-v "${logVolume}:/var/log/agent"`,
 		`-v "${irisDir}/data/models.json:/workspace/models.json:ro"`,
 		`-v "${irisHome}/.azure:/root/.azure"`,
@@ -268,6 +332,17 @@ async function provisionFirecrackerAgent(params: ProvisionParams): Promise<strin
 	const memoryContent = buildMemoryContent(params.agentName, params.skills, "firecracker");
 	const memoryB64     = Buffer.from(memoryContent, "utf-8").toString("base64");
 	await execInVm(execUrl, `printf '%s' '${memoryB64}' | base64 -d > /workspace/MEMORY.md`);
+
+	// Copy only assigned skills into the VM (not the full global set)
+	const globalSkillsDir = `${irisDir}/data/skills`;
+	for (const skill of params.skills) {
+		const src = join(globalSkillsDir, skill);
+		if (existsSync(src)) {
+			// tar the skill dir and pipe into the VM
+			const tarB64 = (await execAsync(`tar -C "${globalSkillsDir}" -cf - "${skill}" | base64 -w0`)).stdout.trim();
+			await execInVm(execUrl, `printf '%s' '${tarB64}' | base64 -d | tar -C /workspace/skills -xf -`);
+		}
+	}
 
 	// Resolve LLM credentials
 	const { provider, model, keyEnvVar, apiKey } = resolveLlmKey(irisDir);
