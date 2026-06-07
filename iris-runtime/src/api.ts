@@ -17,6 +17,11 @@
  *   GET    /agents/:id                    — get a sub-agent
  *   DELETE /agents/:id                    — delete a sub-agent
  *   PATCH  /agents/:id/skills             — add/remove skills
+ *   GET    /skills                        — list global skill library (name, description, files)
+ *   POST   /skills                        — create a skill — body: { name, description, content? }
+ *   GET    /skills/:name                  — get a skill (description, content, files)
+ *   PATCH  /skills/:name                  — update a skill — body: { description?, content? }
+ *   DELETE /skills/:name                  — delete a skill (blocked if assigned to sub-agents)
  *   POST   /agents/:id/telegram/token     — generate Telegram link token
  *   DELETE /agents/:id/telegram           — unlink Telegram from sub-agent
  *   POST   /agents/:id/slack/token        — generate Slack link token
@@ -705,6 +710,84 @@ export function startApiServer(
 
 				log.logInfo(`[api] PATCH /agents/${agent.agentId}/skills → ${updatedSkills.join(", ")}`);
 				json(res, 200, { agentId: agent.agentId, skills: updatedSkills });
+				return;
+			}
+
+			// ── GET /skills ───────────────────────────────────────────────────────────
+			// List all skills in the global library (name, description, files).
+			// Used by Iris herself and to discover what can be assigned to sub-agents.
+			if (method === "GET" && url === "/skills") {
+				json(res, 200, { skills: skillMgr.listDetailed() });
+				return;
+			}
+
+			// ── POST /skills ──────────────────────────────────────────────────────────
+			// Create a new skill in the global library.
+			// body: { name: string, description: string, content?: string }
+			if (method === "POST" && url === "/skills") {
+				let body: { name?: string; description?: string; content?: string };
+				try { body = JSON.parse(await readBody(req)); } catch {
+					json(res, 400, { error: "invalid JSON body" }); return;
+				}
+				if (!body.name || !body.description) { json(res, 400, { error: "name and description are required" }); return; }
+				try {
+					const skill = skillMgr.create(body.name, body.description, body.content);
+					log.logInfo(`[api] POST /skills → created "${skill.name}"`);
+					json(res, 201, skill);
+				} catch (e) {
+					json(res, 409, { error: e instanceof Error ? e.message : String(e) });
+				}
+				return;
+			}
+
+			// ── GET /skills/:name ─────────────────────────────────────────────────────
+			// Read a single skill's description, content, and files.
+			if (method === "GET" && urlParts[0] === "skills" && urlParts[1] && !urlParts[2]) {
+				const skill = skillMgr.get(urlParts[1]);
+				if (!skill) { json(res, 404, { error: "Skill not found" }); return; }
+				json(res, 200, skill);
+				return;
+			}
+
+			// ── PATCH /skills/:name ───────────────────────────────────────────────────
+			// Update a skill's description and/or markdown content.
+			// body: { description?: string, content?: string }
+			if (method === "PATCH" && urlParts[0] === "skills" && urlParts[1] && !urlParts[2]) {
+				let body: { description?: string; content?: string };
+				try { body = JSON.parse(await readBody(req)); } catch {
+					json(res, 400, { error: "invalid JSON body" }); return;
+				}
+				if (body.description === undefined && body.content === undefined) {
+					json(res, 400, { error: "description or content is required" }); return;
+				}
+				try {
+					const skill = skillMgr.update(urlParts[1], body);
+					log.logInfo(`[api] PATCH /skills/${urlParts[1]}`);
+					json(res, 200, skill);
+				} catch (e) {
+					json(res, 404, { error: e instanceof Error ? e.message : String(e) });
+				}
+				return;
+			}
+
+			// ── DELETE /skills/:name ──────────────────────────────────────────────────
+			// Remove a skill from the global library. Blocked while any sub-agent
+			// still has it assigned — unassign it from those agents first.
+			if (method === "DELETE" && urlParts[0] === "skills" && urlParts[1] && !urlParts[2]) {
+				const name = urlParts[1];
+				const agents = await listSubAgents();
+				const inUseBy = agents.filter(a => a.skills.includes(name)).map(a => a.name);
+				if (inUseBy.length > 0) {
+					json(res, 409, { error: `Skill "${name}" is assigned to sub-agents: ${inUseBy.join(", ")}. Remove it from them first.` });
+					return;
+				}
+				try {
+					skillMgr.remove(name);
+					log.logInfo(`[api] DELETE /skills/${name}`);
+					json(res, 200, { ok: true, name });
+				} catch (e) {
+					json(res, 404, { error: e instanceof Error ? e.message : String(e) });
+				}
 				return;
 			}
 

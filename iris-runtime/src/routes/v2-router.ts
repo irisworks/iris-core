@@ -8,6 +8,7 @@
  *   shutdown     → v2-health.ts
  *   main-agent   → v2-main-agent.ts
  *   sub-agents   → v2-sub-agents.ts
+ *   skills       → v2-skills.ts
  *   telegram     → v2-telegram.ts
  *   slack        → v2-slack.ts
  *
@@ -22,6 +23,7 @@ import * as log from "../log.js";
 import { handleV2Health }      from "./v2-health.js";
 import { handleV2MainAgent }   from "./v2-main-agent.js";
 import { handleV2SubAgents }   from "./v2-sub-agents.js";
+import { handleV2Skills }      from "./v2-skills.js";
 import { handleV2Telegram }    from "./v2-telegram.js";
 import { handleV2Slack }       from "./v2-slack.js";
 import type { V2Deps, V2Response } from "./v2-types.js";
@@ -89,6 +91,8 @@ export async function handleV2Request(
       result = await handleV2MainAgent(method, parts, req, rb, deps);
     } else if (resource === "sub-agents") {
       result = await handleV2SubAgents(method, parts, req, rb, deps);
+    } else if (resource === "skills") {
+      result = await handleV2Skills(method, parts, req, rb, deps);
     } else if (resource === "telegram") {
       result = await handleV2Telegram(method, parts, req, rb, deps);
     } else if (resource === "slack") {
