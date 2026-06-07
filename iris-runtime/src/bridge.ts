@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import { join } from "path";
 import { randomBytes } from "crypto";
 import * as log from "./log.js";
+import { extractBearerToken, runtimeAuthHeader, validateRuntimeJWT, RUNTIME_AUTH_ENABLED } from "./auth.js";
 
 // ============================================================================
 // Pending request registry (module-level, shared with slack.ts via this module)
@@ -98,6 +99,19 @@ export function startBridgeServer(port: number, workingDir: string): void {
 		if (req.method !== "POST" || req.url !== "/bridge") {
 			jsonResponse(res, 404, { error: "not found" });
 			return;
+		}
+
+		// Runtime JWT check — only enforced once RUNTIME_JWT_SECRET is configured,
+		// so deployments that haven't opted in keep today's unauthenticated behaviour.
+		if (RUNTIME_AUTH_ENABLED) {
+			const token = extractBearerToken(req.headers.authorization);
+			const payload = token ? validateRuntimeJWT(token) : null;
+			const expectedAgentId = process.env.AGENT_ID;
+			if (!payload || (expectedAgentId && payload.agentId !== expectedAgentId)) {
+				log.logWarning("[bridge] Rejected request with invalid or missing Runtime JWT");
+				jsonResponse(res, 401, { error: "Invalid or missing Runtime JWT" });
+				return;
+			}
 		}
 
 		let body: {
@@ -231,6 +245,8 @@ export function loadAgentRegistry(workingDir: string): AgentRegistry {
  *            so it accumulates conversation history across requests.
  * history:   prior log entries read from Azure Blob; injected into the
  *            channel's log.jsonl before the sub-agent runs.
+ * agentId/runtime: identify the target sub-agent so the call can be signed
+ *            with a Runtime JWT (only when RUNTIME_JWT_SECRET is configured).
  * Returns the agent's response text, or throws on timeout/error.
  */
 export async function callAgentBridge(
@@ -240,6 +256,8 @@ export async function callAgentBridge(
 	timeoutMs = 310_000, // slightly above server-side 300s so server error reaches caller before abort
 	channelId?: string,
 	history?: object[],
+	agentId?: string,
+	runtime?: "docker" | "firecracker",
 ): Promise<string> {
 	const requestId = randomBytes(8).toString("hex");
 
@@ -249,7 +267,10 @@ export async function callAgentBridge(
 	try {
 		const response = await fetch(`${bridgeUrl}/bridge`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: {
+				"Content-Type": "application/json",
+				...(agentId ? runtimeAuthHeader(agentId, runtime ?? "docker") : {}),
+			},
 			body: JSON.stringify({ text, user, requestId, channelId, history }),
 			signal: controller.signal,
 		});

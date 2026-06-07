@@ -9,6 +9,7 @@ import { callAgentBridge } from "./bridge.js";
 import { getAvailableSkills } from "./agent-provision.js";
 import type { SlackLinkManager, LinkedAgentInfo } from "./slack-link.js";
 import { readHistory, appendHistory, makeUserEntry, makeBotEntry } from "./azure-history.js";
+import { GATEWAY_MODE } from "./auth.js";
 
 // Slack's effective per-message limit. Long responses are split into
 // continuation messages rather than truncated (see splitForSlack).
@@ -1083,6 +1084,13 @@ export class SlackBot {
 			await this.handler.handleEvent(event, this);
 			return;
 		}
+		// In Gateway mode, the Gateway owns Slack ingestion and forwards messages
+		// via POST /v2/slack/inbound (including claim-token linking). Routing the
+		// same message locally too would deliver it to the sub-agent twice.
+		if (GATEWAY_MODE) {
+			log.logInfo(`[slack:${this.workspaceId}] GATEWAY_MODE active — ingestion is owned by the Gateway (POST /v2/slack/inbound), skipping local routing`);
+			return;
+		}
 		const linked = await this.linkManager.getLinkedAgent(this.workspaceId);
 		if (linked) {
 			await this.routeToLinkedAgent(event, linked);
@@ -1120,6 +1128,7 @@ export class SlackBot {
 			const response = await callAgentBridge(
 				linked.bridgeUrl, text, event.user ?? "user",
 				310_000, event.channel, history,
+				linked.agentId, linked.runtime,
 			);
 			const stripped = response.startsWith(`[${linked.agentName}]`)
 				? response.slice(`[${linked.agentName}]`.length).replace(/^:\s*/, "")

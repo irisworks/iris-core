@@ -16,6 +16,7 @@
 
 import * as log from "../log.js";
 import { getSubAgent } from "../sub-agent-registry.js";
+import { runtimeAuthHeader, GATEWAY_MODE, isIntegrationScoped } from "../auth.js";
 import type { V2Handler } from "./v2-types.js";
 import { ok, err } from "./v2-types.js";
 
@@ -40,6 +41,11 @@ export const handleV2Slack: V2Handler = async (method, parts, _req, readBody, de
     }
     if (!body.workspaceId || !body.channelId || !body.text)
       return err(400, "workspaceId, channelId, and text are required");
+
+    if (GATEWAY_MODE && deps.jwtContext && !isIntegrationScoped(deps.jwtContext)) {
+      log.logWarning(`[v2/slack/inbound] Rejected Internal JWT with non-integration scope "${deps.jwtContext.scope}"`);
+      return err(403, "Internal JWT is not scoped for Slack integration traffic");
+    }
 
     if (!deps.slackLinkManager)
       return err(503, "Slack not configured on this runtime");
@@ -72,7 +78,7 @@ export const handleV2Slack: V2Handler = async (method, parts, _req, readBody, de
     try {
       const resp = await fetch(`${bridgeUrl}/bridge`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...runtimeAuthHeader(agent.agentId, agent.runtime) },
         body:    JSON.stringify({
           channelId,
           text: body.text,

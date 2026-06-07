@@ -18,6 +18,7 @@ import { startScheduler, type SchedulerCallbacks } from "./scheduler.js";
 import { resolveBridgeRequest, resolveBridgeByChannel } from "./bridge.js";
 import { startWatchdog } from "./agent-watchdog.js";
 import { getMissedTasks, updateTaskStatus } from "./task-queue.js";
+import { GATEWAY_MODE } from "./auth.js";
 
 // ============================================================================
 // Config
@@ -625,22 +626,31 @@ const telegramTokens: string[] = [
 
 const tgBots: TelegramBot[] = [];
 
-for (const token of telegramTokens) {
-	const tgBot = new TelegramBot({ token, workingDir, linkManager: telegramLinkManager, irisApiUrl: effectiveApiUrl });
-	try {
-		await tgBot.start();
-	} catch (err) {
-		// Registry rejected this bot (max 5 reached) or API error — skip it
-		log.logWarning("[telegram] Bot failed to start", err instanceof Error ? err.message : String(err));
-		continue;
+// In Gateway mode, the Gateway owns Telegram ingestion and forwards messages
+// via POST /v2/telegram/inbound. Starting our own long-polling connections here
+// too would process every inbound message twice (duplicate replies). Telegram
+// bots in this runtime exist solely to route to linked sub-agents (see comment
+// above on TelegramBot), so they're simply not needed when GATEWAY_MODE is on.
+if (GATEWAY_MODE) {
+	log.logInfo("[telegram] GATEWAY_MODE active — ingestion is owned by the Gateway (POST /v2/telegram/inbound); not starting local bot connections");
+} else {
+	for (const token of telegramTokens) {
+		const tgBot = new TelegramBot({ token, workingDir, linkManager: telegramLinkManager, irisApiUrl: effectiveApiUrl });
+		try {
+			await tgBot.start();
+		} catch (err) {
+			// Registry rejected this bot (max 5 reached) or API error — skip it
+			log.logWarning("[telegram] Bot failed to start", err instanceof Error ? err.message : String(err));
+			continue;
+		}
+
+		log.logInfo(`[telegram:${tgBot.getBotId()}] Started. Send a sub-agent claim token to this bot to link it.`);
+
+		tgBots.push(tgBot);
+		tgBotsForApi.push(tgBot);
+		// First bot becomes botRef if Slack is not active (API server prefers Slack)
+		if (!SLACK_ENABLED && tgBots.length === 1) botRef = tgBot;
 	}
-
-	log.logInfo(`[telegram:${tgBot.getBotId()}] Started. Send a sub-agent claim token to this bot to link it.`);
-
-	tgBots.push(tgBot);
-	tgBotsForApi.push(tgBot);
-	// First bot becomes botRef if Slack is not active (API server prefers Slack)
-	if (!SLACK_ENABLED && tgBots.length === 1) botRef = tgBot;
 }
 
 if (telegramTokens.length === 0) {

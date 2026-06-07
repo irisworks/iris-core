@@ -36,7 +36,7 @@ import {
   removeSkillFromAgent,
 } from "../agent-provision.js";
 import { getDb } from "../db.js";
-import { generateRuntimeJWT } from "../auth.js";
+import { generateRuntimeJWT, runtimeAuthHeader, runtimeTypeForAgent } from "../auth.js";
 import type { V2Handler } from "./v2-types.js";
 import { ok, created, err } from "./v2-types.js";
 
@@ -52,10 +52,12 @@ async function callBridge(
   channelId: string,
   text: string,
   user: string,
+  agentId: string,
+  runtime: "docker" | "firecracker",
 ): Promise<string> {
   const resp = await fetch(`${bridgeUrl}/bridge`, {
     method:  "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...runtimeAuthHeader(agentId, runtime) },
     body:    JSON.stringify({ channelId, text, user }),
     signal:  AbortSignal.timeout(120_000),
   });
@@ -96,7 +98,7 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
       await updateSubAgentStatus(record.agentId, "running", containerName);
       registerAgentBridge(deps.workingDir, record.name, record.agentId, record.slotIndex, record.runtime);
       log.logInfo(`[v2/sub-agents] created "${record.name}" slot=${record.slotIndex} ${record.runtime}`);
-      const runtimeJwt = generateRuntimeJWT(record.agentId, "HOST_VM");
+      const runtimeJwt = generateRuntimeJWT(record.agentId, runtimeTypeForAgent(record.runtime));
       return created({ ...record, status: "running", containerId: containerName, runtimeJwt });
     } catch (e) {
       await deleteSubAgent(record.agentId);
@@ -194,7 +196,7 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
 
     log.logInfo(`[v2/sub-agents/${agent.agentId}/message] channel=${channelId}: ${body.text.substring(0, 60)}`);
     try {
-      const response = await callBridge(bridgeUrl, channelId, body.text, body.user ?? "gateway");
+      const response = await callBridge(bridgeUrl, channelId, body.text, body.user ?? "gateway", agent.agentId, agent.runtime);
       return ok({ response, agentId: agent.agentId, channelId });
     } catch (e) {
       return err(504, `Bridge call failed: ${e instanceof Error ? e.message : String(e)}`);

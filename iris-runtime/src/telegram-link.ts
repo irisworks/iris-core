@@ -49,6 +49,7 @@ export interface LinkedAgentInfo {
 	bridgeUrl: string;
 	slotIndex: number;
 	skills: string[];
+	runtime: "docker" | "firecracker";
 }
 
 // ============================================================================
@@ -176,6 +177,7 @@ export class TelegramLinkManager {
 				bridgeUrl: bridgeUrlForAgent(agent.slotIndex, agent.runtime),
 				slotIndex: agent.slotIndex,
 				skills:    agent.skills,
+				runtime:   agent.runtime,
 			};
 			this.cache.set(botId, info);
 			return info;

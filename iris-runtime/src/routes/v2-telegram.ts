@@ -15,6 +15,7 @@
 
 import * as log from "../log.js";
 import { getSubAgent } from "../sub-agent-registry.js";
+import { runtimeAuthHeader, GATEWAY_MODE, isIntegrationScoped } from "../auth.js";
 import type { V2Handler } from "./v2-types.js";
 import { ok, err } from "./v2-types.js";
 
@@ -38,6 +39,11 @@ export const handleV2Telegram: V2Handler = async (method, parts, _req, readBody,
     }
     if (!body.botId || !body.chatId || !body.text)
       return err(400, "botId, chatId, and text are required");
+
+    if (GATEWAY_MODE && deps.jwtContext && !isIntegrationScoped(deps.jwtContext)) {
+      log.logWarning(`[v2/telegram/inbound] Rejected Internal JWT with non-integration scope "${deps.jwtContext.scope}"`);
+      return err(403, "Internal JWT is not scoped for Telegram integration traffic");
+    }
 
     if (!deps.telegramLinkManager)
       return err(503, "Telegram not configured on this runtime");
@@ -70,7 +76,7 @@ export const handleV2Telegram: V2Handler = async (method, parts, _req, readBody,
     try {
       const resp = await fetch(`${bridgeUrl}/bridge`, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...runtimeAuthHeader(agent.agentId, agent.runtime) },
         body:    JSON.stringify({ channelId, text: body.text, user: body.user ?? body.chatId }),
         signal:  AbortSignal.timeout(120_000),
       });

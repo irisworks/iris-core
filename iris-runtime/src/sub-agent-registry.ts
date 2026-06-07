@@ -1,4 +1,5 @@
 import { getDb } from "./db.js";
+import { VM_ID, runtimeTypeForAgent } from "./auth.js";
 import * as log from "./log.js";
 
 // ============================================================================
@@ -94,6 +95,51 @@ async function deleteCompatRow(db: ReturnType<typeof getDb>, agentId: string): P
 		await db.from("telegram_claim").delete().eq("bot_id", compatBotId);
 	} catch (err) {
 		log.logWarning("[sub-agent-registry] compat shim delete failed", String(err));
+	}
+}
+
+// ============================================================================
+// Routing table — Gateway/VM Orchestrator's agentId -> runtimeId -> runtimeType
+// map (Supabase `runtime_mapping`). Written by iris-runtime when agents are
+// provisioned, per the table's own schema comment.
+//
+// vm_id is a UUID FK into `vm_routing`, which is owned exclusively by the VM
+// Orchestrator — a standalone deployment has no such row (IRIS_VM_ID defaults
+// to "default", not a UUID). We only attempt the write once the Gateway has
+// assigned this runtime a real VM UUID; `runtime_mapping` is removed via
+// ON DELETE CASCADE from sub_agents, so no explicit cleanup is needed.
+// ============================================================================
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function agentBridgeUrl(slotIndex: number, runtime: AgentRuntime): string {
+	if (runtime === "firecracker") return `http://172.20.${slotIndex}.2:4200`;
+	return `http://127.0.0.1:${4200 + slotIndex}`;
+}
+
+async function upsertRuntimeMapping(
+	db: ReturnType<typeof getDb>,
+	agentId: string,
+	runtime: AgentRuntime,
+	slotIndex: number,
+): Promise<void> {
+	if (!db) return;
+	if (!UUID_RE.test(VM_ID)) return;
+	try {
+		const { error } = await db.from("runtime_mapping").upsert(
+			{
+				agent_id:     agentId,
+				vm_id:        VM_ID,
+				runtime_type: runtimeTypeForAgent(runtime),
+				bridge_url:   agentBridgeUrl(slotIndex, runtime),
+				updated_at:   new Date().toISOString(),
+			},
+			{ onConflict: "agent_id" },
+		);
+		if (error) throw error;
+	} catch (err) {
+		// Non-fatal — likely means the VM Orchestrator hasn't created the matching vm_routing row yet
+		log.logWarning("[sub-agent-registry] runtime_mapping upsert failed", String(err));
 	}
 }
 
@@ -211,6 +257,7 @@ export async function createSubAgent(params: {
 		const record = rowToRecord(data as Record<string, unknown>);
 		log.logInfo(`[sub-agent-registry] Created sub-agent "${params.name}" (slot ${slot})`);
 		await upsertCompatRow(db, record.agentId, record.name, record.skills, record.slotIndex, record.status);
+		await upsertRuntimeMapping(db, record.agentId, record.runtime, record.slotIndex);
 		return record;
 	} catch (err) {
 		log.logWarning("[sub-agent-registry] createSubAgent failed", String(err));

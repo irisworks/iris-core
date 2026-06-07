@@ -953,7 +953,7 @@ export class TelegramBot {
 		};
 
 		const result = queue.enqueueUser(
-			() => this.routeUserMessageToAgent(event, linkedAgent.agentName, linkedAgent.bridgeUrl, linkedAgent.agentId),
+			() => this.routeUserMessageToAgent(event, linkedAgent.agentName, linkedAgent.bridgeUrl, linkedAgent.agentId, linkedAgent.runtime),
 			text,
 		);
 
@@ -972,6 +972,7 @@ export class TelegramBot {
 		agentName: string,
 		bridgeUrl: string,
 		agentId?: string,
+		runtime?: "docker" | "firecracker",
 	): Promise<void> {
 		log.logInfo(`[telegram:${this.botId}] Routing to agent "${agentName}" (${event.channel}): ${event.text.substring(0, 60)}`);
 
@@ -987,6 +988,7 @@ export class TelegramBot {
 			const response = await callAgentBridge(
 				bridgeUrl, event.text, event.user ?? "user",
 				310_000, event.channel, history,
+				agentId, runtime,
 			);
 
 			// Strip "[AgentName]:" prefix agents may prepend
@@ -1040,7 +1042,11 @@ export class TelegramBot {
 		}
 		log.logInfo(`[telegram:${this.botId}] Routing scheduled event to agent "${linked.agentName}": ${event.text.substring(0, 60)}`);
 		try {
-			const response = await callAgentBridge(linked.bridgeUrl, event.text, "EVENT");
+			const response = await callAgentBridge(
+				linked.bridgeUrl, event.text, "EVENT",
+				undefined, undefined, undefined,
+				linked.agentId, linked.runtime,
+			);
 			const stripped = response.startsWith(`[${linked.agentName}]`)
 				? response.slice(`[${linked.agentName}]`.length).replace(/^:\s*/, "")
 				: response;
@@ -1170,7 +1176,7 @@ export class TelegramBot {
 				if (linked) {
 					const event: TelegramEvent = { type: "message", channel: channelId, ts: String(Date.now()), user: "user", text: state.originalText, chatId: 0, attachments: [] };
 					const queue = this.getQueue(channelId);
-					queue.enqueueUser(() => this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl, linked.agentId), state.originalText);
+					queue.enqueueUser(() => this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl, linked.agentId, linked.runtime), state.originalText);
 				}
 			}
 		} catch (err) {
@@ -1196,7 +1202,7 @@ export class TelegramBot {
 			if (!linked) { await this.postMessage(channelId, "⚠️ No linked agent found."); return; }
 			await this.postMessage(channelId, "_Continuing with alternative workflow..._");
 			const event: TelegramEvent = { type: "message", channel: channelId, ts: String(Date.now()), user: "user", text: state.originalText, chatId: 0, attachments: [] };
-			await this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl, linked.agentId);
+			await this.routeUserMessageToAgent(event, linked.agentName, linked.bridgeUrl, linked.agentId, linked.runtime);
 		} else {
 			await this.postMessage(channelId, "Cancelled.");
 		}
