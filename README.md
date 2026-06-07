@@ -24,7 +24,7 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 7. [Linking Slack to a Sub-Agent](#linking-slack-to-a-sub-agent)
 8. [API Reference — v1 (Current)](#api-reference--v1-current)
 9. [API Reference — v2 (Gateway-Ready)](#api-reference--v2-gateway-ready)
-10. [Gateway Integration (Future)](#gateway-integration-future)
+10. [Gateway Integration](#gateway-integration)
 11. [Environment Variables](#environment-variables)
 12. [Runtime Source Layout](#runtime-source-layout)
 13. [Managing the Service](#managing-the-service)
@@ -79,7 +79,9 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║  User → API Gateway (Express) → Internal JWT → Firecracker VM per user   ║
 ║  Each VM runs iris-runtime.  Gateway routes by userId → vmId → vmIP.    ║
-║  iris-runtime already has /v2/* endpoints ready for this integration.    ║
+║  iris-runtime's /v2/* endpoints, JWT auth chain (Internal/Runtime/        ║
+║  Integration), one-user-one-VM scoping, and routing-table writes are     ║
+║  wired and gated — see "Gateway Integration" for what's live vs. open.   ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -92,7 +94,7 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 | Claim token flow | 64-char hex, single-use, 10-min TTL. Never logged. |
 | Sub-agents cannot create agents | Enforced at 3 levels: missing skill mount, filtered in AgentRunner, MEMORY.md hard-block |
 | Skills hot-reload | Volume-mounted read-only. Add a skill dir to the host and it's live immediately |
-| Dual API (v1 + v2) | v1 keeps the system running today. v2 is dormant until the Gateway is built |
+| Dual API (v1 + v2) | v1 keeps the system running today. v2's auth/routing/scoping chain is wired and gated, but unverified against a live Gateway — see "Gateway Integration" |
 
 ---
 
@@ -101,10 +103,10 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 | Path | Purpose |
 |---|---|
 | `iris-runtime/` | Node.js AI agent runtime — all the moving parts |
-| `iris-runtime/src/auth.ts` | JWT utilities for future Gateway integration |
+| `iris-runtime/src/auth.ts` | Internal/Runtime/Integration JWT chain + one-user-one-VM scoping (`SCOPE_ENFORCED`) — gated, see "Gateway Integration" |
 | `iris-runtime/src/blob.ts` | Azure Blob write-through (off by default) |
 | `iris-runtime/src/managers/` | Session, Memory, Skill, Thread, Integration managers |
-| `iris-runtime/src/routes/` | v2 Gateway-ready API route handlers |
+| `iris-runtime/src/routes/` | v2 API route handlers — auth/scoping/integration checks wired and gated, see "Gateway Integration" |
 | `skills/` | Hot-reloadable skill directories (symlinked → `/iris/data/skills`) |
 | `supabase/schema.sql` | Canonical Supabase schema — single SQL block, safe to re-run |
 | `scripts/` | Firecracker VM lifecycle scripts |
@@ -142,7 +144,7 @@ Follow these steps **in order**. Supabase must be done first because the runtime
 
 ### Step 1 — Supabase (required first)
 
-Supabase is the persistence layer. Agent records, Telegram/Slack links, scheduled tasks, sessions, and the future routing table all live here. The runtime fails gracefully without it, but sub-agents cannot be created.
+Supabase is the persistence layer. Agent records, Telegram/Slack links, scheduled tasks, sessions, and the routing table (`runtime_mapping`, actively written on agent provisioning — see "Gateway Integration") all live here. The runtime fails gracefully without it, but sub-agents cannot be created.
 
 #### 1a — Create a Supabase project
 
@@ -367,10 +369,10 @@ After running the SQL, open **Table Editor** in the Supabase dashboard. You shou
 | `sub_agent_telegram_links` | Telegram bot ↔ agent pairings |
 | `sub_agent_slack_links` | Slack workspace ↔ agent pairings |
 | `agent_tasks` | Scheduled and immediate task queue |
-| `users` | User accounts (for future Gateway) |
-| `vm_routing` | Per-user VM assignments (for future Gateway) |
-| `runtime_mapping` | Agent → runtime mapping (for future Gateway) |
-| `claim_tokens` | Pairing tokens (for future Gateway) |
+| `users` | User accounts. iris-runtime should only ever *read* this (resolve `userId`) — no read path wired yet |
+| `vm_routing` | Per-user VM assignments — exclusively VM-Orchestrator-owned, iris-runtime never writes here |
+| `runtime_mapping` | Agent → runtime mapping — **actively written** by iris-runtime on agent provisioning (`upsertRuntimeMapping`), gated on a real Gateway-issued VM UUID. See "Gateway Integration" |
+| `claim_tokens` | Pairing tokens — meant to replace local JSON token files; not yet wired (open follow-up) |
 | `sessions` | Conversation sessions |
 
 If any table is missing, re-run the SQL block — it is fully idempotent.
@@ -971,7 +973,7 @@ These routes are active right now, require no authentication, and are used by th
 
 Base URL: `http://localhost:3000/v2`
 
-These routes are **active now** but are designed for the future API Gateway. They return a consistent `{ ok, data }` envelope. Authentication is off by default (`GATEWAY_MODE=false`) — all requests pass through. Set `GATEWAY_MODE=true` to enforce `Authorization: Bearer <InternalJWT>` on all v2 routes.
+These routes are active now and serve the existing v1-equivalent functionality regardless of Gateway status. They return a consistent `{ ok, data }` envelope. Authentication is off by default (`GATEWAY_MODE=false`) — all requests pass through, and the bot-ingestion kill-switches and scoping checks described in "Gateway Integration" stay inert. Set `GATEWAY_MODE=true` (plus the relevant secrets/IDs) to progressively activate `Authorization: Bearer <InternalJWT>` enforcement, Runtime JWT validation, Integration-scope checks, one-user-one-VM scoping, and the bot-ingestion kill-switch — see "Gateway Integration" for exactly which env var activates which check.
 
 ### Runtime health
 
@@ -1022,9 +1024,15 @@ All v2 routes return the same envelope:
 
 ---
 
-## Gateway Integration (Future)
+## Gateway Integration
 
-This section documents how to connect iris-runtime to the API Gateway when it is built. **Nothing here needs to be done now** — the v2 routes are already live and waiting.
+The v2 layer is not just dormant scaffolding — every gate below is wired end to
+end and activates progressively as the operator/Gateway sets the corresponding
+env var, with **zero behaviour change while unconfigured** (verified by
+round-trip tests against the compiled output: valid tokens accepted, tampered/
+mis-scoped/cross-VM tokens rejected, unconfigured deployments untouched). What
+remains open is a live round-trip against a real Gateway — see "What's still
+open" below.
 
 ### How it works
 
@@ -1043,12 +1051,72 @@ The Internal JWT is issued by the API Gateway and signed with `GATEWAY_JWT_SECRE
   "runtimeId":   "uuid-of-this-runtime",
   "agentId":     "uuid-of-target-agent",
   "runtimeType": "HOST_VM" | "DOCKER",
+  "scope":       "integration",
   "iat":         1234567890,
   "exp":         1234571490
 }
 ```
 
-When a sub-agent is created via `POST /v2/sub-agents`, iris-runtime returns a **Runtime JWT** in the response. The Gateway uses this for subsequent calls to that specific agent.
+`scope` is optional and currently has one meaningful value: `"integration"`,
+set by the Gateway when forwarding Telegram/Slack bot traffic (see "Integration
+JWT" below). Tokens that omit `scope` are treated as generic Internal JWTs.
+
+Beyond signature/expiry validation, `resolveGatewayAuth()` (in `src/auth.ts`)
+also enforces:
+
+- **One-user-one-VM scoping** (`SCOPE_ENFORCED`, `src/auth.ts`) — once both
+  `IRIS_VM_ID` and `IRIS_RUNTIME_ID` are set to real (non-`"default"`) UUIDs,
+  a *validly-signed* Internal JWT is still rejected (401, logged) if its
+  `vmId`/`runtimeId` don't match this runtime's own identity. This is what
+  stops a token minted for one user's VM from being replayed against another
+  — pure signature checking is not isolation when `GATEWAY_JWT_SECRET` is
+  shared across VMs. Stays inert (no check) until both IDs are configured.
+
+### Runtime JWT — Gateway/sub-agent calls
+
+When a sub-agent is created via `POST /v2/sub-agents`, iris-runtime returns a
+**Runtime JWT** (`{ agentId, runtimeId, runtimeType, scope: "runtime" }`,
+HS256, 5-minute TTL) in the response. The Gateway attaches it as
+`Authorization: Bearer <RuntimeJWT>` for subsequent calls to that specific
+agent's bridge.
+
+Once `RUNTIME_JWT_SECRET` is set, `RUNTIME_AUTH_ENABLED` flips on and **the
+sub-agent bridge server actively rejects** any bridge request without a valid,
+correctly-scoped Runtime JWT (`startBridgeServer` in `src/bridge.ts`) — this
+is enforcement, not just a courtesy token in the response. Every internal path
+that calls into a bridge (`callAgentBridge`, `callBridge`, both v2 inbound
+handlers) signs its outgoing request via `runtimeAuthHeader()`. While
+`RUNTIME_JWT_SECRET` is unset, bridge calls remain unauthenticated exactly as
+before.
+
+### Integration JWT — Telegram/Slack bot traffic
+
+`POST /v2/telegram/inbound` and `/v2/slack/inbound` additionally check
+`isIntegrationScoped()` (`src/auth.ts`): when `GATEWAY_MODE=true`, an Internal
+JWT that explicitly carries a `scope` other than `"integration"` is rejected
+(403, logged) on these two routes — e.g. a token minted for sub-agent
+management can't be replayed here to inject fake user messages into someone's
+linked-agent conversation. Tokens that omit `scope` still pass, so a Gateway
+that doesn't yet mint scoped tokens keeps working unchanged; the Gateway
+should mint `scope: "integration"` specifically when relaying bot traffic to
+get the extra isolation.
+
+### Routing table (`runtime_mapping`)
+
+iris-runtime now actively populates Supabase's `runtime_mapping` table
+(`agentId -> runtimeId -> runtimeType`, per the table's own schema comment
+"Written by iris-runtime when agents are provisioned") via
+`upsertRuntimeMapping()` in `src/sub-agent-registry.ts`, called on every
+`createSubAgent()`. It writes `agent_id`, `vm_id`, `runtime_type`, and
+`bridge_url`.
+
+This write is gated on `IRIS_VM_ID` being a real UUID — `vm_id` is a
+`NOT NULL` foreign key into `vm_routing`, which is exclusively owned by the VM
+Orchestrator, and a standalone deployment (`IRIS_VM_ID="default"`) has no
+matching row, so the write would violate the FK. The gate makes it a safe
+no-op until the Gateway assigns this runtime a real VM UUID and creates the
+matching `vm_routing` row. Cleanup needs no extra code — `runtime_mapping.agent_id`
+cascades on `sub_agents` deletion (`ON DELETE CASCADE`).
 
 ### Env vars to set when the Gateway deploys
 
@@ -1060,23 +1128,52 @@ IRIS_RUNTIME_ID=<runtime-uuid-injected-by-vm-orchestrator>
 IRIS_VM_ID=<vm-uuid-injected-by-vm-orchestrator>
 ```
 
+Setting `IRIS_RUNTIME_ID`/`IRIS_VM_ID` does double duty: it's both this
+runtime's identity (returned from `/v2/health`, used in Runtime JWTs and
+`runtime_mapping`) *and* the trigger that activates one-user-one-VM scoping
+and the routing-table write once both are real UUIDs.
+
 ### Telegram/Slack via Gateway
 
-When the Gateway handles Telegram/Slack (instead of long-polling bots), it calls:
+When `GATEWAY_MODE=true`, **iris-runtime stops running its own Telegram
+long-polling bots and Slack Socket Mode sub-agent routing** — `main.ts` skips
+the bot-startup loop entirely, and `slack.ts`'s `dispatchEvent` short-circuits
+the sub-agent-routing branch (its virtual `BRIDGE-`/`SESSION-` channel handling
+for the *main* agent is untouched, since the main agent still needs that
+internally). This is a deliberate kill-switch added to prevent duplicate
+message processing — **the two ingestion paths are mutually exclusive by
+design**, not parallel. The Gateway becomes the sole ingestion path and calls:
 
 ```bash
 # Telegram message
 POST /v2/telegram/inbound
-Authorization: Bearer <InternalJWT>
+Authorization: Bearer <InternalJWT with scope:"integration">
 { "botId": "123456789", "chatId": "987654321", "text": "Hello", "user": "John" }
 
 # Slack message
 POST /v2/slack/inbound
-Authorization: Bearer <InternalJWT>
+Authorization: Bearer <InternalJWT with scope:"integration">
 { "workspaceId": "T01234567", "channelId": "C01234567", "text": "Hello", "user": "U01234567" }
 ```
 
-The long-polling bots and Socket Mode connections in iris-runtime continue to work alongside the Gateway routes — `GATEWAY_MODE=true` only enforces JWT on `/v2/*`, not on the existing transport connections.
+### What's still open
+
+Everything above compiles, builds, and passes round-trip tests against
+synthetic tokens shaped to match the documented payloads — but none of it has
+been exercised against a *real* Gateway yet (no Gateway repo exists here to
+cross-check token shapes against, no integration test). Before flipping
+`GATEWAY_MODE=true` in production, do one real round-trip on staging: mint an
+actual Internal JWT, an actual `scope: "integration"` token, and create a real
+`vm_routing` row, and confirm the Gateway and runtime agree on every field
+name and value.
+
+Separately, three Supabase tables remain inert placeholders despite their
+schema comments documenting iris-runtime as the intended writer/reader:
+`users` (read-only, to resolve `userId` — no read path exists), `claim_tokens`
+and `sessions` (meant to replace the working local JSON files
+`telegram-link-tokens.json` / `slack-link-tokens.json` / `sessions.json`).
+Wiring these up is a real migration of currently-working code, not a small
+addition — treat it as separate follow-up work, not a Gateway-merge blocker.
 
 ### Azure Blob Storage (optional write-through)
 
