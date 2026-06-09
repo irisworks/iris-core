@@ -26,12 +26,26 @@ export const VM_ID        = process.env.IRIS_VM_ID      ?? "default";
 
 // ── Payload shapes ──────────────────────────────────────────────────────────
 
+/**
+ * Runtime types — must match the runtime_type enum in supabase/schema.sql.
+ *
+ *   HOST_VM     — sub-agent running as a process directly on the user's VM
+ *                 (no container boundary; shares the VM OS with iris-runtime)
+ *   DOCKER      — sub-agent running in a Docker container inside the user's VM
+ *   FIRECRACKER — sub-agent running in a nested Firecracker micro-VM inside
+ *                 the user's VM (strongest isolation; requires /dev/kvm)
+ *
+ * The Gateway and VM Orchestrator use this field from runtime_mapping to
+ * understand the isolation boundary of each sub-agent's runtime.
+ */
+export type RuntimeType = "HOST_VM" | "DOCKER" | "FIRECRACKER";
+
 export interface InternalJWTPayload {
   userId:      string;
   vmId:        string;
   runtimeId:   string;
   agentId?:    string;
-  runtimeType: "HOST_VM" | "DOCKER";
+  runtimeType: RuntimeType;
   /**
    * Set to "integration" when the Gateway mints this token specifically to
    * forward Telegram/Slack bot traffic (the architecture's third JWT tier,
@@ -46,7 +60,7 @@ export interface InternalJWTPayload {
 export interface RuntimeJWTPayload {
   agentId:     string;
   runtimeId:   string;
-  runtimeType: "HOST_VM" | "DOCKER";
+  runtimeType: RuntimeType;
   scope:       "runtime";
   iat?:        number;
   exp?:        number;
@@ -116,7 +130,7 @@ export function isIntegrationScoped(payload: InternalJWTPayload): boolean {
   return !payload.scope || payload.scope === "integration";
 }
 
-export function generateRuntimeJWT(agentId: string, runtimeType: "HOST_VM" | "DOCKER"): string {
+export function generateRuntimeJWT(agentId: string, runtimeType: RuntimeType): string {
   return jwtEncode(
     { agentId, runtimeId: RUNTIME_ID, runtimeType, scope: "runtime" },
     RUNTIME_JWT_SECRET,
@@ -136,8 +150,8 @@ export function validateRuntimeJWT(token: string): RuntimeJWTPayload | null {
  */
 export const RUNTIME_AUTH_ENABLED = RUNTIME_JWT_SECRET.length > 0;
 
-export function runtimeTypeForAgent(runtime: "docker" | "firecracker"): "HOST_VM" | "DOCKER" {
-  return runtime === "docker" ? "DOCKER" : "HOST_VM";
+export function runtimeTypeForAgent(runtime: "docker" | "firecracker"): RuntimeType {
+  return runtime === "docker" ? "DOCKER" : "FIRECRACKER";
 }
 
 /**

@@ -141,7 +141,10 @@ ALTER TABLE vm_routing DISABLE ROW LEVEL SECURITY;
 -- Maps each sub-agent to its runtime ID and type within its VM.
 -- Written by iris-runtime when agents are provisioned.
 
-CREATE TYPE runtime_type AS ENUM ('HOST_VM', 'DOCKER');
+-- HOST_VM     = sub-agent process running directly on the user's VM (no container boundary)
+-- DOCKER      = sub-agent running in a Docker container inside the user's VM
+-- FIRECRACKER = sub-agent running in a nested Firecracker micro-VM (requires /dev/kvm)
+CREATE TYPE runtime_type AS ENUM ('HOST_VM', 'DOCKER', 'FIRECRACKER');
 
 CREATE TABLE IF NOT EXISTS runtime_mapping (
     runtime_id      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -257,3 +260,8 @@ DO $$ BEGIN
     ALTER TABLE sub_agents ADD CONSTRAINT sub_agents_slot_index_check
         CHECK (slot_index BETWEEN 1 AND 250);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Migration: add FIRECRACKER to runtime_type enum (idempotent) ──────────────
+-- If runtime_type already exists from a prior schema, ALTER TYPE adds the new
+-- value without touching existing rows. Safe to run unconditionally.
+ALTER TYPE runtime_type ADD VALUE IF NOT EXISTS 'FIRECRACKER';

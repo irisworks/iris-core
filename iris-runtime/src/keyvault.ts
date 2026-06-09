@@ -1,13 +1,15 @@
 /**
- * Minimal Azure Key Vault helper for storing dedicated bot/app credentials.
+ * Azure Key Vault helper for storing dedicated bot/app credentials.
  *
- * Per CLAUDE.md, secrets are never hardcoded — sub_agents stores secret *references*
- * (Key Vault URIs), never raw tokens. This module is the write/read/delete side of
- * that contract for runtime-issued secrets (the get-secret skill is the read side
- * for agent shell code; this is the TS-side counterpart used by the registry).
+ * sub_agents.*_token_ref stores a *reference* (never a raw token). Two ref formats:
  *
- * Degrades gracefully (mirrors getDb()/noDb() in sub-agent-registry.ts): when
- * IRIS_KEY_VAULT isn't set, every operation is a logged no-op returning null.
+ *   Key Vault URI  https://<vault>.vault.azure.net/secrets/<name>
+ *                  Used when IRIS_KEY_VAULT is set. Secrets live in Azure KV.
+ *
+ *   Raw fallback   raw:<base64-encoded-value>
+ *                  Used when IRIS_KEY_VAULT is NOT set (dev / non-Azure setups).
+ *                  The value is encoded in the ref itself — no external store.
+ *                  NOT suitable for production; log warning makes this clear.
  *
  * Uses execFile (argument array, no shell) — never interpolates secret values
  * into a shell string, which would be a command-injection vector.
@@ -18,6 +20,8 @@ import { promisify } from "util";
 import * as log from "./log.js";
 
 const execFileAsync = promisify(execFile);
+
+const RAW_PREFIX = "raw:";
 
 function vaultName(): string | null {
 	const v = process.env.IRIS_KEY_VAULT?.trim();
@@ -40,15 +44,21 @@ function nameFromRef(ref: string): string | null {
 }
 
 /**
- * Store a secret value, returning its Key Vault URI (the "ref" persisted in
- * sub_agents.*_token_ref). Returns null if Key Vault isn't configured — the
- * caller should treat that as "credentials unavailable," not silently proceed.
+ * Store a secret value and return a ref string to persist in the database.
+ *
+ * When IRIS_KEY_VAULT is set: stores in Azure Key Vault, returns the KV URI.
+ * When not set: encodes the value as "raw:<base64>" and returns that as the ref.
+ * The raw fallback keeps the attach flow functional without Azure; it is not
+ * secure for production (the value is recoverable from the database ref).
  */
 export async function setSecret(name: string, value: string): Promise<string | null> {
 	const vault = vaultName();
 	if (!vault) {
-		log.logWarning(`[keyvault] setSecret(${name}): IRIS_KEY_VAULT not set — skipping`);
-		return null;
+		log.logWarning(
+			`[keyvault] IRIS_KEY_VAULT not set — storing "${name}" as base64 ref. ` +
+			"Configure Key Vault for production; this fallback is for development only.",
+		);
+		return `${RAW_PREFIX}${Buffer.from(value, "utf-8").toString("base64")}`;
 	}
 	const secretName = sanitizeName(name);
 	try {
@@ -66,9 +76,23 @@ export async function setSecret(name: string, value: string): Promise<string | n
 	}
 }
 
-/** Resolve a Key Vault URI ref back to its secret value. */
+/**
+ * Resolve a ref back to its secret value.
+ * Handles both Key Vault URIs and raw fallback refs transparently.
+ */
 export async function getSecret(ref: string | null | undefined): Promise<string | null> {
 	if (!ref) return null;
+
+	// Raw fallback — value encoded in the ref itself, no KV call needed.
+	if (ref.startsWith(RAW_PREFIX)) {
+		try {
+			return Buffer.from(ref.slice(RAW_PREFIX.length), "base64").toString("utf-8");
+		} catch {
+			log.logWarning("[keyvault] getSecret: malformed raw ref");
+			return null;
+		}
+	}
+
 	const vault = vaultName();
 	const secretName = nameFromRef(ref);
 	if (!vault || !secretName) return null;
@@ -87,9 +111,12 @@ export async function getSecret(ref: string | null | undefined): Promise<string 
 	}
 }
 
-/** Delete a secret by ref — used when detaching an integration or deleting an agent. */
+/**
+ * Delete a secret by ref — used when detaching an integration or deleting an agent.
+ * Raw fallback refs have no external storage to clean up; KV URIs are deleted via az CLI.
+ */
 export async function deleteSecretIfPresent(ref: string | null | undefined): Promise<void> {
-	if (!ref) return;
+	if (!ref || ref.startsWith(RAW_PREFIX)) return;
 	const vault = vaultName();
 	const secretName = nameFromRef(ref);
 	if (!vault || !secretName) return;

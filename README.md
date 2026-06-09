@@ -183,7 +183,8 @@ This is **idempotent** — safe to re-run any time without data loss.
 CREATE TYPE agent_status      AS ENUM ('running', 'stopped', 'crashed');
 CREATE TYPE task_type         AS ENUM ('immediate', 'scheduled');
 CREATE TYPE task_status       AS ENUM ('pending', 'running', 'done', 'failed', 'skipped');
-CREATE TYPE runtime_type      AS ENUM ('HOST_VM', 'DOCKER');
+-- HOST_VM=process on VM, DOCKER=container in VM, FIRECRACKER=nested micro-VM
+CREATE TYPE runtime_type      AS ENUM ('HOST_VM', 'DOCKER', 'FIRECRACKER');
 CREATE TYPE claim_token_type  AS ENUM ('telegram', 'slack');
 
 -- ── Sub-agent registry ────────────────────────────────────────────────────────
@@ -370,6 +371,9 @@ DO $$ BEGIN
     ALTER TABLE sub_agents ADD CONSTRAINT sub_agents_slot_index_check
         CHECK (slot_index BETWEEN 1 AND 250);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Add FIRECRACKER to runtime_type enum (idempotent — safe to re-run).
+ALTER TYPE runtime_type ADD VALUE IF NOT EXISTS 'FIRECRACKER';
 ```
 
 #### 1d — Verify
