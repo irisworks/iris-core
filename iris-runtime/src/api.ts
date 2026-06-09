@@ -28,6 +28,8 @@
  *   DELETE /agents/:id/slack              — unlink Slack from sub-agent
  *   POST /internal/write-event           — write an event file (immediate/one-shot/periodic/interval)
  *                                          body: { name, type, channelId, text, ...type-specific fields }
+ *   POST /internal/skills/acquire       — sub-agent acquires a global skill at runtime (x-agent-id header)
+ *                                          body: { skill: string }
  *
  *   POST   /sessions                     — create session
  *   GET    /sessions                     — list all sessions
@@ -113,7 +115,7 @@ export function startApiServer(
 	const memoryMgr      = new MemoryManager(workingDir);
 	const skillMgr       = new SkillManager();
 	const threadMgr      = new ThreadManager(workingDir);
-	const integrationMgr = new IntegrationManager(telegramLinkManager, slackLinkManager);
+	const integrationMgr = new IntegrationManager();
 
 	const v2BaseDeps = {
 		workingDir,
@@ -971,6 +973,85 @@ export function startApiServer(
 				await updateTaskStatus(taskId, body.status as TaskStatus, body.output);
 				log.logInfo(`[api] PATCH /internal/agent-task/${taskId}/status → ${body.status}`);
 				json(res, 200, { taskId, status: body.status });
+				return;
+			}
+
+			// ── GET /internal/integrations/:agentId/status ───────────────────────────
+			// A dedicated bot calls this once at startup to learn whether it has
+			// already been verified (so it knows whether to gate routing on a claim
+			// token). Internal callback — same trust boundary as /internal/agent-task.
+			if (method === "GET" && urlParts[0] === "internal" && urlParts[1] === "integrations" && urlParts[3] === "status") {
+				const agentId = urlParts[2];
+				const agent = await getSubAgent(agentId);
+				if (!agent) { json(res, 404, { error: `Agent ${agentId} not found` }); return; }
+				const status = await integrationMgr.getStatus(agentId);
+				json(res, 200, status);
+				return;
+			}
+
+			// ── POST /internal/integrations/:platform/verify ─────────────────────────
+			// Called back by a sub-agent's own dedicated bot after it relays the claim
+			// token its owner sent it — proves the owner controls the bot, not just
+			// that they pasted a token string into the attach form. body: { agentId, token }
+			if (method === "POST" && urlParts[0] === "internal" && urlParts[1] === "integrations" && urlParts[3] === "verify") {
+				const platform = urlParts[2];
+				if (platform !== "telegram" && platform !== "slack") { json(res, 404, { error: "Unknown platform" }); return; }
+
+				let body: { agentId?: string; token?: string };
+				try { body = JSON.parse(await readBody(req)); } catch {
+					json(res, 400, { error: "Invalid JSON body" });
+					return;
+				}
+				if (!body.agentId || !body.token) { json(res, 400, { error: "Required: agentId, token" }); return; }
+
+				const verified = await integrationMgr.verify(body.agentId, platform, body.token);
+				log.logInfo(`[api] POST /internal/integrations/${platform}/verify → agent=${body.agentId} verified=${verified}`);
+				json(res, 200, { verified });
+				return;
+			}
+
+			// ── POST /internal/skills/acquire ────────────────────────────────────────
+			// A sub-agent calls this (via IRIS_API_URL) to add a global skill to its
+			// own workspace at runtime. Identified by x-agent-id header (already
+			// validated by the guard-dog above). Idempotent: no-op if already assigned.
+			if (method === "POST" && urlParts[0] === "internal" && urlParts[1] === "skills" && urlParts[2] === "acquire") {
+				const agentId = req.headers["x-agent-id"] as string | undefined;
+				if (!agentId) { json(res, 400, { error: "x-agent-id header required" }); return; }
+
+				let body: { skill?: string };
+				try { body = JSON.parse(await readBody(req)); } catch {
+					json(res, 400, { error: "Invalid JSON body" });
+					return;
+				}
+				if (!body.skill) { json(res, 400, { error: "skill is required" }); return; }
+
+				const agent = await getSubAgent(agentId);
+				if (!agent) { json(res, 404, { error: `Agent ${agentId} not found` }); return; }
+
+				const globalSkillsDir = process.env.IRIS_SKILLS_DIR ?? `${process.env.IRIS_DIR ?? "/iris"}/data/skills`;
+				const available = getAvailableSkills(globalSkillsDir);
+				if (!available.includes(body.skill)) {
+					json(res, 404, { error: `Skill "${body.skill}" not found in global library` });
+					return;
+				}
+
+				if (agent.skills.includes(body.skill)) {
+					json(res, 200, { agentId, skill: body.skill, acquired: false, reason: "already assigned" });
+					return;
+				}
+
+				const updatedSkills = [...agent.skills, body.skill];
+				const { getDb } = await import("./db.js");
+				const db = getDb();
+				if (db) await db.from("sub_agents").update({ skills: updatedSkills, updated_at: new Date().toISOString() }).eq("agent_id", agentId);
+
+				const agentWorkspaceDir = `${process.env.IRIS_DIR ?? "/iris"}/data/agents/${agentId}`;
+				try { await addSkillToAgent(agentWorkspaceDir, body.skill, globalSkillsDir); } catch (e) {
+					log.logWarning(`[api] /internal/skills/acquire: addSkillToAgent failed`, String(e));
+				}
+
+				log.logInfo(`[api] POST /internal/skills/acquire → agent=${agentId} skill=${body.skill}`);
+				json(res, 200, { agentId, skill: body.skill, acquired: true, skills: updatedSkills });
 				return;
 			}
 

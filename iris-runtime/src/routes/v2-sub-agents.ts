@@ -8,14 +8,22 @@
  * PATCH  /v2/sub-agents/:id/skills              update skills
  * POST   /v2/sub-agents/:id/message             send message via bridge
  * GET    /v2/sub-agents/:id/history             conversation history (requires ?channelId=)
- * POST   /v2/sub-agents/:id/telegram/token      generate Telegram claim token
- * DELETE /v2/sub-agents/:id/telegram            unlink Telegram
- * POST   /v2/sub-agents/:id/slack/token         generate Slack claim token
- * DELETE /v2/sub-agents/:id/slack               unlink Slack
+ * GET    /v2/sub-agents/:id/sessions            list sessions (threads) for this agent
+ * POST   /v2/sub-agents/:id/integrations/:platform    attach dedicated bot/app credentials
+ *                                                       (platform: telegram | slack) — returns claim token
+ * DELETE /v2/sub-agents/:id/integrations/:platform    detach (deletes Key Vault secrets, re-provisions)
+ *
+ * Each sub-agent owns its own dedicated Telegram Bot / Slack App — there is no
+ * shared pool to claim from. Attach stores the BYO credentials, re-provisions
+ * the agent's container so the token becomes a live env var, and issues a claim
+ * token; the owner sends that token to *their own* bot to prove control of it
+ * (verified via POST /internal/integrations/:platform/verify, called back by the
+ * bot's own runtime — see managers/integration.ts).
  */
 
 import { writeFileSync } from "fs";
 import { join } from "path";
+import { randomBytes } from "crypto";
 import * as log from "../log.js";
 import {
   listSubAgents,
@@ -23,6 +31,8 @@ import {
   createSubAgent,
   deleteSubAgent,
   updateSubAgentStatus,
+  type SubAgentRecord,
+  type IntegrationKind,
 } from "../sub-agent-registry.js";
 import {
   provisionAgent,
@@ -36,6 +46,7 @@ import {
   removeSkillFromAgent,
 } from "../agent-provision.js";
 import { getDb } from "../db.js";
+import { getSecret } from "../keyvault.js";
 import { generateRuntimeJWT, runtimeAuthHeader, runtimeTypeForAgent } from "../auth.js";
 import type { V2Handler } from "./v2-types.js";
 import { ok, created, err } from "./v2-types.js";
@@ -45,6 +56,33 @@ const IRISDIR = process.env.IRIS_DIR ?? "/iris";
 function agentBridgeUrl(slotIndex: number, runtime: string): string {
   if (runtime === "firecracker") return `http://172.20.${slotIndex}.2:4200`;
   return `http://127.0.0.1:${4200 + slotIndex}`;
+}
+
+/**
+ * Re-provision an agent's container with its current set of dedicated-bot
+ * credentials resolved from Key Vault. provisionDockerAgent does `docker rm -f`
+ * before `docker run`, so calling this is effectively "restart with new env" —
+ * the only way to apply env-var changes, since Docker has no live-injection.
+ * Used after attach/detach so the running bot reflects the latest credentials.
+ */
+async function reprovisionWithCurrentIntegrations(agent: SubAgentRecord, workingDir: string): Promise<void> {
+  const [telegramBotToken, slackAppToken, slackBotToken] = await Promise.all([
+    getSecret(agent.telegramBotTokenRef),
+    getSecret(agent.slackAppTokenRef),
+    getSecret(agent.slackBotTokenRef),
+  ]);
+  const containerName = await provisionAgent({
+    agentId:   agent.agentId,
+    agentName: agent.name,
+    slotIndex: agent.slotIndex,
+    skills:    agent.skills,
+    runtime:   agent.runtime,
+    telegramBotToken: telegramBotToken ?? undefined,
+    slackAppToken:    slackAppToken    ?? undefined,
+    slackBotToken:    slackBotToken    ?? undefined,
+  });
+  await updateSubAgentStatus(agent.agentId, "running", containerName);
+  registerAgentBridge(workingDir, agent.name, agent.agentId, agent.slotIndex, agent.runtime);
 }
 
 async function callBridge(
@@ -114,8 +152,8 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
   if (method === "GET" && parts.length === 1) {
     const agent = await getSubAgent(id);
     if (!agent) return err(404, "Agent not found");
-    const links = await deps.integrationManager.getLinks(agent.agentId);
-    return ok({ ...agent, integrations: links });
+    const integrations = await deps.integrationManager.getStatus(agent.agentId);
+    return ok({ ...agent, integrations });
   }
 
   // DELETE /v2/sub-agents/:id
@@ -123,8 +161,8 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
     const agent = await getSubAgent(id);
     if (!agent) return err(404, "Agent not found");
 
-    await deps.integrationManager.unlink(agent.agentId, "telegram");
-    await deps.integrationManager.unlink(agent.agentId, "slack");
+    // Key Vault cleanup for any attached credentials happens inside deleteSubAgent —
+    // no separate unlink step needed (the container is being destroyed anyway).
 
     if (agent.runtime === "firecracker") {
       await deprovisionFirecrackerAgent(agent.slotIndex);
@@ -172,9 +210,6 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
 
     writeFileSync(join(agentDir, "MEMORY.md"), buildMemoryContentForAgent(agent.name, skills, agent.runtime));
 
-    const links = await deps.integrationManager.getLinks(agent.agentId);
-    deps.integrationManager.invalidateCache(links.telegram ?? "", links.slack ?? "");
-
     log.logInfo(`[v2/sub-agents] skills updated for ${agent.agentId}: ${skills.join(", ")}`);
     return ok({ agentId: agent.agentId, skills });
   }
@@ -185,21 +220,72 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
     if (!agent) return err(404, "Agent not found");
     if (agent.status !== "running") return err(503, `Agent is ${agent.status}`);
 
-    let body: { text?: string; user?: string; channelId?: string };
+    let body: { text?: string; user?: string; channelId?: string; newThread?: boolean };
     try { body = JSON.parse(await readBody()); } catch {
       return err(400, "invalid JSON body");
     }
     if (!body.text) return err(400, "text is required");
 
-    const channelId = body.channelId ?? `v2-${agent.agentId}`;
-    const bridgeUrl = agentBridgeUrl(agent.slotIndex, agent.runtime);
+    // Channel resolution — three cases:
+    //   explicit channelId: use as-is (continue existing thread)
+    //   newThread: true:    start a fresh thread with a random channelId
+    //   neither:            fall back to per-agent default (single channel, backward-compat)
+    let channelId: string;
+    let isNewThread = false;
+    if (body.channelId) {
+      channelId = body.channelId;
+    } else if (body.newThread) {
+      channelId = `v2-${randomBytes(8).toString("hex")}`;
+      isNewThread = true;
+    } else {
+      channelId = `v2-${agent.agentId}`;
+    }
 
+    // Create a session record for new threads so they appear in GET /sessions
+    if (isNewThread) {
+      deps.sessionManager.create({
+        agentId:        agent.agentId,
+        originChannel:  channelId,
+        originThreadTs: Date.now().toString(),
+        metadata:       { source: "v2-api", user: body.user ?? "gateway" },
+      });
+    }
+
+    const bridgeUrl = agentBridgeUrl(agent.slotIndex, agent.runtime);
     log.logInfo(`[v2/sub-agents/${agent.agentId}/message] channel=${channelId}: ${body.text.substring(0, 60)}`);
     try {
       const response = await callBridge(bridgeUrl, channelId, body.text, body.user ?? "gateway", agent.agentId, agent.runtime);
-      return ok({ response, agentId: agent.agentId, channelId });
+      return ok({ response, agentId: agent.agentId, channelId, newThread: isNewThread });
     } catch (e) {
       return err(504, `Bridge call failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // GET /v2/sub-agents/:id/sessions
+  if (method === "GET" && parts[1] === "sessions") {
+    const agent = await getSubAgent(id);
+    if (!agent) return err(404, "Agent not found");
+    const sessions = deps.sessionManager.listForAgent(agent.agentId);
+    return ok({ agentId: agent.agentId, sessions });
+  }
+
+  // POST /v2/sub-agents/:id/skills/define — create an agent-private skill
+  // (not added to the global library; only visible in this agent's workspace)
+  if (method === "POST" && parts[1] === "skills" && parts[2] === "define") {
+    const agent = await getSubAgent(id);
+    if (!agent) return err(404, "Agent not found");
+    let body: { name?: string; description?: string; content?: string };
+    try { body = JSON.parse(await readBody()); } catch {
+      return err(400, "invalid JSON body");
+    }
+    if (!body.name || !body.description) return err(400, "name and description are required");
+    const agentDir = `${IRISDIR}/data/agents/${agent.agentId}`;
+    try {
+      const skill = deps.skillManager.createForAgent(agentDir, body.name, body.description, body.content);
+      log.logInfo(`[v2/sub-agents/${agent.agentId}/skills/define] created private skill "${body.name}"`);
+      return created({ agentId: agent.agentId, skill });
+    } catch (e) {
+      return err(409, e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -219,58 +305,43 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
     return ok({ agentId: agent.agentId, channelId, history });
   }
 
-  // POST /v2/sub-agents/:id/telegram/token
-  if (method === "POST" && parts[1] === "telegram" && parts[2] === "token") {
+  // POST /v2/sub-agents/:id/integrations/:platform   { telegramBotToken } | { slackAppToken, slackBotToken }
+  if (method === "POST" && parts[1] === "integrations" && parts[2]) {
+    const platform = parts[2];
+    if (platform !== "telegram" && platform !== "slack") return err(404, "Unknown platform");
+
     const agent = await getSubAgent(id);
     if (!agent) return err(404, "Agent not found");
+
+    let body: { telegramBotToken?: string; slackAppToken?: string; slackBotToken?: string };
+    try { body = JSON.parse(await readBody()); } catch {
+      return err(400, "invalid JSON body");
+    }
+
     try {
-      const token = await deps.integrationManager.generateToken(agent.agentId, "telegram");
-      log.logInfo(`[v2/sub-agents/${agent.agentId}/telegram/token] claim token issued`);
-      return ok({
-        token,
-        agentName:        agent.name,
-        expiresInSeconds: 600,
-        instructions:     `Send this token to your Telegram bot to link it to "${agent.name}".`,
-      });
+      const result = await deps.integrationManager.attach(agent.agentId, platform as IntegrationKind, body);
+      const refreshed = await getSubAgent(agent.agentId);
+      if (refreshed) await reprovisionWithCurrentIntegrations(refreshed, deps.workingDir);
+      log.logInfo(`[v2/sub-agents/${agent.agentId}/integrations/${platform}] credentials attached, claim token issued`);
+      return ok({ agentId: agent.agentId, agentName: agent.name, platform, ...result });
     } catch (e) {
       return err(409, String(e));
     }
   }
 
-  // DELETE /v2/sub-agents/:id/telegram
-  if (method === "DELETE" && parts[1] === "telegram" && !parts[2]) {
-    const agent = await getSubAgent(id);
-    if (!agent) return err(404, "Agent not found");
-    const unlinked = await deps.integrationManager.unlink(agent.agentId, "telegram");
-    log.logInfo(`[v2/sub-agents/${agent.agentId}/telegram] unlinked=${unlinked}`);
-    return ok({ agentId: agent.agentId, unlinked });
-  }
+  // DELETE /v2/sub-agents/:id/integrations/:platform
+  if (method === "DELETE" && parts[1] === "integrations" && parts[2]) {
+    const platform = parts[2];
+    if (platform !== "telegram" && platform !== "slack") return err(404, "Unknown platform");
 
-  // POST /v2/sub-agents/:id/slack/token
-  if (method === "POST" && parts[1] === "slack" && parts[2] === "token") {
     const agent = await getSubAgent(id);
     if (!agent) return err(404, "Agent not found");
-    try {
-      const token = await deps.integrationManager.generateToken(agent.agentId, "slack");
-      log.logInfo(`[v2/sub-agents/${agent.agentId}/slack/token] claim token issued`);
-      return ok({
-        token,
-        agentName:        agent.name,
-        expiresInSeconds: 600,
-        instructions:     `Send this token as a DM to your Slack bot to link it to "${agent.name}".`,
-      });
-    } catch (e) {
-      return err(409, String(e));
-    }
-  }
 
-  // DELETE /v2/sub-agents/:id/slack
-  if (method === "DELETE" && parts[1] === "slack" && !parts[2]) {
-    const agent = await getSubAgent(id);
-    if (!agent) return err(404, "Agent not found");
-    const unlinked = await deps.integrationManager.unlink(agent.agentId, "slack");
-    log.logInfo(`[v2/sub-agents/${agent.agentId}/slack] unlinked=${unlinked}`);
-    return ok({ agentId: agent.agentId, unlinked });
+    const detached = await deps.integrationManager.detach(agent.agentId, platform as IntegrationKind);
+    const refreshed = await getSubAgent(agent.agentId);
+    if (refreshed) await reprovisionWithCurrentIntegrations(refreshed, deps.workingDir);
+    log.logInfo(`[v2/sub-agents/${agent.agentId}/integrations/${platform}] detached=${detached}`);
+    return ok({ agentId: agent.agentId, platform, detached });
   }
 
   return null;

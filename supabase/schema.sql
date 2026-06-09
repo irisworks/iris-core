@@ -9,6 +9,11 @@
 
 CREATE TYPE agent_status AS ENUM ('running', 'stopped', 'crashed');
 
+-- slot_index doubles as network-addressing key (Docker bridge port = 4200+slot,
+-- Firecracker guest IP = 172.20.{slot}.2 — a valid IPv4 octet caps it at 254).
+-- "No limit on sub-agents" (product requirement) means no artificial low ceiling
+-- like the old value of 10 — 250 is the real engineering ceiling imposed by the
+-- Firecracker addressing scheme, reusable via slot recycling on delete.
 CREATE TABLE IF NOT EXISTS sub_agents (
     agent_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name                    TEXT        NOT NULL,
@@ -17,9 +22,18 @@ CREATE TABLE IF NOT EXISTS sub_agents (
     docker_container_id     TEXT,
     status                  agent_status NOT NULL DEFAULT 'stopped',
     skills                  JSONB       NOT NULL DEFAULT '[]',
-    slot_index              SMALLINT    NOT NULL CHECK (slot_index BETWEEN 1 AND 10),
+    slot_index              SMALLINT    NOT NULL CHECK (slot_index BETWEEN 1 AND 250),
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    -- Dedicated bot/app credentials — each sub-agent owns its own Telegram Bot
+    -- and Slack App (no shared pool). Values are Key Vault secret URIs, never
+    -- raw tokens — resolved at provision/attach time, mirroring resolveLlmKey.
+    telegram_bot_token_ref  TEXT,
+    slack_app_token_ref     TEXT,
+    slack_bot_token_ref     TEXT,
+    telegram_status         TEXT        CHECK (telegram_status IN ('unattached', 'pending_verification', 'linked')),
+    slack_status            TEXT        CHECK (slack_status    IN ('unattached', 'pending_verification', 'linked')),
 
     UNIQUE (name),
     UNIQUE (slot_index)
@@ -27,10 +41,16 @@ CREATE TABLE IF NOT EXISTS sub_agents (
 
 ALTER TABLE sub_agents DISABLE ROW LEVEL SECURITY;
 
--- ── Telegram bot ↔ Sub-agent links ───────────────────────────────────────────
--- One-to-one: one Telegram bot can link to exactly one sub-agent, and vice versa.
--- Claim tokens are used to establish the link (generated on demand, single-use).
--- Links are stored here; pending tokens live in local file storage (see telegram-link.ts).
+-- ── Legacy shared-pool link tables (DEPRECATED — retained for migration only) ─
+-- Superseded by the telegram_status/slack_status + *_token_ref columns above:
+-- each sub-agent now owns a dedicated bot/app rather than claiming one from a
+-- shared pool, so a separate link-table is no longer the right model (it can't
+-- express "this agent owns this bot," only "this agent claimed that bot").
+--
+-- These tables stay live, unmodified, until the Phase 8 migration window closes:
+-- existing linked agents keep working against them (LEGACY_SHARED_BOT_MODE=true)
+-- while owners self-migrate to the dedicated-bot flow. Once the last row is
+-- gone, drop both tables — do not write new rows here after cutover.
 
 CREATE TABLE IF NOT EXISTS sub_agent_telegram_links (
     bot_id          TEXT        PRIMARY KEY,                   -- Telegram bot numeric ID as text
@@ -41,11 +61,6 @@ CREATE TABLE IF NOT EXISTS sub_agent_telegram_links (
 );
 
 ALTER TABLE sub_agent_telegram_links DISABLE ROW LEVEL SECURITY;
-
--- ── Slack workspace ↔ Sub-agent links ──────────────────────────────────────────
--- One-to-one: one Slack workspace can link to exactly one sub-agent, and vice versa.
--- Claim tokens are used to establish the link (generated on demand, single-use).
--- Links are stored here; pending tokens live in local file storage (see slack-link.ts).
 
 CREATE TABLE IF NOT EXISTS sub_agent_slack_links (
     workspace_id    TEXT        PRIMARY KEY,                   -- Slack team_id (e.g. T01234567)
@@ -210,3 +225,35 @@ ALTER TABLE sessions DISABLE ROW LEVEL SECURITY;
 --
 -- After running the migration, remove the upsertCompatRow / deleteCompatRow
 -- shim from src/sub-agent-registry.ts.
+
+-- ── Migration: dedicated-bot columns on sub_agents (additive, idempotent) ────
+-- Needed if sub_agents already exists from a prior schema version — CREATE
+-- TABLE IF NOT EXISTS above will not add columns to an existing table.
+-- Safe to run unconditionally; IF NOT EXISTS makes every clause a no-op on a
+-- fresh database that already has these columns from the CREATE TABLE above.
+
+ALTER TABLE sub_agents
+    ADD COLUMN IF NOT EXISTS telegram_bot_token_ref TEXT,
+    ADD COLUMN IF NOT EXISTS slack_app_token_ref    TEXT,
+    ADD COLUMN IF NOT EXISTS slack_bot_token_ref    TEXT,
+    ADD COLUMN IF NOT EXISTS telegram_status        TEXT,
+    ADD COLUMN IF NOT EXISTS slack_status           TEXT;
+
+DO $$ BEGIN
+    ALTER TABLE sub_agents ADD CONSTRAINT sub_agents_telegram_status_check
+        CHECK (telegram_status IN ('unattached', 'pending_verification', 'linked'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    ALTER TABLE sub_agents ADD CONSTRAINT sub_agents_slack_status_check
+        CHECK (slack_status IN ('unattached', 'pending_verification', 'linked'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Raise the slot_index ceiling from the old artificial cap of 10 to the real
+-- engineering ceiling (254, the Firecracker IPv4-octet limit, rounded down to
+-- 250 for headroom). No-op if the constraint was already created at 250.
+DO $$ BEGIN
+    ALTER TABLE sub_agents DROP CONSTRAINT IF EXISTS sub_agents_slot_index_check;
+    ALTER TABLE sub_agents ADD CONSTRAINT sub_agents_slot_index_check
+        CHECK (slot_index BETWEEN 1 AND 250);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;

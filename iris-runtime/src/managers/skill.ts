@@ -135,4 +135,23 @@ export class SkillManager {
   unassignFromAgent(agentWorkspaceDir: string, skill: string): void {
     removeSkillFromAgent(agentWorkspaceDir, skill);
   }
+
+  /**
+   * Create a skill directly in an agent's own workspace (agent-private — not
+   * added to the global library, not visible to other agents). Used for skills
+   * that are specific to one agent and don't belong in the shared library.
+   */
+  createForAgent(agentWorkspaceDir: string, name: string, description: string, content?: string): SkillDetail {
+    if (!SKILL_NAME_RE.test(name)) {
+      throw new Error("Skill name must be lowercase letters, digits, and hyphens, starting with a letter (max 64 chars)");
+    }
+    const agentSkillsDir = join(agentWorkspaceDir, "skills");
+    const skillDir = join(agentSkillsDir, name);
+    if (existsSync(skillDir)) throw new Error(`Skill "${name}" already exists in agent workspace`);
+    mkdirSync(skillDir, { recursive: true });
+    const mdPath = join(skillDir, "SKILL.md");
+    writeFileSync(mdPath, renderSkillMd(name, description, content?.trim() || defaultSkillContent(name)));
+    const { description: desc, content: body } = parseSkillMd(readFileSync(mdPath, "utf-8"));
+    return { name, description: desc, content: body, files: readdirSync(skillDir).sort() };
+  }
 }

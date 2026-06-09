@@ -18,6 +18,7 @@ import { randomUUID } from "crypto";
 export interface Session {
 	sessionId: string; // UUID
 	createdAt: string; // ISO timestamp
+	agentId?:  string; // sub-agent owner; absent for Main Iris sessions
 
 	integrations: {
 		slack: {
@@ -87,9 +88,14 @@ export function findByEmail(sessions: Map<string, Session>, email: string): Sess
 	return undefined;
 }
 
+export function listForAgent(sessions: Map<string, Session>, agentId: string): Session[] {
+	return Array.from(sessions.values()).filter((s) => s.agentId === agentId);
+}
+
 export function createSession(
 	workingDir: string,
 	fields: {
+		agentId?: string;
 		originChannel: string;
 		originThreadTs: string;
 		workingChannel?: string;
@@ -102,6 +108,7 @@ export function createSession(
 	const session: Session = {
 		sessionId: randomUUID(),
 		createdAt: new Date().toISOString(),
+		...(fields.agentId !== undefined && { agentId: fields.agentId }),
 		integrations: {
 			slack: {
 				originChannel: fields.originChannel,

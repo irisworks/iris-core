@@ -197,6 +197,16 @@ export interface ProvisionParams {
 	irisRepoDir?: string;    // default: /iris/repo
 	irisHome?: string;       // default: /home/azureuser
 	irisApiUrl?: string;     // default: http://172.18.0.1:3000
+
+	// Dedicated bot/app credentials (resolved secret values, not Key Vault refs —
+	// the caller resolves refs to values right before provisioning, mirroring
+	// resolveLlmKey's apiKey resolution below). Each sub-agent owns its own bot;
+	// these become that container's TELEGRAM_BOT_TOKEN / IRIS_SLACK_APP_TOKEN /
+	// IRIS_SLACK_BOT_TOKEN — same env var names main.ts already reads, so the
+	// AGENT_ID branch only needs to decide *whether* to construct a bot, not how.
+	telegramBotToken?: string;
+	slackAppToken?: string;
+	slackBotToken?: string;
 }
 
 // ============================================================================
@@ -233,6 +243,13 @@ async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 	const { provider, model, keyEnvVar, apiKey } = resolveLlmKey(irisDir);
 	const llmKeyEnv = apiKey ? `-e ${keyEnvVar}=${apiKey}` : "";
 
+	// Dedicated bot credentials — only injected if this agent has its own.
+	// Same env var names main.ts's shared-bot code already read, by design:
+	// the AGENT_ID branch decides whether to construct a bot, not how to read tokens.
+	const tgTokenEnv  = params.telegramBotToken ? `-e TELEGRAM_BOT_TOKEN=${params.telegramBotToken}`  : "";
+	const slackAppEnv = params.slackAppToken    ? `-e IRIS_SLACK_APP_TOKEN=${params.slackAppToken}`   : "";
+	const slackBotEnv = params.slackBotToken    ? `-e IRIS_SLACK_BOT_TOKEN=${params.slackBotToken}`   : "";
+
 	// spawn-agent deliberately excluded — enforces no-agent-creation at capability level.
 	// Skills are served from the agent's own workspace dir (/workspace/skills), which is
 	// part of the /workspace volume mount — no separate global skills mount here.
@@ -245,6 +262,9 @@ async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 		`-e IRIS_PROVIDER=${provider}`,
 		`-e IRIS_MODEL=${model}`,
 		llmKeyEnv,
+		tgTokenEnv,
+		slackAppEnv,
+		slackBotEnv,
 		"-e IRIS_ENV=prod",
 		`-e AGENT_NAME=${params.agentName}`,
 		`-e AGENT_ID=${params.agentId}`,
@@ -355,6 +375,10 @@ async function provisionFirecrackerAgent(params: ProvisionParams): Promise<strin
 		"IRIS_ENV=prod",
 		`AGENT_NAME=${params.agentName}`,
 		`AGENT_ID=${params.agentId}`,
+		// Dedicated bot credentials — parity with provisionDockerAgent above.
+		params.telegramBotToken ? `TELEGRAM_BOT_TOKEN=${params.telegramBotToken}`  : "",
+		params.slackAppToken    ? `IRIS_SLACK_APP_TOKEN=${params.slackAppToken}`   : "",
+		params.slackBotToken    ? `IRIS_SLACK_BOT_TOKEN=${params.slackBotToken}`   : "",
 		`IRIS_API_URL=${irisApiUrl}`,
 		`IRIS_BRIDGE_PORT=${FIRECRACKER_BRIDGE_PORT}`,
 	].filter(Boolean).join(" ");

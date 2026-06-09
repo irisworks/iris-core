@@ -4,21 +4,22 @@ import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { startApiServer } from "./api.js";
-import { startBridgeServer } from "./bridge.js";
+import { startBridgeServer, resolveBridgeRequest, resolveBridgeByChannel, notifyAgentBridge, registerNotifyCallback } from "./bridge.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
-import { TelegramBot, type TelegramEvent } from "./telegram.js";
+import { TelegramBot, type TelegramEvent, type DedicatedAgentInfo } from "./telegram.js";
 import { TelegramLinkManager } from "./telegram-link.js";
 import { SlackLinkManager } from "./slack-link.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
 import { startScheduler, type SchedulerCallbacks } from "./scheduler.js";
-import { resolveBridgeRequest, resolveBridgeByChannel } from "./bridge.js";
 import { startWatchdog } from "./agent-watchdog.js";
 import { getMissedTasks, updateTaskStatus } from "./task-queue.js";
 import { GATEWAY_MODE } from "./auth.js";
+import { getSubAgent } from "./sub-agent-registry.js";
+import { bridgeUrlForAgent } from "./agent-provision.js";
 
 // ============================================================================
 // Config
@@ -495,16 +496,38 @@ const telegramLinkManager = new TelegramLinkManager(workingDir);
 // Single SlackLinkManager shared across the Slack bot and the API server
 const slackLinkManager = new SlackLinkManager(workingDir);
 
+// Set by registerNotifyCallback below — routes /notify requests to the
+// appropriate local bot (sub-agents only). Declared here so schedulerCallbacks
+// can close over it before the bots are constructed.
+let localNotify: ((channelId: string, text: string) => Promise<void>) | null = null;
+
 // Scheduler callbacks — notifyOwner posts a message via the owning bot
 const schedulerCallbacks: SchedulerCallbacks = {
 	workingDir,
 	notifyOwner: (botId, channelId, text) => {
+		// Legacy shared-pool path: find bot by Telegram botId in tgBotsForApi
 		const bot = tgBotsForApi.find((b) => b.getBotId() === botId) ?? tgBotsForApi[0];
 		if (bot) void bot.postMessage(channelId, text).catch((err: unknown) =>
 			log.logWarning(`[notifyOwner] postMessage to ${channelId} failed`, String(err)),
 		);
 	},
 	getBotForAgent: (agentId) => telegramLinkManager.getBotForAgent(agentId),
+	// Preferred path in dedicated-bot model: relay to the agent's own bridge /notify endpoint.
+	notifyAgent: async (agentId, channelId, text) => {
+		// If this process IS the target agent, deliver directly via our own bot.
+		if (process.env.AGENT_ID === agentId && localNotify) {
+			await localNotify(channelId, text);
+			return;
+		}
+		// Otherwise relay through the agent's bridge server (Main Iris → sub-agent).
+		const agent = await getSubAgent(agentId);
+		if (!agent) {
+			log.logWarning(`[notifyAgent] Agent ${agentId} not found — cannot deliver notification`);
+			return;
+		}
+		const bridgeUrl = bridgeUrlForAgent(agent.slotIndex, agent.runtime);
+		await notifyAgentBridge(bridgeUrl, agentId, agent.runtime, channelId, text);
+	},
 };
 
 startApiServer(
@@ -523,15 +546,48 @@ if (bridgePort > 0) {
 	startBridgeServer(bridgePort, workingDir);
 }
 
-const eventsWatcherBot = SLACK_ENABLED
+// ============================================================================
+// Bot identity — dedicated-bot-per-agent model
+//
+// Each sub-agent owns its own Telegram Bot / Slack App (BYO credentials
+// injected at provision time). Main Iris has neither — she routes internally
+// via the stub transport only. LEGACY_SHARED_BOT_MODE keeps old shared-pool
+// bots alive on Main Iris during the Phase 8 migration/parallel-run window.
+// ============================================================================
+
+const AGENT_ID   = process.env.AGENT_ID;
+const AGENT_NAME = process.env.AGENT_NAME ?? "agent";
+const IS_SUB_AGENT = !!AGENT_ID;
+const LEGACY_SHARED_BOT_MODE = !!process.env.LEGACY_SHARED_BOT_MODE;
+
+const dedicatedAgentInfo: DedicatedAgentInfo | null = IS_SUB_AGENT
+	? {
+		agentId:   AGENT_ID!,
+		agentName: AGENT_NAME,
+		bridgeUrl: `http://127.0.0.1:${bridgePort}`,
+		runtime:   "docker", // loopback to our own bridge — JWT auth doesn't validate runtimeType
+	}
+	: null;
+
+if (!IS_SUB_AGENT && (SLACK_ENABLED || process.env.TELEGRAM_BOT_TOKEN) && !LEGACY_SHARED_BOT_MODE) {
+	log.logInfo(
+		"[bots] Main Iris owns no Telegram Bot / Slack App in the dedicated-bot architecture — " +
+		"ignoring shared-pool credentials. Set LEGACY_SHARED_BOT_MODE=1 to keep them active during migration.",
+	);
+}
+
+const constructSlackBot = SLACK_ENABLED && (IS_SUB_AGENT || LEGACY_SHARED_BOT_MODE);
+
+const eventsWatcherBot = constructSlackBot
 	? (() => {
 		const sharedStore = new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! });
 		const bot = new SlackBotClass(handler, {
-			appToken: IRIS_SLACK_APP_TOKEN,
-			botToken: IRIS_SLACK_BOT_TOKEN,
+			appToken: IRIS_SLACK_APP_TOKEN!,
+			botToken: IRIS_SLACK_BOT_TOKEN!,
 			workingDir,
 			store: sharedStore,
-			linkManager: slackLinkManager,
+			linkManager: dedicatedAgentInfo ? null : slackLinkManager,
+			dedicatedAgent: dedicatedAgentInfo,
 			irisApiUrl: effectiveApiUrl,
 		});
 		botRef = bot;
@@ -607,7 +663,7 @@ const eventsWatcherBot = SLACK_ENABLED
 			},
 		} as any;
 		botRef = stubBot;
-		log.logInfo("Slack tokens not set — running in bridge-only mode");
+		log.logInfo(IS_SUB_AGENT ? "No Slack App configured for this agent" : "Internal-transport mode — Main Iris owns no Slack App");
 		return stubBot;
 	})();
 
@@ -615,50 +671,79 @@ const eventsWatcherBot = SLACK_ENABLED
 // Telegram — start up to 5 bot instances (one per token)
 // ============================================================================
 
-// Collect all configured tokens: TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_TOKEN_2..5
-const telegramTokens: string[] = [
-	process.env.TELEGRAM_BOT_TOKEN,
-	process.env.TELEGRAM_BOT_TOKEN_2,
-	process.env.TELEGRAM_BOT_TOKEN_3,
-	process.env.TELEGRAM_BOT_TOKEN_4,
-	process.env.TELEGRAM_BOT_TOKEN_5,
-].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+// Sub-agents have exactly one dedicated bot token (their own TELEGRAM_BOT_TOKEN).
+// Main Iris previously ran up to 5 shared-pool bots; those only survive during
+// the Phase 8 migration window (LEGACY_SHARED_BOT_MODE=1).
+const telegramTokens: string[] = IS_SUB_AGENT
+	? [process.env.TELEGRAM_BOT_TOKEN].filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+	: [
+		process.env.TELEGRAM_BOT_TOKEN,
+		process.env.TELEGRAM_BOT_TOKEN_2,
+		process.env.TELEGRAM_BOT_TOKEN_3,
+		process.env.TELEGRAM_BOT_TOKEN_4,
+		process.env.TELEGRAM_BOT_TOKEN_5,
+	].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
 
 const tgBots: TelegramBot[] = [];
 
-// In Gateway mode, the Gateway owns Telegram ingestion and forwards messages
-// via POST /v2/telegram/inbound. Starting our own long-polling connections here
-// too would process every inbound message twice (duplicate replies). Telegram
-// bots in this runtime exist solely to route to linked sub-agents (see comment
-// above on TelegramBot), so they're simply not needed when GATEWAY_MODE is on.
-if (GATEWAY_MODE) {
+if (IS_SUB_AGENT) {
+	// Dedicated mode — this agent's own bot, constructed from its BYO token.
+	// Polls its own Telegram bot independently of Main Iris or the Gateway.
+	for (const token of telegramTokens) {
+		const tgBot = new TelegramBot({ token, workingDir, dedicatedAgent: dedicatedAgentInfo, irisApiUrl: effectiveApiUrl });
+		try {
+			await tgBot.start();
+		} catch (err) {
+			log.logWarning("[telegram] Dedicated bot failed to start", err instanceof Error ? err.message : String(err));
+			continue;
+		}
+		log.logInfo(`[telegram:${tgBot.getBotId()}] Started as ${AGENT_NAME}'s dedicated bot.`);
+		tgBots.push(tgBot);
+		tgBotsForApi.push(tgBot);
+		if (!SLACK_ENABLED && tgBots.length === 1) botRef = tgBot;
+	}
+} else if (GATEWAY_MODE) {
+	// Gateway owns Telegram ingestion (POST /v2/telegram/inbound) — starting
+	// our own polling here too would double-process every message.
 	log.logInfo("[telegram] GATEWAY_MODE active — ingestion is owned by the Gateway (POST /v2/telegram/inbound); not starting local bot connections");
-} else {
+} else if (LEGACY_SHARED_BOT_MODE) {
+	// Shared-pool bots kept alive during the Phase 8 migration window.
 	for (const token of telegramTokens) {
 		const tgBot = new TelegramBot({ token, workingDir, linkManager: telegramLinkManager, irisApiUrl: effectiveApiUrl });
 		try {
 			await tgBot.start();
 		} catch (err) {
-			// Registry rejected this bot (max 5 reached) or API error — skip it
 			log.logWarning("[telegram] Bot failed to start", err instanceof Error ? err.message : String(err));
 			continue;
 		}
-
 		log.logInfo(`[telegram:${tgBot.getBotId()}] Started. Send a sub-agent claim token to this bot to link it.`);
-
 		tgBots.push(tgBot);
 		tgBotsForApi.push(tgBot);
-		// First bot becomes botRef if Slack is not active (API server prefers Slack)
 		if (!SLACK_ENABLED && tgBots.length === 1) botRef = tgBot;
 	}
+} else {
+	log.logInfo("[telegram] Main Iris owns no Telegram Bot in the dedicated-bot architecture (set LEGACY_SHARED_BOT_MODE=1 during migration)");
 }
 
-if (telegramTokens.length === 0) {
+if (telegramTokens.length === 0 && (IS_SUB_AGENT || LEGACY_SHARED_BOT_MODE)) {
 	log.logInfo("Telegram token not set — Telegram transport disabled");
 }
 
-if (!SLACK_ENABLED && telegramTokens.length === 0) {
+if (!constructSlackBot && telegramTokens.length === 0) {
 	log.logInfo("⚡️ Bridge-only mode active");
+}
+
+// Register the /notify handler now that bots are started.
+// Sub-agents only — Main Iris has no bridge server and delivers via notifyAgentBridge.
+localNotify = async (channelId, text) => {
+	if (channelId.startsWith("tg-") && tgBots[0]) {
+		await tgBots[0].postMessage(channelId, text);
+	} else {
+		await (eventsWatcherBot as any).postMessage(channelId, text);
+	}
+};
+if (bridgePort > 0) {
+	registerNotifyCallback(localNotify);
 }
 
 // Start scheduler: check for missed tasks, reschedule pending ones.
@@ -680,18 +765,18 @@ void startWatchdog({
 
 		await Promise.all(missed.map((t) => updateTaskStatus(t.taskId, "skipped")));
 
-		// Notify via Telegram if the agent is linked to a bot
-		const botId = await telegramLinkManager.getBotForAgent(agentId);
-		if (botId) {
-			const channelId = missed[0].channelId;
-			const noun = missed.length === 1 ? "task" : "tasks";
-			schedulerCallbacks.notifyOwner(
-				botId,
-				channelId,
-				`⚠️ <b>${agentName}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
-				missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n"),
-			);
-		}
+		const channelId = missed[0].channelId;
+		const noun = missed.length === 1 ? "task" : "tasks";
+		const notifyText =
+			`⚠️ <b>${agentName}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
+			missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n");
+
+		await schedulerCallbacks.notifyAgent?.(agentId, channelId, notifyText)
+			?? (async () => {
+				// Legacy fallback: shared-pool link lookup
+				const botId = await telegramLinkManager.getBotForAgent(agentId);
+				if (botId) schedulerCallbacks.notifyOwner(botId, channelId, notifyText);
+			})();
 	},
 });
 

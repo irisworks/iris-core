@@ -1,13 +1,16 @@
 import { getDb } from "./db.js";
 import { VM_ID, runtimeTypeForAgent } from "./auth.js";
+import { setSecret, deleteSecretIfPresent } from "./keyvault.js";
 import * as log from "./log.js";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-export type AgentStatus  = "running" | "stopped" | "crashed";
-export type AgentRuntime = "docker" | "firecracker";
+export type AgentStatus      = "running" | "stopped" | "crashed";
+export type AgentRuntime     = "docker" | "firecracker";
+export type IntegrationKind  = "telegram" | "slack";
+export type IntegrationStatus = "unattached" | "pending_verification" | "linked";
 
 export interface SubAgentRecord {
 	agentId: string;
@@ -19,9 +22,21 @@ export interface SubAgentRecord {
 	slotIndex: number;
 	createdAt: string;
 	updatedAt: string;
+
+	// Dedicated bot/app — Key Vault refs, never raw tokens (see keyvault.ts).
+	telegramBotTokenRef: string | null;
+	slackAppTokenRef: string | null;
+	slackBotTokenRef: string | null;
+	telegramStatus: IntegrationStatus;
+	slackStatus: IntegrationStatus;
 }
 
-export const MAX_SUB_AGENTS = 10;
+// slot_index doubles as the network-addressing key (Docker bridge port =
+// 4200+slot, Firecracker guest IP = 172.20.{slot}.2 — capped at a valid IPv4
+// octet). "No limit on sub-agents" means no artificial product-level ceiling
+// like the old value of 10; 250 is the real engineering ceiling, recyclable
+// via slot reuse on delete (see nextFreeSlot). Matches the schema CHECK constraint.
+export const MAX_SUB_AGENTS = 250;
 
 // ============================================================================
 // Helpers
@@ -29,15 +44,20 @@ export const MAX_SUB_AGENTS = 10;
 
 function rowToRecord(row: Record<string, unknown>): SubAgentRecord {
 	return {
-		agentId:           row.agent_id as string,
-		name:              row.name as string,
-		runtime:           ((row.runtime as AgentRuntime) ?? "docker"),
-		dockerContainerId: (row.docker_container_id as string | null) ?? null,
-		status:            (row.status as AgentStatus) ?? "stopped",
-		skills:            (row.skills as string[]) ?? [],
-		slotIndex:         row.slot_index as number,
-		createdAt:         row.created_at as string,
-		updatedAt:         row.updated_at as string,
+		agentId:             row.agent_id as string,
+		name:                row.name as string,
+		runtime:             ((row.runtime as AgentRuntime) ?? "docker"),
+		dockerContainerId:   (row.docker_container_id as string | null) ?? null,
+		status:              (row.status as AgentStatus) ?? "stopped",
+		skills:              (row.skills as string[]) ?? [],
+		slotIndex:           row.slot_index as number,
+		createdAt:           row.created_at as string,
+		updatedAt:           row.updated_at as string,
+		telegramBotTokenRef: (row.telegram_bot_token_ref as string | null) ?? null,
+		slackAppTokenRef:    (row.slack_app_token_ref as string | null) ?? null,
+		slackBotTokenRef:    (row.slack_bot_token_ref as string | null) ?? null,
+		telegramStatus:      (row.telegram_status as IntegrationStatus | null) ?? "unattached",
+		slackStatus:         (row.slack_status as IntegrationStatus | null) ?? "unattached",
 	};
 }
 
@@ -293,6 +313,13 @@ export async function deleteSubAgent(agentId: string): Promise<boolean> {
 	const db = getDb();
 	if (!db) { noDb("deleteSubAgent"); return false; }
 	try {
+		// Clean up dedicated-bot secrets first — once the row is gone we lose the refs
+		const record = await getSubAgent(agentId);
+		if (record) {
+			await deleteSecretIfPresent(record.telegramBotTokenRef);
+			await deleteSecretIfPresent(record.slackAppTokenRef);
+			await deleteSecretIfPresent(record.slackBotTokenRef);
+		}
 		// Remove compat mirror first so agent_tasks cascade-deletes cleanly
 		await deleteCompatRow(db, agentId);
 		const { error } = await db.from("sub_agents").delete().eq("agent_id", agentId);
@@ -301,6 +328,113 @@ export async function deleteSubAgent(agentId: string): Promise<boolean> {
 		return true;
 	} catch (err) {
 		log.logWarning("[sub-agent-registry] deleteSubAgent failed", String(err));
+		return false;
+	}
+}
+
+// ============================================================================
+// Dedicated bot/app integration — attach/detach (Phase 3)
+//
+// Each sub-agent owns its own Telegram Bot / Slack App (no shared pool, no
+// claim-from-pool). "Attach" stores the credential in Key Vault, persists the
+// ref, and flips status to pending_verification — the caller (API layer) then
+// re-provisions the agent's container so the token becomes a live env var, and
+// issues a claim token the owner sends to their own bot to prove control of it
+// (see managers/integration.ts for the verification side of this handshake).
+// ============================================================================
+
+/**
+ * Store dedicated-bot credentials for an agent and mark the integration as
+ * pending verification. For Slack this writes BOTH the app and bot tokens
+ * (two refs) but a single status field, since the pair is claimed/verified together.
+ */
+export async function attachIntegration(
+	agentId: string,
+	platform: IntegrationKind,
+	credentials: { telegramBotToken?: string; slackAppToken?: string; slackBotToken?: string },
+): Promise<SubAgentRecord | null> {
+	const db = getDb();
+	if (!db) return noDb("attachIntegration");
+
+	const record = await getSubAgent(agentId);
+	if (!record) {
+		log.logWarning(`[sub-agent-registry] attachIntegration: agent ${agentId} not found`);
+		return null;
+	}
+
+	const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+	try {
+		if (platform === "telegram") {
+			if (!credentials.telegramBotToken) throw new Error("telegramBotToken is required");
+			const ref = await setSecret(`sub-agent-${agentId}-telegram-bot-token`, credentials.telegramBotToken);
+			if (!ref) throw new Error("failed to store secret in Key Vault");
+			patch.telegram_bot_token_ref = ref;
+			patch.telegram_status = "pending_verification";
+		} else {
+			if (!credentials.slackAppToken || !credentials.slackBotToken) {
+				throw new Error("slackAppToken and slackBotToken are both required");
+			}
+			const appRef = await setSecret(`sub-agent-${agentId}-slack-app-token`, credentials.slackAppToken);
+			const botRef = await setSecret(`sub-agent-${agentId}-slack-bot-token`, credentials.slackBotToken);
+			if (!appRef || !botRef) throw new Error("failed to store secret(s) in Key Vault");
+			patch.slack_app_token_ref = appRef;
+			patch.slack_bot_token_ref = botRef;
+			patch.slack_status = "pending_verification";
+		}
+
+		const { data, error } = await db.from("sub_agents").update(patch).eq("agent_id", agentId).select("*").single();
+		if (error) throw error;
+		log.logInfo(`[sub-agent-registry] Attached ${platform} credentials to "${record.name}" (pending verification)`);
+		return rowToRecord(data as Record<string, unknown>);
+	} catch (err) {
+		log.logWarning(`[sub-agent-registry] attachIntegration(${platform}) failed`, String(err));
+		return null;
+	}
+}
+
+/** Mark an integration as linked once claim-token ownership verification succeeds. */
+export async function markIntegrationLinked(agentId: string, platform: IntegrationKind): Promise<void> {
+	const db = getDb();
+	if (!db) { noDb("markIntegrationLinked"); return; }
+	const statusColumn = platform === "telegram" ? "telegram_status" : "slack_status";
+	try {
+		const { error } = await db.from("sub_agents")
+			.update({ [statusColumn]: "linked", updated_at: new Date().toISOString() })
+			.eq("agent_id", agentId);
+		if (error) throw error;
+		log.logInfo(`[sub-agent-registry] ${platform} verified and linked for agent ${agentId}`);
+	} catch (err) {
+		log.logWarning(`[sub-agent-registry] markIntegrationLinked(${platform}) failed`, String(err));
+	}
+}
+
+/** Detach an integration: delete its Key Vault secret(s), clear refs, reset status to unattached. */
+export async function detachIntegration(agentId: string, platform: IntegrationKind): Promise<boolean> {
+	const db = getDb();
+	if (!db) { noDb("detachIntegration"); return false; }
+
+	const record = await getSubAgent(agentId);
+	if (!record) return false;
+
+	const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+	try {
+		if (platform === "telegram") {
+			await deleteSecretIfPresent(record.telegramBotTokenRef);
+			patch.telegram_bot_token_ref = null;
+			patch.telegram_status = "unattached";
+		} else {
+			await deleteSecretIfPresent(record.slackAppTokenRef);
+			await deleteSecretIfPresent(record.slackBotTokenRef);
+			patch.slack_app_token_ref = null;
+			patch.slack_bot_token_ref = null;
+			patch.slack_status = "unattached";
+		}
+		const { error } = await db.from("sub_agents").update(patch).eq("agent_id", agentId);
+		if (error) throw error;
+		log.logInfo(`[sub-agent-registry] Detached ${platform} from "${record.name}"`);
+		return true;
+	} catch (err) {
+		log.logWarning(`[sub-agent-registry] detachIntegration(${platform}) failed`, String(err));
 		return false;
 	}
 }

@@ -6,7 +6,7 @@ import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
 import { callAgentBridge } from "./bridge.js";
 import { readHistory, appendHistory, makeUserEntry, makeBotEntry } from "./azure-history.js";
-import { type TelegramLinkManager } from "./telegram-link.js";
+import { type TelegramLinkManager, type LinkedAgentInfo } from "./telegram-link.js";
 import { getSubAgent } from "./sub-agent-registry.js";
 import { bridgePortForSlot, getAvailableSkills, provisionAgent, registerAgentBridge } from "./agent-provision.js";
 import { createSubAgent, updateSubAgentStatus } from "./sub-agent-registry.js";
@@ -354,10 +354,30 @@ interface PendingCreationRejection {
 // TelegramBot
 // ============================================================================
 
+/**
+ * Identity of the single sub-agent this bot is dedicated to. Set when this
+ * TelegramBot was constructed from a sub-agent's own BYO token (the
+ * dedicated-bot-per-agent model) — as opposed to the legacy shared pool,
+ * where a bot is claimed by exactly one agent at a time via linkManager.
+ */
+export interface DedicatedAgentInfo {
+	agentId: string;
+	agentName: string;
+	bridgeUrl: string;
+	runtime: "docker" | "firecracker";
+}
+
 export class TelegramBot {
 	private token: string;
 	private workingDir: string;
-	private linkManager: TelegramLinkManager;
+	private linkManager: TelegramLinkManager | null;
+	private dedicatedAgent: DedicatedAgentInfo | null;
+	// Cached verification status for dedicated bots — refreshed at start() and
+	// flipped true on a successful claim-token relay. Gates routing: an
+	// unverified dedicated bot only accepts the claim token (see CLAUDE.md
+	// rationale — proves the *owner* controls the bot, not just that someone
+	// pasted a token string into the attach form).
+	private dedicatedVerified = false;
 	private irisApiUrl: string;
 	private queues = new Map<string, ChannelQueues>();
 	private running = false;
@@ -375,12 +395,14 @@ export class TelegramBot {
 	constructor(config: {
 		token: string;
 		workingDir: string;
-		linkManager: TelegramLinkManager;
+		linkManager?: TelegramLinkManager | null;
+		dedicatedAgent?: DedicatedAgentInfo | null;
 		irisApiUrl?: string;
 	}) {
 		this.token = config.token;
 		this.workingDir = config.workingDir;
-		this.linkManager = config.linkManager;
+		this.linkManager = config.linkManager ?? null;
+		this.dedicatedAgent = config.dedicatedAgent ?? null;
 		this.irisApiUrl = config.irisApiUrl ?? process.env.IRIS_API_URL ?? "http://172.18.0.1:3000";
 		this.registry = new TelegramBotRegistry(config.workingDir);
 		this.skillsDir = process.env.IRIS_SKILLS_DIR
@@ -642,8 +664,18 @@ export class TelegramBot {
 			throw new Error(`[telegram] Bot @${me.username} (id=${this.botId}) rejected: max 5 bots reached`);
 		}
 
-		// Register this bot in Supabase link table
-		await this.linkManager.registerBot(this.botId);
+		if (this.dedicatedAgent) {
+			// Dedicated mode — no shared-pool registration; just learn whether
+			// the owner has already proven control of this bot via claim token.
+			await this.refreshDedicatedVerification();
+			log.logInfo(
+				`[telegram:${this.botId}] Dedicated bot for agent "${this.dedicatedAgent.agentName}" ` +
+				`(${this.dedicatedVerified ? "verified" : "awaiting claim-token verification"})`,
+			);
+		} else {
+			// Register this bot in Supabase link table (shared-pool model)
+			await this.linkManager!.registerBot(this.botId);
+		}
 
 		log.logInfo(`[telegram:${this.botId}] Connected as @${me.username ?? me.first_name ?? "unknown"}`);
 		log.logConnected();
@@ -663,7 +695,7 @@ export class TelegramBot {
 	 */
 	notifyLinkedAgentCrashed(agentId: string): void {
 		// Invalidate cache so the next message re-checks the link status
-		if (this.botId) this.linkManager.invalidateCache(this.botId);
+		if (this.botId) this.linkManager?.invalidateCache(this.botId);
 
 		// Notify all recently active chats on this bot
 		for (const [channelId] of this.chatNames) {
@@ -674,6 +706,66 @@ export class TelegramBot {
 					`Tasks are paused. It will recover automatically on restart.`,
 				).catch(() => {});
 			}
+		}
+	}
+
+	// ==========================================================================
+	// Dedicated-bot ownership verification
+	// ==========================================================================
+
+	/** Query Iris for this agent's current verification status (called once at start()). */
+	private async refreshDedicatedVerification(): Promise<void> {
+		if (!this.dedicatedAgent) return;
+		try {
+			const resp = await fetch(`${this.irisApiUrl}/internal/integrations/${this.dedicatedAgent.agentId}/status`);
+			if (!resp.ok) return;
+			const status = (await resp.json()) as { telegram?: string; slack?: string };
+			this.dedicatedVerified = status.telegram === "linked";
+		} catch (err) {
+			log.logWarning(`[telegram:${this.botId}] Failed to fetch verification status`, err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	/**
+	 * Handle an incoming message while this dedicated bot is still awaiting
+	 * ownership verification — only claim tokens are processed; everything
+	 * else gets linking instructions. Relays valid-looking tokens to
+	 * POST /internal/integrations/telegram/verify (the IntegrationManager
+	 * burns the token and flips status to "linked" on success).
+	 */
+	private async handleDedicatedUnverified(channelId: string, text: string): Promise<void> {
+		if (!this.dedicatedAgent || !text) return;
+		const agentName = this.dedicatedAgent.agentName;
+
+		if (!/^[0-9a-f]{64}$/.test(text)) {
+			await this.postMessage(
+				channelId,
+				`This bot is registered to <b>${agentName}</b> but not yet verified.\n\n` +
+				`Send the claim token shown on the sub-agent's <b>Connect Telegram</b> dialog to prove you control this bot.`,
+			);
+			return;
+		}
+
+		try {
+			const resp = await fetch(`${this.irisApiUrl}/internal/integrations/telegram/verify`, {
+				method:  "POST",
+				headers: { "Content-Type": "application/json" },
+				body:    JSON.stringify({ agentId: this.dedicatedAgent.agentId, token: text }),
+			});
+			const result = (await resp.json().catch(() => ({}))) as { verified?: boolean };
+			if (result.verified) {
+				this.dedicatedVerified = true;
+				await this.postMessage(
+					channelId,
+					`✅ <b>Verified.</b> This bot is now confirmed as ${agentName}'s own Telegram bot — start messaging to interact with it.`,
+				);
+				log.logInfo(`[telegram:${this.botId}] Ownership verified for agent "${agentName}"`);
+			} else {
+				await this.postMessage(channelId, `❌ Invalid or expired token. Generate a fresh one from the <b>Connect Telegram</b> dialog and send it again.`);
+			}
+		} catch (err) {
+			log.logWarning(`[telegram:${this.botId}] Verify callback failed`, err instanceof Error ? err.message : String(err));
+			await this.postMessage(channelId, `⚠️ Could not reach Iris to verify this token. Try again shortly.`);
 		}
 	}
 
@@ -764,31 +856,56 @@ export class TelegramBot {
 
 		const text = (msg.text ?? msg.caption ?? "").trim();
 
-		// Check link status
-		const linkedAgent = await this.linkManager.getLinkedAgent(this.botId!);
+		// ── Dedicated mode — this bot belongs to exactly one agent by construction.
+		// Gate routing on ownership verification (claim token), not on a pool lookup.
+		let linkedAgent: LinkedAgentInfo;
+		if (this.dedicatedAgent) {
+			if (!this.dedicatedVerified) {
+				await this.handleDedicatedUnverified(channelId, text);
+				return;
+			}
+			linkedAgent = {
+				agentId:   this.dedicatedAgent.agentId,
+				agentName: this.dedicatedAgent.agentName,
+				bridgeUrl: this.dedicatedAgent.bridgeUrl,
+				slotIndex: 0,
+				skills:    [],
+				runtime:   this.dedicatedAgent.runtime,
+			};
+		} else {
+			const linked = await this.linkManager!.getLinkedAgent(this.botId!);
+			if (!linked) {
+				// ── Unlinked state (shared-pool model) — only accept claim tokens ──
+				if (!text) return;
 
-		// ── Unlinked state — only accept claim tokens ──────────────────────────
-		if (!linkedAgent) {
-			if (!text) return;
-
-			// A valid claim token is 64 lowercase hex chars
-			if (/^[0-9a-f]{64}$/.test(text)) {
-				const result = await this.linkManager.validateAndLink(this.botId!, text);
-				if (result && typeof result === "object") {
-					await this.postMessage(
-						channelId,
-						`✅ <b>Linked to ${result.agentName}.</b>\n\n` +
-						`This bot now represents that sub-agent. Start messaging to interact with it.`,
-					);
-					log.logInfo(`[telegram:${this.botId}] Linked to agent "${result.agentName}" via claim token`);
-				} else if (result === "expired") {
-					await this.postMessage(channelId, "❌ Token expired. Generate a new one via <b>Connect Telegram</b> on the sub-agent.");
-				} else if (result === "already_linked") {
-					await this.postMessage(channelId, "⚠️ This bot or that agent is already linked to another bot/agent. Unlink first.");
+				// A valid claim token is 64 lowercase hex chars
+				if (/^[0-9a-f]{64}$/.test(text)) {
+					const result = await this.linkManager!.validateAndLink(this.botId!, text);
+					if (result && typeof result === "object") {
+						await this.postMessage(
+							channelId,
+							`✅ <b>Linked to ${result.agentName}.</b>\n\n` +
+							`This bot now represents that sub-agent. Start messaging to interact with it.`,
+						);
+						log.logInfo(`[telegram:${this.botId}] Linked to agent "${result.agentName}" via claim token`);
+					} else if (result === "expired") {
+						await this.postMessage(channelId, "❌ Token expired. Generate a new one via <b>Connect Telegram</b> on the sub-agent.");
+					} else if (result === "already_linked") {
+						await this.postMessage(channelId, "⚠️ This bot or that agent is already linked to another bot/agent. Unlink first.");
+					} else {
+						await this.postMessage(
+							channelId,
+							`⚠️ Invalid token.\n\n` +
+							`This bot is not linked to any sub-agent yet.\n\n` +
+							`To link it:\n` +
+							`1. Create a sub-agent in Iris\n` +
+							`2. Click <b>Connect Telegram</b> on the sub-agent\n` +
+							`3. Send the generated token here`,
+						);
+					}
 				} else {
 					await this.postMessage(
 						channelId,
-						`⚠️ Invalid token.\n\n` +
 						`This bot is not linked to any sub-agent yet.\n\n` +
 						`To link it:\n` +
 						`1. Create a sub-agent in Iris\n` +
@@ -796,17 +913,9 @@ export class TelegramBot {
 						`3. Send the generated token here`,
 					);
 				}
-			} else {
-				await this.postMessage(
-					channelId,
-					`This bot is not linked to any sub-agent yet.\n\n` +
-					`To link it:\n` +
-					`1. Create a sub-agent in Iris\n` +
-					`2. Click <b>Connect Telegram</b> on the sub-agent\n` +
-					`3. Send the generated token here`,
-				);
+				return;
 			}
-			return;
+			linkedAgent = linked;
 		}
 
 		// ── Commands ───────────────────────────────────────────────────────────
@@ -1033,9 +1142,26 @@ export class TelegramBot {
 	// Private — route a scheduled event to the linked sub-agent
 	// ==========================================================================
 
+	/** Resolve the agent this bot routes to — synthetic for dedicated bots, looked up for shared-pool bots. */
+	private async resolveLinkedAgent(): Promise<LinkedAgentInfo | null> {
+		if (this.dedicatedAgent) {
+			if (!this.dedicatedVerified) return null;
+			return {
+				agentId:   this.dedicatedAgent.agentId,
+				agentName: this.dedicatedAgent.agentName,
+				bridgeUrl: this.dedicatedAgent.bridgeUrl,
+				slotIndex: 0,
+				skills:    [],
+				runtime:   this.dedicatedAgent.runtime,
+			};
+		}
+		if (!this.botId) return null;
+		return this.linkManager!.getLinkedAgent(this.botId);
+	}
+
 	private async routeEventToLinkedAgent(event: TelegramEvent): Promise<void> {
 		if (!this.botId) return;
-		const linked = await this.linkManager.getLinkedAgent(this.botId);
+		const linked = await this.resolveLinkedAgent();
 		if (!linked) {
 			log.logWarning(`[telegram:${this.botId}] Scheduled event received but bot not linked to any agent`);
 			return;
@@ -1165,14 +1291,14 @@ export class TelegramBot {
 			});
 			if (!installResp.ok) throw new Error(`API returned ${installResp.status}`);
 
-			// Invalidate cache so next message gets updated skill list
-			if (this.botId) this.linkManager.invalidateCache(this.botId);
+			// Invalidate cache so next message gets updated skill list (shared-pool only)
+			if (this.botId) this.linkManager?.invalidateCache(this.botId);
 
 			await this.postMessage(channelId, `✅ <b>${state.skillName}</b> has been added to this agent's runtime.\n\nBoth this Telegram interface and the Sub-Agent UI now have access to it.`);
 
 			// Re-execute original task if present
 			if (state.originalText) {
-				const linked = await this.linkManager.getLinkedAgent(this.botId!);
+				const linked = await this.resolveLinkedAgent();
 				if (linked) {
 					const event: TelegramEvent = { type: "message", channel: channelId, ts: String(Date.now()), user: "user", text: state.originalText, chatId: 0, attachments: [] };
 					const queue = this.getQueue(channelId);
@@ -1198,7 +1324,7 @@ export class TelegramBot {
 
 		if (trimmed === "1") {
 			// Re-route the original message to the sub-agent as a regular request
-			const linked = await this.linkManager.getLinkedAgent(this.botId!);
+			const linked = await this.resolveLinkedAgent();
 			if (!linked) { await this.postMessage(channelId, "⚠️ No linked agent found."); return; }
 			await this.postMessage(channelId, "_Continuing with alternative workflow..._");
 			const event: TelegramEvent = { type: "message", channel: channelId, ts: String(Date.now()), user: "user", text: state.originalText, chatId: 0, attachments: [] };
@@ -1214,12 +1340,20 @@ export class TelegramBot {
 
 	private async handleUnlink(channelId: string): Promise<void> {
 		if (!this.botId) return;
-		const linked = await this.linkManager.getLinkedAgent(this.botId);
+		if (this.dedicatedAgent) {
+			await this.postMessage(
+				channelId,
+				`This bot is <b>${this.dedicatedAgent.agentName}</b>'s own dedicated bot — it isn't claimed from a shared pool, ` +
+				`so there's nothing to unlink here.\n\nTo detach it, use the <b>Disconnect Telegram</b> action on the sub-agent's dashboard.`,
+			);
+			return;
+		}
+		const linked = await this.linkManager!.getLinkedAgent(this.botId);
 		if (!linked) {
 			await this.postMessage(channelId, "This bot is not linked to any agent.");
 			return;
 		}
-		const success = await this.linkManager.unlink(this.botId);
+		const success = await this.linkManager!.unlink(this.botId);
 		if (success) {
 			await this.postMessage(
 				channelId,

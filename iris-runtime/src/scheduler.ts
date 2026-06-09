@@ -20,6 +20,11 @@ export interface SchedulerCallbacks {
 	notifyOwner: (botId: string, channelId: string, text: string) => void;
 	/** Look up the Telegram bot linked to a sub-agent. Returns null if unlinked. */
 	getBotForAgent?: (agentId: string) => Promise<string | null>;
+	/**
+	 * Preferred over getBotForAgent+notifyOwner in the dedicated-bot model.
+	 * Routes the notification via the agent's own bridge /notify endpoint.
+	 */
+	notifyAgent?: (agentId: string, channelId: string, text: string) => Promise<void>;
 	/** Working directory for writing event files. */
 	workingDir: string;
 }
@@ -123,18 +128,21 @@ export async function startScheduler(callbacks: SchedulerCallbacks): Promise<voi
 		await Promise.all(missed.map((t) => updateTaskStatus(t.taskId, "skipped")));
 		log.logInfo(`[scheduler] Marked ${missed.length} missed tasks skipped for agent ${agent.name}`);
 
-		// Notify via Telegram if the agent is linked to a bot
-		if (callbacks.getBotForAgent) {
-			const botId = await callbacks.getBotForAgent(agent.agentId);
-			if (botId) {
-				const channelId = missed[0].channelId;
-				const noun = missed.length === 1 ? "task" : "tasks";
-				callbacks.notifyOwner(
-					botId,
-					channelId,
-					`⚠️ <b>${agent.name}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
-					missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n"),
+		// Notify the agent's owner about missed tasks
+		{
+			const channelId = missed[0].channelId;
+			const noun = missed.length === 1 ? "task" : "tasks";
+			const notifyText =
+				`⚠️ <b>${agent.name}</b> missed ${missed.length} scheduled ${noun} while offline. They have been skipped.\n\n` +
+				missed.map((t) => `• ${t.localTimeStr ?? t.scheduledFor ?? "?"}: <i>${t.payload.slice(0, 80)}</i>`).join("\n");
+
+			if (callbacks.notifyAgent) {
+				await callbacks.notifyAgent(agent.agentId, channelId, notifyText).catch((e: unknown) =>
+					log.logWarning(`[scheduler] notifyAgent failed for ${agent.agentId}`, String(e)),
 				);
+			} else if (callbacks.getBotForAgent) {
+				const botId = await callbacks.getBotForAgent(agent.agentId);
+				if (botId) callbacks.notifyOwner(botId, channelId, notifyText);
 			}
 		}
 	}

@@ -88,6 +88,40 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 	res.end(payload);
 }
 
+// ── Notify callback (registered by main.ts after bot construction) ──────────
+
+type NotifyCallback = (channelId: string, text: string) => Promise<void>;
+let notifyCallback: NotifyCallback | null = null;
+
+/**
+ * Register the callback that handles /notify requests from Main Iris.
+ * Called by sub-agents after their bot(s) are started.
+ */
+export function registerNotifyCallback(cb: NotifyCallback): void {
+	notifyCallback = cb;
+}
+
+/**
+ * POST /notify to a sub-agent's bridge server — delivers a notification
+ * (e.g. missed-task alert) via the agent's own dedicated bot.
+ * Called by Main Iris's notifyAgent scheduler callback.
+ */
+export async function notifyAgentBridge(
+	bridgeUrl: string,
+	agentId: string,
+	runtime: "docker" | "firecracker",
+	channelId: string,
+	text: string,
+): Promise<void> {
+	const resp = await fetch(`${bridgeUrl}/notify`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", ...runtimeAuthHeader(agentId, runtime) },
+		body: JSON.stringify({ channelId, text }),
+		signal: AbortSignal.timeout(10_000),
+	});
+	if (!resp.ok) throw new Error(`/notify responded ${resp.status}`);
+}
+
 /**
  * Start the bridge HTTP server on the given port.
  * Called by sub-agents (not by Iris herself).
@@ -96,7 +130,38 @@ export function startBridgeServer(port: number, workingDir: string): void {
 	const BRIDGE_TIMEOUT_MS = 300_000; // 5 minutes — reasoning models (e.g. Kimi-K2.6) need 60-90s just for chain-of-thought
 
 	const server = createServer(async (req, res) => {
-		if (req.method !== "POST" || req.url !== "/bridge") {
+		if (req.method !== "POST") {
+			jsonResponse(res, 404, { error: "not found" });
+			return;
+		}
+
+		// ── POST /notify — deliver a notification via this agent's own bot ──────
+		if (req.url === "/notify") {
+			let body: { channelId?: string; text?: string };
+			try { body = JSON.parse(await readBody(req)); } catch {
+				jsonResponse(res, 400, { error: "invalid JSON" });
+				return;
+			}
+			if (!body.channelId || !body.text) {
+				jsonResponse(res, 400, { error: "channelId and text are required" });
+				return;
+			}
+			if (notifyCallback) {
+				try {
+					await notifyCallback(body.channelId, body.text);
+					jsonResponse(res, 200, { ok: true });
+				} catch (err) {
+					log.logWarning("[bridge/notify] Failed to deliver notification", err instanceof Error ? err.message : String(err));
+					jsonResponse(res, 500, { error: err instanceof Error ? err.message : String(err) });
+				}
+			} else {
+				log.logWarning("[bridge/notify] No notify callback registered — dropping notification");
+				jsonResponse(res, 503, { error: "No notify handler registered" });
+			}
+			return;
+		}
+
+		if (req.url !== "/bridge") {
 			jsonResponse(res, 404, { error: "not found" });
 			return;
 		}

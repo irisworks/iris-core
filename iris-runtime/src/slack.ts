@@ -178,6 +178,19 @@ class ChannelQueue {
 // SlackBot
 // ============================================================================
 
+/**
+ * Identity of the single sub-agent this bot is dedicated to. Set when this
+ * SlackBot was constructed from a sub-agent's own BYO app/bot tokens (the
+ * dedicated-bot-per-agent model) — as opposed to the legacy shared pool,
+ * where a workspace claims a Slack App via linkManager.
+ */
+export interface DedicatedAgentInfo {
+	agentId: string;
+	agentName: string;
+	bridgeUrl: string;
+	runtime: "docker" | "firecracker";
+}
+
 export class SlackBot {
 	private socketClient: SocketModeClient;
 	private webClient: WebClient;
@@ -192,6 +205,10 @@ export class SlackBot {
 
 	// Sub-agent link manager — when set, Slack routes to linked sub-agent instead of Iris
 	private linkManager: SlackLinkManager | null;
+	// Dedicated mode — this bot is the sub-agent's OWN Slack App (BYO tokens),
+	// not claimed from a shared pool. Mutually exclusive with linkManager.
+	private dedicatedAgent: DedicatedAgentInfo | null = null;
+	private dedicatedVerified = false;
 	private irisApiUrl: string;
 	private skillsDir: string;
 
@@ -216,6 +233,7 @@ export class SlackBot {
 			workingDir: string;
 			store: ChannelStore;
 			linkManager?: SlackLinkManager | null;
+			dedicatedAgent?: DedicatedAgentInfo | null;
 			irisApiUrl?: string;
 		},
 	) {
@@ -223,6 +241,7 @@ export class SlackBot {
 		this.workingDir = config.workingDir;
 		this.store = config.store;
 		this.linkManager = config.linkManager ?? null;
+		this.dedicatedAgent = config.dedicatedAgent ?? null;
 		this.irisApiUrl = config.irisApiUrl ?? process.env.IRIS_API_URL ?? "http://172.18.0.1:3000";
 		this.skillsDir = process.env.IRIS_SKILLS_DIR ?? `${process.env.IRIS_DIR ?? "/iris"}/data/skills`;
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
@@ -338,6 +357,14 @@ export class SlackBot {
 		this.workspaceId = (auth.team_id as string | null) ?? null;
 		if (this.workspaceId) {
 			log.logInfo(`[slack] Workspace ID: ${this.workspaceId}${this.linkManager ? " (sub-agent link mode active)" : ""}`);
+		}
+
+		if (this.dedicatedAgent) {
+			await this.refreshDedicatedVerification();
+			log.logInfo(
+				`[slack] Dedicated app for agent "${this.dedicatedAgent.agentName}" ` +
+				`(${this.dedicatedVerified ? "verified" : "awaiting claim-token verification"})`,
+			);
 		}
 
 		this.loadChannelModes();
@@ -616,10 +643,11 @@ export class SlackBot {
 				return;
 			}
 
-			// Sub-agent link mode — when linkManager is set, intercept before channel-mode routing.
-			// All real Slack channel messages route to the linked sub-agent (or show "not linked").
-			// Virtual channels (BRIDGE-, SESSION-, etc.) fall through to the Iris handler as always.
-			if (this.linkManager && this.workspaceId && !this.isVirtualChannel(slackEvent.channel)) {
+			// Sub-agent link/dedicated mode — intercept before channel-mode routing.
+			// All real Slack channel messages route to the linked/owning sub-agent
+			// (or show "not linked"/"not verified"). Virtual channels (BRIDGE-,
+			// SESSION-, etc.) fall through to the Iris handler as always.
+			if ((this.linkManager || this.dedicatedAgent) && this.workspaceId && !this.isVirtualChannel(slackEvent.channel)) {
 				const queue = this.getQueue(slackEvent.channel);
 				if (queue.size() >= 5) {
 					void this.postMessage(slackEvent.channel, "_Too many messages queued._");
@@ -1017,8 +1045,8 @@ export class SlackBot {
 
 			// Only trigger handler for DMs
 			if (isDM) {
-				// Sub-agent link mode — route DM to linked sub-agent (or show unlinked instructions)
-				if (this.linkManager && this.workspaceId) {
+				// Sub-agent link/dedicated mode — route DM to linked/owning sub-agent
+				if ((this.linkManager || this.dedicatedAgent) && this.workspaceId) {
 					const dmQueue = this.getQueue(e.channel);
 					if (dmQueue.size() >= 5) {
 						void this.postMessage(e.channel, "_Too many messages queued._");
@@ -1080,7 +1108,7 @@ export class SlackBot {
 	 * Checks link status and routes to sub-agent or shows unlinked instructions.
 	 */
 	private async dispatchEvent(event: SlackEvent): Promise<void> {
-		if (!this.linkManager || !this.workspaceId) {
+		if (!this.linkManager && !this.dedicatedAgent) {
 			await this.handler.handleEvent(event, this);
 			return;
 		}
@@ -1091,7 +1119,30 @@ export class SlackBot {
 			log.logInfo(`[slack:${this.workspaceId}] GATEWAY_MODE active — ingestion is owned by the Gateway (POST /v2/slack/inbound), skipping local routing`);
 			return;
 		}
-		const linked = await this.linkManager.getLinkedAgent(this.workspaceId);
+
+		// ── Dedicated mode — this app belongs to exactly one agent by construction.
+		// Gate routing on ownership verification (claim token), not on a pool lookup.
+		if (this.dedicatedAgent) {
+			if (!this.dedicatedVerified) {
+				await this.handleDedicatedUnverified(event);
+				return;
+			}
+			await this.routeToLinkedAgent(event, {
+				agentId:   this.dedicatedAgent.agentId,
+				agentName: this.dedicatedAgent.agentName,
+				bridgeUrl: this.dedicatedAgent.bridgeUrl,
+				slotIndex: 0,
+				skills:    [],
+				runtime:   this.dedicatedAgent.runtime,
+			});
+			return;
+		}
+
+		if (!this.workspaceId) {
+			await this.handler.handleEvent(event, this);
+			return;
+		}
+		const linked = await this.linkManager!.getLinkedAgent(this.workspaceId);
 		if (linked) {
 			await this.routeToLinkedAgent(event, linked);
 		} else {
@@ -1270,6 +1321,14 @@ export class SlackBot {
 
 	/** Unlink this Slack workspace from its sub-agent. */
 	private async handleSlackUnlink(channelId: string): Promise<void> {
+		if (this.dedicatedAgent) {
+			await this.postMessage(
+				channelId,
+				`This app is *${this.dedicatedAgent.agentName}*'s own dedicated Slack App — it isn't claimed from a shared pool, ` +
+				`so there's nothing to unlink here.\n\nTo detach it, use the *Disconnect Slack* action on the sub-agent's dashboard.`,
+			);
+			return;
+		}
 		if (!this.workspaceId || !this.linkManager) return;
 		const linked = await this.linkManager.getLinkedAgent(this.workspaceId);
 		if (!linked) {
@@ -1326,6 +1385,67 @@ export class SlackBot {
 			`2. Click *Connect Slack* on the sub-agent\n` +
 			`3. Send the generated token here as a direct message`
 		);
+	}
+
+	// ==========================================================================
+	// Dedicated-bot ownership verification
+	// ==========================================================================
+
+	/** Query Iris for this agent's current verification status (called once at start()). */
+	private async refreshDedicatedVerification(): Promise<void> {
+		if (!this.dedicatedAgent) return;
+		try {
+			const resp = await fetch(`${this.irisApiUrl}/internal/integrations/${this.dedicatedAgent.agentId}/status`);
+			if (!resp.ok) return;
+			const status = (await resp.json()) as { telegram?: string; slack?: string };
+			this.dedicatedVerified = status.slack === "linked";
+		} catch (err) {
+			log.logWarning(`[slack:${this.workspaceId}] Failed to fetch verification status`, err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	/**
+	 * Handle an incoming message while this dedicated app is still awaiting
+	 * ownership verification — only claim tokens (sent as a DM) are processed;
+	 * everything else gets linking instructions. Relays valid-looking tokens to
+	 * POST /internal/integrations/slack/verify.
+	 */
+	private async handleDedicatedUnverified(event: SlackEvent): Promise<void> {
+		if (!this.dedicatedAgent) return;
+		const isDM = event.channel.startsWith("D") || event.type === "dm";
+		const text = event.text?.trim() ?? "";
+		const agentName = this.dedicatedAgent.agentName;
+
+		if (!isDM || !/^[0-9a-f]{64}$/.test(text)) {
+			await this.postMessage(
+				event.channel,
+				`This app is registered to *${agentName}* but not yet verified.\n\n` +
+				`Send the claim token shown on the sub-agent's *Connect Slack* dialog as a *direct message* to this app's bot user to prove you control it.`,
+			);
+			return;
+		}
+
+		try {
+			const resp = await fetch(`${this.irisApiUrl}/internal/integrations/slack/verify`, {
+				method:  "POST",
+				headers: { "Content-Type": "application/json" },
+				body:    JSON.stringify({ agentId: this.dedicatedAgent.agentId, token: text }),
+			});
+			const result = (await resp.json().catch(() => ({}))) as { verified?: boolean };
+			if (result.verified) {
+				this.dedicatedVerified = true;
+				await this.postMessage(
+					event.channel,
+					`✅ *Verified.* This app is now confirmed as ${agentName}'s own Slack App — start messaging to interact with it.`,
+				);
+				log.logInfo(`[slack:${this.workspaceId}] Ownership verified for agent "${agentName}"`);
+			} else {
+				await this.postMessage(event.channel, `❌ Invalid or expired token. Generate a fresh one from the *Connect Slack* dialog and send it again.`);
+			}
+		} catch (err) {
+			log.logWarning(`[slack:${this.workspaceId}] Verify callback failed`, err instanceof Error ? err.message : String(err));
+			await this.postMessage(event.channel, `⚠️ Could not reach Iris to verify this token. Try again shortly.`);
+		}
 	}
 
 	/**

@@ -7,6 +7,7 @@ import {
   createSession,
   loadSessions,
   updateSession,
+  listForAgent,
   type Session,
 } from "../sessions.js";
 import { blobWrite } from "../blob.js";
@@ -28,6 +29,10 @@ export class SessionManager {
 
   get(sessionId: string): Session | undefined {
     return loadSessions(this.workingDir).get(sessionId);
+  }
+
+  listForAgent(agentId: string): Session[] {
+    return listForAgent(loadSessions(this.workingDir), agentId);
   }
 
   update(sessionId: string, patch: Partial<Session>): Session {

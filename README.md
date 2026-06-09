@@ -1,6 +1,6 @@
 # Iris Core
 
-Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a systemd service and manages a main agent plus up to 10 isolated sub-agents. Each sub-agent gets its own runtime (Docker container or Firecracker micro-VM), its own Telegram bot, its own Slack workspace, and its own set of skills.
+Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a systemd service and manages a main agent plus isolated sub-agents. Each sub-agent gets its own runtime (Docker container or Firecracker micro-VM), its own dedicated Telegram Bot and/or Slack App (BYO credentials attached via the integration API), and its own set of skills. Main Iris has no Telegram or Slack bots of her own — she routes internally via a bridge transport.
 
 ---
 
@@ -12,16 +12,16 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 4. [Setup Guide](#setup-guide)
    - [Step 1 — Supabase](#step-1--supabase-required-first)
    - [Step 2 — LLM Provider](#step-2--llm-provider)
-   - [Step 3 — Slack App](#step-3--slack-app-optional)
-   - [Step 4 — Telegram Bots](#step-4--telegram-bots-optional)
+   - [Step 3 — Slack App (per sub-agent)](#step-3--slack-app-optional--per-sub-agent)
+   - [Step 4 — Telegram Bots (per sub-agent)](#step-4--telegram-bots-optional--per-sub-agent)
    - [Step 5 — Clone the Repo](#step-5--clone-the-repo)
    - [Step 6 — Configure `/iris/.env`](#step-6--configure-irisenv)
    - [Step 7 — Build iris-runtime](#step-7--build-iris-runtime)
    - [Step 8 — Start the Service](#step-8--start-the-service)
    - [Step 9 — Verify Everything Works](#step-9--verify-everything-works)
 5. [Creating Sub-Agents](#creating-sub-agents)
-6. [Linking Telegram to a Sub-Agent](#linking-telegram-to-a-sub-agent)
-7. [Linking Slack to a Sub-Agent](#linking-slack-to-a-sub-agent)
+6. [Attaching Telegram to a Sub-Agent](#attaching-telegram-to-a-sub-agent)
+7. [Attaching Slack to a Sub-Agent](#attaching-slack-to-a-sub-agent)
 8. [API Reference — v1 (Current)](#api-reference--v1-current)
 9. [API Reference — v2 (Gateway-Ready)](#api-reference--v2-gateway-ready)
 10. [Gateway Integration](#gateway-integration)
@@ -40,8 +40,8 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 ║                     CURRENT STATE  (single-tenant VM)                    ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
-║  You ── Slack ─────────────────────────────────────────────────────────► ║
-║  You ── Telegram Bot 1–5 (long-poll) ──────────────────────────────────► ║
+║  You ── Sub-agent's dedicated Slack App (Socket Mode) ─────────────────► ║
+║  You ── Sub-agent's dedicated Telegram Bot (long-poll) ─────────────────► ║
 ║                                                                           ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐ ║
 ║  │  iris.service  (systemd)  · Node.js · working dir: /iris/data      │ ║
@@ -67,7 +67,7 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
 ║  Storage                                                                  ║
-║  ├── Supabase   sub_agents · links · tasks · sessions · routing          ║
+║  ├── Supabase   sub_agents · claim_tokens · tasks · sessions · routing   ║
 ║  ├── Local FS   /iris/data  (channel history, MEMORY.md, context)        ║
 ║  └── Azure Blob (optional write-through, enable with BLOB_ENABLED=true)  ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
@@ -89,11 +89,12 @@ Iris is a self-hosted AI agent runtime. It runs on a single Azure VM as a system
 
 | Decision | Why |
 |---|---|
-| Telegram bots are gateways | Bots forward to sub-agent bridges — they don't run the LLM themselves |
-| One-to-one bot/workspace ↔ agent | UNIQUE constraint on both sides. No sharing. |
-| Claim token flow | 64-char hex, single-use, 10-min TTL. Never logged. |
+| Each sub-agent owns its own dedicated bot/app | BYO: owner creates their own Telegram Bot / Slack App and attaches credentials via the API. Main Iris has neither — she routes via internal bridge transport only. |
+| Claim token = ownership verification, not a claim from a pool | Anyone could paste a stolen token into the attach form; only the real owner can make *their* bot deliver the token back. Single-use, 10-min TTL, stored in Supabase `claim_tokens`. |
+| No shared-pool bot limits | Old 5-bot / 10-agent caps removed. Sub-agent slots: 1–250 (Firecracker IPv4-octet limit). Each agent brings its own bot — no global pool to contend for. |
 | Sub-agents cannot create agents | Enforced at 3 levels: missing skill mount, filtered in AgentRunner, MEMORY.md hard-block |
-| Skills hot-reload | Volume-mounted read-only. Add a skill dir to the host and it's live immediately |
+| Skills hot-reload | Volume-mounted read-only. Add a skill dir to the host and it's live immediately. Sub-agents can acquire global skills at runtime via `POST /internal/skills/acquire`. |
+| `LEGACY_SHARED_BOT_MODE` | Set `=1` on Main Iris during Phase 8 migration to keep old shared-pool bots alive while owners self-migrate to dedicated-bot attach flow. |
 | Dual API (v1 + v2) | v1 keeps the system running today. v2's auth/routing/scoping chain is wired and gated, but unverified against a live Gateway — see "Gateway Integration" |
 
 ---
@@ -128,11 +129,11 @@ Before starting, make sure you have or can create the following. Nothing needs t
 | An Azure VM (Ubuntu 22.04, 2+ vCPUs, 8 GB RAM) | Azure portal | Yes |
 | A Supabase project | supabase.com (free tier works) | Yes |
 | An LLM provider API key | Anthropic / OpenAI / etc. | Yes |
-| A Slack app | api.slack.com/apps | Optional |
-| Telegram bot tokens (up to 5) | @BotFather on Telegram | Optional |
+| A Slack app (per sub-agent) | api.slack.com/apps | Optional — created per sub-agent |
+| A Telegram bot (per sub-agent) | @BotFather on Telegram | Optional — created per sub-agent |
 | `/dev/kvm` access on the VM | Azure Ddsv5 series | Only for Firecracker |
 
-> **Minimum to get running**: Supabase + an LLM key. Slack and Telegram are both optional.
+> **Minimum to get running**: Supabase + an LLM key. Slack and Telegram bots are attached per sub-agent after setup — neither is required to start the service.
 
 ---
 
@@ -170,30 +171,25 @@ This is **idempotent** — safe to re-run any time without data loss.
 
 ```sql
 -- ============================================================================
--- Iris Core — Complete Supabase Schema
+-- Iris Core — Supabase Schema
 -- Run this in the Supabase SQL Editor.
--- Safe to re-run: all statements use IF NOT EXISTS / exception guards.
+-- CREATE TABLE / INDEX statements use IF NOT EXISTS — safe to re-run.
+-- CREATE TYPE statements will error if types already exist; wrap in
+-- DO $$ BEGIN ... EXCEPTION WHEN duplicate_object THEN NULL; END $$ if needed.
 -- ============================================================================
 
--- ── ENUM types (guarded against duplicate errors) ────────────────────────────
+-- ── ENUM types ───────────────────────────────────────────────────────────────
 
-DO $$ BEGIN CREATE TYPE agent_status  AS ENUM ('running', 'stopped', 'crashed');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN CREATE TYPE task_type     AS ENUM ('immediate', 'scheduled');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN CREATE TYPE task_status   AS ENUM ('pending', 'running', 'done', 'failed', 'skipped');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN CREATE TYPE runtime_type  AS ENUM ('HOST_VM', 'DOCKER');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN CREATE TYPE claim_token_type AS ENUM ('telegram', 'slack');
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE TYPE agent_status      AS ENUM ('running', 'stopped', 'crashed');
+CREATE TYPE task_type         AS ENUM ('immediate', 'scheduled');
+CREATE TYPE task_status       AS ENUM ('pending', 'running', 'done', 'failed', 'skipped');
+CREATE TYPE runtime_type      AS ENUM ('HOST_VM', 'DOCKER');
+CREATE TYPE claim_token_type  AS ENUM ('telegram', 'slack');
 
 -- ── Sub-agent registry ────────────────────────────────────────────────────────
--- Platform-agnostic. Telegram and Slack link to agents via separate tables.
+-- Platform-agnostic. Each sub-agent owns its own dedicated Telegram Bot /
+-- Slack App (BYO credentials). Credentials are stored as Key Vault secret URIs
+-- (never raw tokens) in the *_ref columns; resolved at provision/attach time.
 
 CREATE TABLE IF NOT EXISTS sub_agents (
     agent_id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -203,19 +199,26 @@ CREATE TABLE IF NOT EXISTS sub_agents (
     docker_container_id     TEXT,
     status                  agent_status NOT NULL DEFAULT 'stopped',
     skills                  JSONB        NOT NULL DEFAULT '[]',
-    slot_index              SMALLINT     NOT NULL CHECK (slot_index BETWEEN 1 AND 10),
+    slot_index              SMALLINT     NOT NULL CHECK (slot_index BETWEEN 1 AND 250),
     created_at              TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    -- Dedicated-bot credentials (Key Vault URIs — never raw tokens)
+    telegram_bot_token_ref  TEXT,
+    slack_app_token_ref     TEXT,
+    slack_bot_token_ref     TEXT,
+    telegram_status         TEXT CHECK (telegram_status IN ('unattached', 'pending_verification', 'linked')),
+    slack_status            TEXT CHECK (slack_status    IN ('unattached', 'pending_verification', 'linked')),
     UNIQUE (name),
     UNIQUE (slot_index)
 );
 
 ALTER TABLE sub_agents DISABLE ROW LEVEL SECURITY;
 
--- ── Telegram bot ↔ sub-agent links ───────────────────────────────────────────
--- One-to-one enforced by UNIQUE on both columns.
--- linked_at = NULL means bot is registered but not yet paired with an agent.
--- Pending claim tokens are NOT stored here — they live in a local JSON file.
+-- ── Legacy shared-pool link tables (DEPRECATED) ───────────────────────────────
+-- Superseded by the *_token_ref + *_status columns above.
+-- Kept alive for LEGACY_SHARED_BOT_MODE during Phase 8 migration.
+-- Drop both tables once the last migrated agent has self-migrated to
+-- the dedicated-bot flow (no new rows should be written after cutover).
 
 CREATE TABLE IF NOT EXISTS sub_agent_telegram_links (
     bot_id      TEXT        PRIMARY KEY,
@@ -226,10 +229,6 @@ CREATE TABLE IF NOT EXISTS sub_agent_telegram_links (
 );
 
 ALTER TABLE sub_agent_telegram_links DISABLE ROW LEVEL SECURITY;
-
--- ── Slack workspace ↔ sub-agent links ────────────────────────────────────────
--- One-to-one enforced by UNIQUE on both columns.
--- linked_at = NULL means workspace is registered but not yet paired.
 
 CREATE TABLE IF NOT EXISTS sub_agent_slack_links (
     workspace_id    TEXT        PRIMARY KEY,
@@ -267,8 +266,7 @@ CREATE INDEX IF NOT EXISTS agent_tasks_schedule_idx ON agent_tasks(scheduled_for
 ALTER TABLE agent_tasks DISABLE ROW LEVEL SECURITY;
 
 -- ── Users ─────────────────────────────────────────────────────────────────────
--- Written by the API Gateway when users sign up.
--- iris-runtime reads this to resolve userId from an Internal JWT.
+-- Managed by the API Gateway. iris-runtime reads only (to resolve userId).
 
 CREATE TABLE IF NOT EXISTS users (
     user_id    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -280,7 +278,7 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users DISABLE ROW LEVEL SECURITY;
 
 -- ── VM routing table ──────────────────────────────────────────────────────────
--- Written by the VM Orchestrator. Maps each user to their dedicated VM.
+-- Managed by the VM Orchestrator. Maps each user to their dedicated VM.
 
 CREATE TABLE IF NOT EXISTS vm_routing (
     vm_id      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -297,13 +295,12 @@ CREATE INDEX IF NOT EXISTS vm_routing_user_idx ON vm_routing(user_id);
 ALTER TABLE vm_routing DISABLE ROW LEVEL SECURITY;
 
 -- ── Runtime mapping ───────────────────────────────────────────────────────────
--- Written by iris-runtime when sub-agents are provisioned.
--- Maps agentId → runtimeId → runtimeType for Gateway routing.
+-- Written by iris-runtime on agent provisioning (agentId → runtimeId → type).
 
 CREATE TABLE IF NOT EXISTS runtime_mapping (
     runtime_id   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     agent_id     UUID         NOT NULL UNIQUE REFERENCES sub_agents(agent_id) ON DELETE CASCADE,
-    vm_id        UUID         REFERENCES vm_routing(vm_id) ON DELETE CASCADE,
+    vm_id        UUID         NOT NULL REFERENCES vm_routing(vm_id) ON DELETE CASCADE,
     runtime_type runtime_type NOT NULL DEFAULT 'DOCKER',
     bridge_url   TEXT,
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -316,9 +313,8 @@ CREATE INDEX IF NOT EXISTS runtime_mapping_agent_idx ON runtime_mapping(agent_id
 ALTER TABLE runtime_mapping DISABLE ROW LEVEL SECURITY;
 
 -- ── Claim tokens ──────────────────────────────────────────────────────────────
--- Single-use, 10-min TTL, 64 hex chars.
--- Replaces local telegram-link-tokens.json / slack-link-tokens.json files.
--- iris-runtime writes here; the Gateway frontend reads for the pairing UI.
+-- Single-use ownership-verification tokens, 64 hex chars, 10-min TTL.
+-- iris-runtime writes on attach; the bot delivers it back to prove bot ownership.
 
 CREATE TABLE IF NOT EXISTS claim_tokens (
     token      TEXT             PRIMARY KEY,
@@ -335,28 +331,45 @@ CREATE INDEX IF NOT EXISTS claim_tokens_expires_idx ON claim_tokens(expires_at) 
 ALTER TABLE claim_tokens DISABLE ROW LEVEL SECURITY;
 
 -- ── Sessions ──────────────────────────────────────────────────────────────────
--- Written by iris-runtime when sessions are created via the API.
--- Replaces data/sessions.json local file.
--- The Gateway and frontend query this for session history.
+-- Written by iris-runtime (SessionManager). Scoped to agent_id when created
+-- via the v2 message API (newThread flow). Queryable by the Gateway frontend.
 
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id       TEXT        PRIMARY KEY,
-    user_id          UUID        REFERENCES users(user_id)      ON DELETE SET NULL,
-    agent_id         UUID        REFERENCES sub_agents(agent_id) ON DELETE SET NULL,
-    origin_channel   TEXT        NOT NULL,
-    origin_thread_ts TEXT,
-    working_channel  TEXT,
+    session_id        TEXT        PRIMARY KEY,
+    user_id           UUID        REFERENCES users(user_id)       ON DELETE SET NULL,
+    agent_id          UUID        REFERENCES sub_agents(agent_id) ON DELETE SET NULL,
+    origin_channel    TEXT        NOT NULL,
+    origin_thread_ts  TEXT,
+    working_channel   TEXT,
     working_thread_ts TEXT,
-    client_email     TEXT,
-    metadata         JSONB       NOT NULL DEFAULT '{}',
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+    client_email      TEXT,
+    metadata          JSONB       NOT NULL DEFAULT '{}',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS sessions_user_idx  ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS sessions_agent_idx ON sessions(agent_id);
 
 ALTER TABLE sessions DISABLE ROW LEVEL SECURITY;
+
+-- ── Migration: add dedicated-bot columns to existing sub_agents table ─────────
+-- If sub_agents already existed from a prior schema, CREATE TABLE above was a
+-- no-op — run this to add the new columns idempotently.
+
+ALTER TABLE sub_agents
+    ADD COLUMN IF NOT EXISTS telegram_bot_token_ref TEXT,
+    ADD COLUMN IF NOT EXISTS slack_app_token_ref    TEXT,
+    ADD COLUMN IF NOT EXISTS slack_bot_token_ref    TEXT,
+    ADD COLUMN IF NOT EXISTS telegram_status        TEXT,
+    ADD COLUMN IF NOT EXISTS slack_status           TEXT;
+
+-- Raise slot_index ceiling from old cap of 10 to 250 (Firecracker limit).
+DO $$ BEGIN
+    ALTER TABLE sub_agents DROP CONSTRAINT IF EXISTS sub_agents_slot_index_check;
+    ALTER TABLE sub_agents ADD CONSTRAINT sub_agents_slot_index_check
+        CHECK (slot_index BETWEEN 1 AND 250);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ```
 
 #### 1d — Verify
@@ -365,17 +378,17 @@ After running the SQL, open **Table Editor** in the Supabase dashboard. You shou
 
 | Table | Description |
 |---|---|
-| `sub_agents` | Sub-agent registry |
-| `sub_agent_telegram_links` | Telegram bot ↔ agent pairings |
-| `sub_agent_slack_links` | Slack workspace ↔ agent pairings |
+| `sub_agents` | Sub-agent registry — includes `telegram_bot_token_ref`, `slack_app_token_ref`, `slack_bot_token_ref`, `telegram_status`, `slack_status` columns for dedicated-bot credentials |
+| `sub_agent_telegram_links` | **DEPRECATED** — legacy shared-pool Telegram links. Kept live for `LEGACY_SHARED_BOT_MODE` migration window only. |
+| `sub_agent_slack_links` | **DEPRECATED** — legacy shared-pool Slack links. Same migration status. |
 | `agent_tasks` | Scheduled and immediate task queue |
-| `users` | User accounts. iris-runtime should only ever *read* this (resolve `userId`) — no read path wired yet |
+| `users` | User accounts. iris-runtime reads only (to resolve `userId` from an Internal JWT) — no read path wired yet |
 | `vm_routing` | Per-user VM assignments — exclusively VM-Orchestrator-owned, iris-runtime never writes here |
-| `runtime_mapping` | Agent → runtime mapping — **actively written** by iris-runtime on agent provisioning (`upsertRuntimeMapping`), gated on a real Gateway-issued VM UUID. See "Gateway Integration" |
-| `claim_tokens` | Pairing tokens — meant to replace local JSON token files; not yet wired (open follow-up) |
-| `sessions` | Conversation sessions |
+| `runtime_mapping` | Agent → runtime mapping — **actively written** by iris-runtime on agent provisioning, gated on a real Gateway-issued VM UUID. See "Gateway Integration" |
+| `claim_tokens` | Ownership-verification tokens — **wired**: iris-runtime writes/reads these on dedicated-bot attach/verify |
+| `sessions` | Conversation sessions — **wired**: iris-runtime creates sessions on new-thread API calls, scoped by `agent_id` |
 
-If any table is missing, re-run the SQL block — it is fully idempotent.
+If any table is missing, re-run the SQL block — CREATE TABLE statements use IF NOT EXISTS.
 
 #### Migrating from old schema (if you already have tables)
 
@@ -426,36 +439,40 @@ Set `OPENAI_BASE_URL` to the provider's API base URL, then set provider/model/ke
 
 ---
 
-### Step 3 — Slack App (optional)
+### Step 3 — Slack App (optional — per sub-agent)
 
-Iris uses Slack's **Socket Mode** — a persistent WebSocket connection. You do not need a public HTTPS endpoint.
+> **Architecture note**: Main Iris has **no** Slack app of her own. Slack apps are created by sub-agent owners and attached to a specific sub-agent via the API (see "Attaching Slack to a Sub-Agent"). You do not need to create a Slack app here — skip this step and do it after you have created your first sub-agent.
+>
+> If you are migrating from the old shared-pool model and want to keep existing linked workspaces running during migration, set `LEGACY_SHARED_BOT_MODE=1` in `/iris/.env` and add the old `IRIS_SLACK_APP_TOKEN` / `IRIS_SLACK_BOT_TOKEN` values. New setups should skip both variables entirely.
 
-#### 3a — Create the app
+#### 3a — Create a Slack App (for a sub-agent)
+
+Each sub-agent that you want to reach via Slack needs its own dedicated Slack App in the workspace(s) it operates in. Iris uses Socket Mode — no public HTTPS endpoint needed.
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps)
 2. Click **Create New App** → **From scratch**
-3. Name it (e.g. `Iris`) and pick your workspace
+3. Name it after your sub-agent (e.g. `Research Agent`) and pick the target workspace
 4. Click **Create App**
 
 #### 3b — Enable Socket Mode
 
 1. In the left sidebar, click **Socket Mode** (under Settings)
 2. Toggle **Enable Socket Mode** to ON
-3. You will be asked to create an App-Level Token:
-   - Name it anything (e.g. `iris-socket`)
+3. Create an App-Level Token:
+   - Name it anything (e.g. `socket-token`)
    - Add the scope: `connections:write`
    - Click **Generate**
-4. Copy the token — it starts with `xapp-` → this is `IRIS_SLACK_APP_TOKEN`
+4. Copy the token — it starts with `xapp-` → this is `slackAppToken` for the attach call
 
 #### 3c — Add Bot Token Scopes
 
 1. In the sidebar, go to **OAuth & Permissions**
-2. Scroll to **Bot Token Scopes** and add these scopes:
+2. Scroll to **Bot Token Scopes** and add:
 
 | Scope | Purpose |
 |---|---|
-| `app_mentions:read` | Detect when Iris is mentioned |
-| `channels:history` | Read messages in channels Iris is in |
+| `app_mentions:read` | Detect when the bot is mentioned |
+| `channels:history` | Read messages in channels the bot is in |
 | `channels:read` | List public channels |
 | `chat:write` | Post messages |
 | `files:write` | Upload files |
@@ -470,73 +487,52 @@ Iris uses Slack's **Socket Mode** — a persistent WebSocket connection. You do 
 
 #### 3d — Subscribe to Events
 
-1. In the sidebar, go to **Event Subscriptions**
-2. Toggle **Enable Events** to ON
-3. Scroll to **Subscribe to bot events** and add:
-   - `app_mention`
-   - `message.channels`
-   - `message.groups`
-   - `message.im`
-   - `message.mpim`
-4. Click **Save Changes**
+1. Go to **Event Subscriptions**, toggle **Enable Events** to ON
+2. Under **Subscribe to bot events** add: `app_mention`, `message.channels`, `message.groups`, `message.im`, `message.mpim`
+3. Click **Save Changes**
 
-#### 3e — Install the app
+#### 3e — Install the app and collect tokens
 
-1. In the sidebar, go to **OAuth & Permissions**
-2. Click **Install to Workspace** → **Allow**
-3. Copy the **Bot User OAuth Token** — it starts with `xoxb-` → this is `IRIS_SLACK_BOT_TOKEN`
+1. **OAuth & Permissions** → **Install to Workspace** → **Allow**
+2. Copy the **Bot User OAuth Token** (starts with `xoxb-`) → this is `slackBotToken`
 
-#### 3f — Invite the bot to channels
+#### 3f — What you have now
 
-In Slack, go to a channel and type:
-```
-/invite @Iris
-```
-
-Or in any channel: mention the bot by typing `@Iris`.
-
-#### 3g — What you have now
-
-| Variable | Looks like | Where to find it |
+| Variable | Looks like | Used in |
 |---|---|---|
-| `IRIS_SLACK_APP_TOKEN` | `xapp-1-A012...` | App-Level Tokens (Socket Mode page) |
-| `IRIS_SLACK_BOT_TOKEN` | `xoxb-1234...` | OAuth & Permissions page, after install |
+| `slackAppToken` | `xapp-1-A012...` | `POST /v2/sub-agents/:id/integrations/slack` body |
+| `slackBotToken` | `xoxb-1234...` | Same attach call |
+
+These are passed directly to the attach API (Step 3 of "Attaching Slack to a Sub-Agent") — they are **not** added to `/iris/.env`.
 
 ---
 
-### Step 4 — Telegram Bots (optional)
+### Step 4 — Telegram Bots (optional — per sub-agent)
 
-Each Telegram bot is a **gateway** — it forwards messages to a linked sub-agent. A bot does nothing on its own until it is linked.
-
-You can create up to **5 bots** (one per token).
+> **Architecture note**: Main Iris has **no** Telegram bot of her own. Telegram bots are created by sub-agent owners and attached to a specific sub-agent via the API (see "Attaching Telegram to a Sub-Agent"). You do not need a bot token here — skip this step and do it after you have created your first sub-agent.
 
 #### 4a — Create a bot via @BotFather
 
 1. Open Telegram and search for `@BotFather`
 2. Send: `/newbot`
-3. Choose a display name (e.g. `My Assistant`)
-4. Choose a username — must end in `bot` (e.g. `my_iris_assistant_bot`)
+3. Choose a display name (e.g. `Research Bot`)
+4. Choose a username — must end in `bot` (e.g. `research_iris_bot`)
 5. BotFather replies with your token: `7123456789:AAFxyz_rest_of_token`
 
-Repeat for each additional bot you want.
+#### 4b — (Optional) Enable group access
 
-#### 4b — (Optional) Enable inline mode
+If you want the bot to see all messages in groups (not just commands):
 
-If you want the bot to work inside group chats:
-
-1. Message `@BotFather`
-2. Send `/mybots` → select your bot
-3. **Bot Settings** → **Group Privacy** → turn OFF (so it sees all messages in groups)
+1. Message `@BotFather` → `/mybots` → select your bot
+2. **Bot Settings** → **Group Privacy** → turn **OFF**
 
 #### 4c — What you have now
 
-| Variable | Token format |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | `7123456789:AAFxyz...` |
-| `TELEGRAM_BOT_TOKEN_2` | Second bot token (optional) |
-| `TELEGRAM_BOT_TOKEN_3` | Third bot token (optional) |
-| `TELEGRAM_BOT_TOKEN_4` | Fourth bot token (optional) |
-| `TELEGRAM_BOT_TOKEN_5` | Fifth bot token (optional) |
+| Variable | Token format | Used in |
+|---|---|---|
+| `telegramBotToken` | `7123456789:AAFxyz...` | `POST /v2/sub-agents/:id/integrations/telegram` body |
+
+This is passed directly to the attach API — it is **not** added to `/iris/.env`.
 
 ---
 
@@ -601,19 +597,20 @@ SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.YOUR_KEY
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SLACK  (optional — from Step 3)
+# SLACK / TELEGRAM  (Main Iris has no bots of her own)
 # ─────────────────────────────────────────────────────────────────────────────
-IRIS_SLACK_APP_TOKEN=xapp-1-A0123-YOUR_APP_LEVEL_TOKEN
-IRIS_SLACK_BOT_TOKEN=xoxb-YOUR_BOT_TOKEN
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TELEGRAM  (optional — from Step 4, up to 5 bots)
-# ─────────────────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN=7123456789:AAFxyz_YOUR_FIRST_BOT_TOKEN
-# TELEGRAM_BOT_TOKEN_2=79876...   # second bot
-# TELEGRAM_BOT_TOKEN_3=71112...   # third bot
-# TELEGRAM_BOT_TOKEN_4=72223...   # fourth bot
-# TELEGRAM_BOT_TOKEN_5=73334...   # fifth bot
+# Each sub-agent attaches its own dedicated Telegram Bot / Slack App via the
+# integration API after it is created — see "Attaching Telegram/Slack" sections.
+# Do NOT add IRIS_SLACK_APP_TOKEN, IRIS_SLACK_BOT_TOKEN, or TELEGRAM_BOT_TOKEN
+# here for a new setup.
+#
+# Migration only: if upgrading from the old shared-pool model and want to keep
+# legacy linked agents working while owners self-migrate, set:
+# LEGACY_SHARED_BOT_MODE=1
+# IRIS_SLACK_APP_TOKEN=xapp-1-A0123-YOUR_OLD_APP_LEVEL_TOKEN
+# IRIS_SLACK_BOT_TOKEN=xoxb-YOUR_OLD_BOT_TOKEN
+# TELEGRAM_BOT_TOKEN=7123456789:AAFxyz_OLD_BOT_TOKEN
+# (Remove these and LEGACY_SHARED_BOT_MODE after all agents have migrated.)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RUNTIME  (sensible defaults — change only if needed)
@@ -628,7 +625,7 @@ IRIS_DIR=/iris
 # ─────────────────────────────────────────────────────────────────────────────
 # GITHUB_TOKEN=ghp_YOUR_GITHUB_TOKEN
 # RESEND_API_KEY=re_YOUR_RESEND_KEY     # email sending
-# IRIS_KEY_VAULT=your-keyvault-name     # Azure Key Vault
+# IRIS_KEY_VAULT=your-keyvault-name     # Azure Key Vault for sub-agent credentials
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GATEWAY INTEGRATION  (leave unset — only needed when API Gateway is deployed)
@@ -704,8 +701,10 @@ You should see lines like:
 ```
 iris-runtime: provider=anthropic model=claude-sonnet-4-5 environment=prod
 [api] Internal API listening on http://0.0.0.0:3000
-[telegram:123456789] Started. Send a sub-agent claim token to this bot to link it.
+[main] No dedicated Telegram/Slack bots — Main Iris routes via bridge transport only
 ```
+
+(No Telegram or Slack startup messages on Main Iris — that is expected. Bots are started inside sub-agent containers after attachment.)
 
 Test the API:
 
@@ -756,7 +755,7 @@ curl -s -X POST http://localhost:3000/agents \
 }
 ```
 
-Save the `agentId` — you need it for linking.
+Save the `agentId` — you need it for attaching a Telegram bot or Slack app.
 
 ```bash
 # Firecracker runtime (hardware VM isolation — requires /dev/kvm)
@@ -791,30 +790,39 @@ This stops the container/VM, unlinks any connected Telegram bot or Slack workspa
 
 ---
 
-## Linking Telegram to a Sub-Agent
+## Attaching Telegram to a Sub-Agent
 
-A Telegram bot can only be linked to one agent, and an agent can only be linked to one bot.
+Each sub-agent owns its own dedicated Telegram Bot (BYO). The attach flow stores the bot token as a Key Vault secret, re-provisions the sub-agent container with the token as an env var, and issues a **claim token** — a short-lived code you send to *your own bot* to prove you control it (anti-spoofing ownership check).
 
-### Step 1 — Generate a claim token
+### Prerequisites
+
+- A sub-agent already created (from "Creating Sub-Agents" above)
+- A Telegram bot token from @BotFather (from Step 4, or create one now)
+
+### Step 1 — Attach credentials
 
 ```bash
 AGENT_ID="a1b2c3d4-1234-5678-abcd-ef0123456789"
 
-curl -s -X POST http://localhost:3000/agents/$AGENT_ID/telegram/token | jq .
+curl -s -X POST http://localhost:3000/v2/sub-agents/$AGENT_ID/integrations/telegram \
+  -H "Content-Type: application/json" \
+  -d '{"telegramBotToken": "7123456789:AAFxyz_YOUR_BOT_TOKEN"}' | jq .
 ```
 
 ```json
 {
-  "token": "a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1",
+  "agentId": "a1b2c3d4-...",
   "agentName": "research-agent",
-  "expiresInSeconds": 600,
-  "instructions": "Send this token to your Telegram bot to link it to \"research-agent\"."
+  "platform": "telegram",
+  "claimToken": "a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1",
+  "expiresAt": "2026-06-09T12:10:00.000Z",
+  "status": "pending_verification"
 }
 ```
 
-The token is also saved to `/iris/data/telegram-link-token.txt` for convenience.
+The sub-agent container is re-provisioned with the token. `status: "pending_verification"` means the bot is running but ownership has not been verified yet.
 
-### Step 2 — Send the token to the bot
+### Step 2 — Prove ownership (send the claim token to the bot)
 
 Open Telegram, find your bot, and send it **exactly** the 64-character hex token as a plain message:
 
@@ -822,28 +830,34 @@ Open Telegram, find your bot, and send it **exactly** the 64-character hex token
 a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1b8d7f4a3f9c2e1
 ```
 
-The bot replies: `✅ Linked to sub-agent "research-agent". You can start chatting now!`
+The bot replies: `✅ Ownership verified for sub-agent "research-agent". You can start chatting now!`
 
-### Step 3 — Verify the link
+Internally, the bot calls `POST /internal/integrations/telegram/verify` which flips `telegram_status` to `"linked"` in Supabase.
 
-```bash
-curl -s http://localhost:3000/agents/$AGENT_ID | jq .
-```
-
-### Unlinking
+### Step 3 — Confirm the status
 
 ```bash
-# Via API
-curl -s -X DELETE http://localhost:3000/agents/$AGENT_ID/telegram | jq .
-
-# Via Telegram (send to the bot)
-/unlink
-/unlink confirm
+curl -s http://localhost:3000/v2/sub-agents/$AGENT_ID | jq '.data.integrations'
 ```
+
+```json
+{
+  "telegram": { "status": "linked", "dedicatedVerified": true },
+  "slack":    { "status": "unattached" }
+}
+```
+
+### Detaching
+
+```bash
+curl -s -X DELETE http://localhost:3000/v2/sub-agents/$AGENT_ID/integrations/telegram | jq .
+```
+
+This deletes the Key Vault secret and re-provisions the container without the token. The bot itself is not deleted — it just becomes unused.
 
 ### Telegram bot commands
 
-Once linked, the bot responds to these built-in commands:
+Once the sub-agent's bot is verified, it responds to these built-in commands:
 
 | Command | What it does |
 |---|---|
@@ -853,54 +867,71 @@ Once linked, the bot responds to these built-in commands:
 | `/reset` | Clear conversation context |
 | `/compact` | Summarise context to save tokens |
 | `/stop` | Abort a running response |
-| `/unlink` | Begin unlinking this bot from its agent |
 
-### Important rules
+### Rules
 
 | Rule | Detail |
 |---|---|
 | One-to-one | One bot ↔ one agent. Neither side can be shared. |
-| Token expires | 10 minutes. Generating a new token invalidates the previous one. |
-| Token is single-use | Once sent to the bot it cannot be reused. |
-| Unlinked bot behaviour | Ignores all messages except a valid claim token. |
+| Claim token expires | 10 minutes from the attach call. Re-attach to get a fresh one. |
+| Claim token is single-use | Once delivered to the bot, it cannot be reused. |
+| Unverified bot behaviour | Accepts only the pending claim token; ignores all other messages until verified. |
 
 ---
 
-## Linking Slack to a Sub-Agent
+## Attaching Slack to a Sub-Agent
 
-Each Slack workspace can be linked to one sub-agent.
+Each sub-agent owns its own dedicated Slack App (BYO). The same claim-token ownership-verification flow applies.
 
-### Step 1 — Generate a claim token
+### Prerequisites
+
+- A sub-agent already created
+- A Slack App token pair from Step 3 (`slackAppToken` + `slackBotToken`)
+
+### Step 1 — Attach credentials
 
 ```bash
 AGENT_ID="a1b2c3d4-1234-5678-abcd-ef0123456789"
 
-curl -s -X POST http://localhost:3000/agents/$AGENT_ID/slack/token | jq .
+curl -s -X POST http://localhost:3000/v2/sub-agents/$AGENT_ID/integrations/slack \
+  -H "Content-Type: application/json" \
+  -d '{
+    "slackAppToken": "xapp-1-A0123-YOUR_APP_TOKEN",
+    "slackBotToken": "xoxb-YOUR_BOT_TOKEN"
+  }' | jq .
 ```
 
 ```json
 {
-  "token": "b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2",
+  "agentId": "a1b2c3d4-...",
   "agentName": "research-agent",
-  "expiresInSeconds": 600,
-  "instructions": "Send this token as a DM to your Slack bot to link the workspace to \"research-agent\"."
+  "platform": "slack",
+  "claimToken": "b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2",
+  "expiresAt": "2026-06-09T12:10:00.000Z",
+  "status": "pending_verification"
 }
 ```
 
-### Step 2 — Send the token as a DM to the Slack bot
+### Step 2 — Prove ownership (send the claim token as a DM)
 
-In Slack, open a Direct Message with your bot (search for it by name) and send the 64-character token:
+In Slack, open a Direct Message with your bot (search by name) and send the 64-character token:
 
 ```
 b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2a9c3e8b7e4d1f2
 ```
 
-The bot replies: `✅ Workspace linked to sub-agent "research-agent".`
+The bot replies: `✅ Ownership verified for sub-agent "research-agent".`
 
-### Unlinking
+### Step 3 — Confirm the status
 
 ```bash
-curl -s -X DELETE http://localhost:3000/agents/$AGENT_ID/slack | jq .
+curl -s http://localhost:3000/v2/sub-agents/$AGENT_ID | jq '.data.integrations'
+```
+
+### Detaching
+
+```bash
+curl -s -X DELETE http://localhost:3000/v2/sub-agents/$AGENT_ID/integrations/slack | jq .
 ```
 
 ---
@@ -928,19 +959,16 @@ These routes are active right now, require no authentication, and are used by th
 | `DELETE` | `/agents/:id` | — | Stop container/VM, unlink all, delete record |
 | `PATCH` | `/agents/:id/skills` | `{ add?: [...], remove?: [...] }` | Update skill list (hot-reload, no restart) |
 
-### Telegram linking
+### Telegram / Slack (v1 — legacy)
+
+These v1 routes exist for backward compatibility with the old shared-pool model. New integrations should use the v2 `integrations/:platform` endpoints.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/agents/:id/telegram/token` | Generate a claim token (10 min TTL) |
-| `DELETE` | `/agents/:id/telegram` | Unlink bot from agent |
-
-### Slack linking
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/agents/:id/slack/token` | Generate a claim token (10 min TTL) |
-| `DELETE` | `/agents/:id/slack` | Unlink workspace from agent |
+| `POST` | `/agents/:id/telegram/token` | Generate a Telegram claim token (10 min TTL) — legacy |
+| `DELETE` | `/agents/:id/telegram` | Unlink bot from agent — legacy |
+| `POST` | `/agents/:id/slack/token` | Generate a Slack claim token (10 min TTL) — legacy |
+| `DELETE` | `/agents/:id/slack` | Unlink workspace from agent — legacy |
 
 ### Sessions
 
@@ -996,15 +1024,15 @@ These routes are active now and serve the existing v1-equivalent functionality r
 |---|---|---|---|
 | `GET` | `/v2/sub-agents` | — | List all sub-agents (includes integration status) |
 | `POST` | `/v2/sub-agents` | `{ name, skills?, runtime? }` | Create sub-agent, returns Runtime JWT |
-| `GET` | `/v2/sub-agents/:id` | — | Get one sub-agent + integration links |
-| `DELETE` | `/v2/sub-agents/:id` | — | Delete sub-agent (stops runtime, unlinks everything) |
-| `PATCH` | `/v2/sub-agents/:id/skills` | `{ add?, remove? }` | Update skills (hot-reload) |
-| `POST` | `/v2/sub-agents/:id/message` | `{ text, user?, channelId? }` | Send message via bridge, wait for response |
-| `GET` | `/v2/sub-agents/:id/history` | `?channelId=tg-12345` | Conversation history (channelId required) |
-| `POST` | `/v2/sub-agents/:id/telegram/token` | — | Generate Telegram claim token |
-| `DELETE` | `/v2/sub-agents/:id/telegram` | — | Unlink Telegram bot |
-| `POST` | `/v2/sub-agents/:id/slack/token` | — | Generate Slack claim token |
-| `DELETE` | `/v2/sub-agents/:id/slack` | — | Unlink Slack workspace |
+| `GET` | `/v2/sub-agents/:id` | — | Get one sub-agent + integration status |
+| `DELETE` | `/v2/sub-agents/:id` | — | Delete sub-agent (stops runtime, detaches all bots, removes record) |
+| `PATCH` | `/v2/sub-agents/:id/skills` | `{ add?, remove? }` | Update skills (hot-reload, no restart) |
+| `POST` | `/v2/sub-agents/:id/message` | `{ text, user?, channelId?, newThread? }` | Send message via bridge; `newThread:true` generates a fresh channelId and creates a session |
+| `GET` | `/v2/sub-agents/:id/history` | `?channelId=...` | Conversation history for a channel (required) |
+| `GET` | `/v2/sub-agents/:id/sessions` | — | List all sessions (threads) scoped to this agent |
+| `POST` | `/v2/sub-agents/:id/skills/define` | `{ name, description, content? }` | Create an agent-private skill (not in global library) |
+| `POST` | `/v2/sub-agents/:id/integrations/:platform` | platform=`telegram`: `{ telegramBotToken }`; platform=`slack`: `{ slackAppToken, slackBotToken }` | Attach dedicated bot/app: stores BYO credentials as Key Vault secrets, re-provisions container, issues claim token for ownership verification |
+| `DELETE` | `/v2/sub-agents/:id/integrations/:platform` | — | Detach: deletes Key Vault secrets, re-provisions without bot |
 
 ### Integration inbound (Gateway → iris-runtime)
 
@@ -1167,13 +1195,10 @@ actual Internal JWT, an actual `scope: "integration"` token, and create a real
 `vm_routing` row, and confirm the Gateway and runtime agree on every field
 name and value.
 
-Separately, three Supabase tables remain inert placeholders despite their
-schema comments documenting iris-runtime as the intended writer/reader:
-`users` (read-only, to resolve `userId` — no read path exists), `claim_tokens`
-and `sessions` (meant to replace the working local JSON files
-`telegram-link-tokens.json` / `slack-link-tokens.json` / `sessions.json`).
-Wiring these up is a real migration of currently-working code, not a small
-addition — treat it as separate follow-up work, not a Gateway-merge blocker.
+`claim_tokens` and `sessions` are now actively written by iris-runtime (the
+dedicated-bot attach/verify flow and the `newThread` v2 message path
+respectively). `users` remains read-only with no actual read path wired — still
+a placeholder for Gateway-issued userId resolution.
 
 ### Azure Blob Storage (optional write-through)
 
@@ -1225,22 +1250,29 @@ Complete reference for `/iris/.env`. Variables marked **required** must be set f
 | `SUPABASE_URL` | Yes | `https://<ref>.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | `service_role` key from Project Settings → API |
 
-### Slack
+### Slack / Telegram (dedicated-bot model — new setups)
+
+Main Iris has no Slack or Telegram bots. Do not set these for new setups. Sub-agent bot credentials are attached via `POST /v2/sub-agents/:id/integrations/:platform` and stored in Key Vault — they never live in `.env`.
+
+### Slack / Telegram (legacy shared-pool — migration only)
 
 | Variable | Required | Description |
 |---|---|---|
-| `IRIS_SLACK_APP_TOKEN` | For Slack | App-Level Token starting with `xapp-` |
-| `IRIS_SLACK_BOT_TOKEN` | For Slack | Bot User OAuth Token starting with `xoxb-` |
+| `LEGACY_SHARED_BOT_MODE` | No | Set `1` to start old shared-pool bots on Main Iris during Phase 8 migration window |
+| `IRIS_SLACK_APP_TOKEN` | If `LEGACY_SHARED_BOT_MODE=1` | Old shared-pool App-Level Token (`xapp-`) |
+| `IRIS_SLACK_BOT_TOKEN` | If `LEGACY_SHARED_BOT_MODE=1` | Old shared-pool Bot Token (`xoxb-`) |
+| `TELEGRAM_BOT_TOKEN` | If `LEGACY_SHARED_BOT_MODE=1` | First legacy bot token |
+| `TELEGRAM_BOT_TOKEN_2`–`_5` | No | Additional legacy bot tokens (up to 4 more) |
 
-### Telegram
+Remove `LEGACY_SHARED_BOT_MODE` and all legacy bot tokens once all agents have self-migrated to the dedicated-bot flow.
 
-| Variable | Required | Description |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | For Telegram | First bot token from @BotFather |
-| `TELEGRAM_BOT_TOKEN_2` | No | Second bot token |
-| `TELEGRAM_BOT_TOKEN_3` | No | Third bot token |
-| `TELEGRAM_BOT_TOKEN_4` | No | Fourth bot token |
-| `TELEGRAM_BOT_TOKEN_5` | No | Fifth bot token |
+### Sub-agent injected variables (set by iris-runtime — do not set manually)
+
+| Variable | Description |
+|---|---|
+| `IS_SUB_AGENT` | Set by provisionAgent to `1` inside sub-agent containers |
+| `AGENT_ID` | The sub-agent's UUID — used to branch bot construction and self-identify |
+| `AGENT_NAME` | Human-readable name — used in bot greeting messages |
 
 ### Runtime
 
@@ -1370,17 +1402,19 @@ sudo bash /iris/repo/scripts/build-firecracker-rootfs.sh
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `iris.service` fails to start | Missing required env vars | `journalctl -u iris` then check `/iris/.env` |
-| Service starts but no Slack connection | Invalid Slack tokens | Check `IRIS_SLACK_APP_TOKEN` starts with `xapp-`, `IRIS_SLACK_BOT_TOKEN` with `xoxb-` |
-| Slack bot does not respond | Bot not invited to channel | Type `/invite @BotName` in the channel |
-| Telegram bot ignores all messages | Bot is unlinked | Generate a claim token and send it to the bot |
-| Claim token rejected with "expired" | Token is >10 min old | `POST /agents/:id/telegram/token` — generates a fresh one |
-| Claim token rejected with "already_linked" | Bot or agent already has a link | Unlink first via `/unlink confirm` in Telegram or `DELETE /agents/:id/telegram` |
+| No Slack/Telegram startup log on Main Iris | Expected — Main Iris has no bots | Bots start inside sub-agent containers after `POST /v2/sub-agents/:id/integrations/:platform` |
+| Sub-agent bot ignores all messages after attach | Ownership not verified yet | Send the 64-char claim token (from the attach response) as a plain message to the bot |
+| Claim token rejected with "expired" | Token is >10 min old | Re-run `POST /v2/sub-agents/:id/integrations/:platform` — issues a fresh token |
+| Bot responds but says "unverified" | `telegram_status` stuck at `pending_verification` | Check that the bot is actually running (`docker logs iris-agent-<id>`) and that the claim token was sent correctly |
+| `POST /v2/sub-agents/:id/integrations/:platform` returns 409 | Agent already has credentials attached | `DELETE /v2/sub-agents/:id/integrations/:platform` first, then re-attach |
+| `LEGACY_SHARED_BOT_MODE` bots not starting | Missing token vars | Set `IRIS_SLACK_APP_TOKEN` / `IRIS_SLACK_BOT_TOKEN` / `TELEGRAM_BOT_TOKEN` alongside `LEGACY_SHARED_BOT_MODE=1` |
 | `POST /agents` returns 409 | Agent name taken or no slots free | Use a different name, or `DELETE` an existing agent to free a slot |
 | Sub-agent container not starting | `iris-runtime:local` image missing | Rebuild: `cd iris-runtime && npm run build && docker build -t iris-runtime:local .` |
 | Firecracker VM not booting | `/dev/kvm` unavailable | Resize VM to Ddsv5 series on Azure (B/D/F series have no KVM) |
 | `firecracker: permission denied` | User not in `kvm` group | `sudo usermod -aG kvm $USER` then log out and back in |
 | Supabase errors on startup | Missing or wrong credentials | Verify `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `/iris/.env` |
-| Task creation fails with FK error | Old schema — `agent_tasks` still has FK to `telegram_agents` | Run the migration cleanup block in Supabase SQL Editor, then re-run the full schema |
+| `claim_tokens` insert fails | Missing dedicated-bot columns on `sub_agents` | Run the migration ALTER TABLE block from Step 1c in the Supabase SQL Editor |
+| Task creation fails with FK error | Old schema — `agent_tasks` still has FK to `telegram_agents` | Run the old migration cleanup block in Supabase SQL Editor, then re-run the full schema |
 | `GET /v2/health` returns 401 | `GATEWAY_MODE=true` but no JWT sent | Either set `GATEWAY_MODE=false` or send `Authorization: Bearer <JWT>` |
 | v2 routes return 404 for unknown paths | URL typo | Check the [v2 API reference](#api-reference--v2-gateway-ready) |
 | `BLOB_ENABLED=true` but writes fail | Wrong connection string | Verify `AZURE_STORAGE_CONNECTION_STRING` is the full connection string, not just the account name |
@@ -1389,13 +1423,17 @@ sudo bash /iris/repo/scripts/build-firecracker-rootfs.sh
 
 ## Operational Notes
 
-**Skills hot-reload** — Drop a skill directory into `/iris/data/skills/` on the host. All running sub-agent containers see it immediately (volume-mounted read-only). Then call `PATCH /agents/:id/skills` to register it with the agent. No container restart needed.
+**Skills hot-reload** — Drop a skill directory into `/iris/data/skills/` on the host. All running sub-agent containers see it immediately (volume-mounted read-only). Then call `PATCH /agents/:id/skills` to register it with the agent. No container restart needed. Sub-agents can self-acquire global skills at runtime via `POST /internal/skills/acquire` (requires `x-agent-id` header; idempotent).
 
-**Agent naming** — Docker containers are named `iris-agent-{agentId}`. Firecracker VMs are `iris-fc-{agentId}`. Bridge ports: Docker uses `127.0.0.1:420{1..10}` (slot 1 = port 4201). Firecracker uses `172.20.{slot}.2:4200`.
+**Agent-private skills** — Use `POST /v2/sub-agents/:id/skills/define` to create a skill that lives only in that agent's workspace and is not shared with other agents.
 
-**Watchdog** — Checks Docker via `docker inspect`, Firecracker via exec-server `/health` every 30 seconds. On crash, notifies the linked Telegram bot. On recovery, marks missed scheduled tasks as `skipped`.
+**Agent naming** — Docker containers are named `iris-agent-{agentId}`. Firecracker VMs are `iris-fc-{agentId}`. Bridge ports: Docker uses `127.0.0.1:420{1..250}` (slot 1 = port 4201). Firecracker uses `172.20.{slot}.2:4200`. No artificial cap — up to 250 slots (Firecracker IPv4-octet limit; slots are recycled on delete).
 
-**Telegram state is durable** — Active links live in Supabase and survive reboots. Pending claim tokens live in `/iris/data/telegram-link-tokens.json` (expire after 10 min regardless of reboots).
+**Watchdog** — Checks Docker via `docker inspect`, Firecracker via exec-server `/health` every 30 seconds. On crash, delivers a missed-task notification to the affected sub-agent via its bridge `/notify` endpoint (direct if Main Iris IS the agent, or HTTP relay if it is a different sub-agent). On recovery, marks missed scheduled tasks as `skipped`.
+
+**Dedicated-bot credentials are durable** — Bot tokens are stored as Azure Key Vault secrets referenced from `sub_agents.*_token_ref` columns. Pending claim tokens live in Supabase `claim_tokens` (expire after 10 min). Active `telegram_status` / `slack_status` survive reboots; `dedicatedVerified` is re-confirmed at startup via `/internal/integrations/:agentId/status`.
+
+**Multi-thread conversations** — `POST /v2/sub-agents/:id/message` with `newThread:true` generates a random `channelId`, creates a scoped session, and returns both in the response. Pass the returned `channelId` on subsequent calls to continue that thread. Omit `channelId` to use the legacy single-channel fallback.
 
 **Agent creation is blocked at three levels** — (1) `spawn-agent` skill filtered out of AgentRunner for all `BRIDGE-*`, `tg-*`, and `SESSION-*` channels; (2) `spawn-agent` skill directory not accessible inside sub-agent containers; (3) `MEMORY.md` constitution explicitly forbids it. No user message can override any of these.
 
@@ -1403,7 +1441,7 @@ sudo bash /iris/repo/scripts/build-firecracker-rootfs.sh
 
 **This VM is disposable** — GitHub is the source of truth. A full rebuild from this README produces an identical running system. The bootstrap VM is intentionally outside Terraform state to prevent self-destruction.
 
-**Never commit secrets** — `/iris/.env`, `data/models.json` (if it contains API keys), and any credential files are in `.gitignore`. Keep them there.
+**Never commit secrets** — `/iris/.env`, `data/models.json` (if it contains API keys), and any credential files are in `.gitignore`. Keep them there. Sub-agent bot tokens are stored in Key Vault — they never touch the filesystem.
 
 ---
 
