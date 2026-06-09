@@ -576,7 +576,7 @@ if (!IS_SUB_AGENT && (SLACK_ENABLED || process.env.TELEGRAM_BOT_TOKEN) && !LEGAC
 	);
 }
 
-const constructSlackBot = SLACK_ENABLED && (IS_SUB_AGENT || LEGACY_SHARED_BOT_MODE);
+const constructSlackBot = SLACK_ENABLED && (IS_SUB_AGENT || LEGACY_SHARED_BOT_MODE) && !GATEWAY_MODE;
 
 const eventsWatcherBot = constructSlackBot
 	? (() => {
@@ -663,7 +663,13 @@ const eventsWatcherBot = constructSlackBot
 			},
 		} as any;
 		botRef = stubBot;
-		log.logInfo(IS_SUB_AGENT ? "No Slack App configured for this agent" : "Internal-transport mode — Main Iris owns no Slack App");
+		log.logInfo(
+			GATEWAY_MODE
+				? "GATEWAY_MODE active — Slack ingestion via /v2/slack/inbound; not starting local Slack App"
+				: IS_SUB_AGENT
+					? "No Slack App configured for this agent"
+					: "Internal-transport mode — Main Iris owns no Slack App",
+		);
 		return stubBot;
 	})();
 
@@ -686,9 +692,11 @@ const telegramTokens: string[] = IS_SUB_AGENT
 
 const tgBots: TelegramBot[] = [];
 
-if (IS_SUB_AGENT) {
+if (IS_SUB_AGENT && !GATEWAY_MODE) {
 	// Dedicated mode — this agent's own bot, constructed from its BYO token.
-	// Polls its own Telegram bot independently of Main Iris or the Gateway.
+	// Only active when Gateway is not in front; when GATEWAY_MODE=true the
+	// Gateway owns Telegram ingestion via POST /v2/telegram/inbound and starting
+	// our own long-polling here too would double-process every message.
 	for (const token of telegramTokens) {
 		const tgBot = new TelegramBot({ token, workingDir, dedicatedAgent: dedicatedAgentInfo, irisApiUrl: effectiveApiUrl });
 		try {
@@ -703,8 +711,9 @@ if (IS_SUB_AGENT) {
 		if (!SLACK_ENABLED && tgBots.length === 1) botRef = tgBot;
 	}
 } else if (GATEWAY_MODE) {
-	// Gateway owns Telegram ingestion (POST /v2/telegram/inbound) — starting
-	// our own polling here too would double-process every message.
+	// Gateway owns all Telegram ingestion (both Main Iris and sub-agents) via
+	// POST /v2/telegram/inbound. Sub-agent containers in GATEWAY_MODE must also
+	// skip local polling — the IS_SUB_AGENT && !GATEWAY_MODE branch above handles that.
 	log.logInfo("[telegram] GATEWAY_MODE active — ingestion is owned by the Gateway (POST /v2/telegram/inbound); not starting local bot connections");
 } else if (LEGACY_SHARED_BOT_MODE) {
 	// Shared-pool bots kept alive during the Phase 8 migration window.
