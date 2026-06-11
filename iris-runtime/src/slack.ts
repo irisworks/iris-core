@@ -432,7 +432,7 @@ export class SlackBot {
 
 	/** Virtual channels never touch the Slack API — they're internal routing channels. */
 	private isVirtualChannel(channel: string): boolean {
-		return channel.startsWith("WEBUI") || channel.startsWith("BRIDGE-") || channel.startsWith("ESCALATE-") || channel.startsWith("SELFHEAL-");
+		return channel.startsWith("WEBUI") || channel.startsWith("BRIDGE-") || channel.startsWith("ESCALATE-") || channel.startsWith("SELFHEAL-") || channel.startsWith("v2-");
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
@@ -480,6 +480,13 @@ export class SlackBot {
 			const { resolveBridgeRequest } = await import("./bridge.js");
 			const requestId = channel.slice("BRIDGE-".length);
 			resolveBridgeRequest(requestId, text);
+			return;
+		}
+		// v2-* channels are created by the dashboard/API bridge (v2-sub-agents.ts callBridge).
+		// They use channelToPendingRequest mapping (not requestId-in-name like BRIDGE-*).
+		if (channel.startsWith("v2-")) {
+			const { resolveBridgeByChannel } = await import("./bridge.js");
+			resolveBridgeByChannel(channel, text);
 			return;
 		}
 		if (channel.startsWith("SESSION-")) {
@@ -1127,14 +1134,12 @@ export class SlackBot {
 				await this.handleDedicatedUnverified(event);
 				return;
 			}
-			await this.routeToLinkedAgent(event, {
-				agentId:   this.dedicatedAgent.agentId,
-				agentName: this.dedicatedAgent.agentName,
-				bridgeUrl: this.dedicatedAgent.bridgeUrl,
-				slotIndex: 0,
-				skills:    [],
-				runtime:   this.dedicatedAgent.runtime,
-			});
+			// Direct path: bypass callAgentBridge (HTTP → event file → same ChannelQueue).
+			// Using callAgentBridge here deadlocks: it holds ChannelQueue's processing lock
+			// while awaiting the bridge response, but the bridge event can't be dequeued
+			// because the same lock is held. Since the Slack bot and agent run in the same
+			// process, we call handler.handleEvent directly — no HTTP round-trip needed.
+			await this.handler.handleEvent(event, this);
 			return;
 		}
 
