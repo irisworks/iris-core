@@ -18,7 +18,7 @@ const startedAt = Date.now();
 
 export const handleV2Health: V2Handler = async (method, parts, _req, _readBody, deps) => {
   // GET /v2/health
-  if (method === "GET" && parts.length === 0) {
+  if (method === "GET" && (parts.length === 0 || parts[0] === "health")) {
     return ok({
       runtimeId:    RUNTIME_ID,
       vmId:         VM_ID,
