@@ -1270,6 +1270,19 @@ Main Iris has no Slack or Telegram bots. Do not set these for new setups. Sub-ag
 
 Remove `LEGACY_SHARED_BOT_MODE` and all legacy bot tokens once all agents have self-migrated to the dedicated-bot flow.
 
+### BotFactory — automated Telegram bot creation (optional)
+
+Enables the `autoCreate: true` path in `POST /v2/sub-agents/:id/integrations/telegram`.
+When absent, the endpoint still works — users paste their own bot token instead.
+
+| Variable | Required | Description |
+|---|---|---|
+| `TELEGRAM_API_ID` | For auto-create | Integer API ID from https://my.telegram.org/apps |
+| `TELEGRAM_API_HASH` | For auto-create | API hash string from https://my.telegram.org/apps |
+| `TELEGRAM_SESSION` | For auto-create | GramJS StringSession for the service account (generated once via `scripts/gen-tg-session.ts`, stored in Key Vault) |
+
+The service account is a dedicated Telegram user account (one phone number, set up once). BotFactory creates bots under this account and queues all creations serially to respect BotFather rate limits.
+
 ### Sub-agent injected variables (set by iris-runtime — do not set manually)
 
 | Variable | Description |
