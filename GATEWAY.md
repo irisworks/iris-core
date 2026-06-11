@@ -168,15 +168,56 @@ subsequent calls to continue the thread.
 
 ### Integration (Telegram / Slack attach)
 
+**Manual path** — user provides credentials from BotFather/Slack:
 ```
-POST   /v2/sub-agents/:id/integrations/telegram   { telegramBotToken }
-POST   /v2/sub-agents/:id/integrations/slack       { slackAppToken, slackBotToken }
+POST /v2/sub-agents/:id/integrations/telegram
+Body: { "telegramBotToken": "123456:ABC..." }
+
+POST /v2/sub-agents/:id/integrations/slack
+Body: { "slackAppToken": "xapp-...", "slackBotToken": "xoxb-..." }
+```
+
+**Auto-create path** — iris-runtime creates the Telegram bot via BotFather automatically
+(requires `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION` on the runtime VM):
+```
+POST /v2/sub-agents/:id/integrations/telegram
+Body: { "autoCreate": true, "botName": "Research" }
+```
+
+The auto-create path takes ~10–20 seconds (BotFather conversation). Set your
+Gateway timeout to at least 30 seconds for this endpoint.
+
+**Detach:**
+```
 DELETE /v2/sub-agents/:id/integrations/telegram
 DELETE /v2/sub-agents/:id/integrations/slack
 ```
 
-Returns `{ claimToken, expiresInSeconds, status: "pending_verification" }`.
-The Gateway surfaces this token to the user who then sends it to their bot.
+**Response (both paths, Telegram):**
+```json
+{
+  "agentId":          "uuid",
+  "agentName":        "research",
+  "platform":         "telegram",
+  "claimToken":       "64-hex-char token",
+  "expiresInSeconds": 600,
+  "instructions":     "Send this token to your Telegram bot...",
+  "botUsername":      "research_iris_bot",
+  "qrUrl":            "https://t.me/research_iris_bot?start=<claimToken>"
+}
+```
+
+`botUsername` and `qrUrl` are present for Telegram only (absent for Slack).
+Render `qrUrl` as a QR code in the frontend. When the user scans it and taps
+**Start**, Telegram sends `/start <claimToken>` to the bot automatically —
+no manual token paste required. The raw paste path still works as a fallback.
+
+**Auto-create error codes** (in addition to the standard table below):
+
+| Code | `error` field            | Frontend action |
+|------|--------------------------|-----------------|
+| 503  | `"Bot creation failed: BotFactory not configured..."` | Show "Bot creation unavailable — paste your token instead" with fallback to manual path |
+| 502  | `"Bot creation failed: ..."` | Show "Could not create bot — try again or paste your token" |
 
 ### Integration inbound (bot → Gateway → here)
 
@@ -322,10 +363,21 @@ RUNTIME_JWT_SECRET=<min 32 chars, iris-runtime only>
 # Required for one-user-one-VM scoping and routing table writes
 IRIS_VM_ID=<uuid from vm_routing — injected by VM Orchestrator>
 IRIS_RUNTIME_ID=<uuid of this runtime — injected by VM Orchestrator>
+
+# Optional — enables the autoCreate=true Telegram bot creation path (Phase 2)
+# Obtain API_ID and API_HASH from https://my.telegram.org/apps (register once per deployment)
+# TELEGRAM_SESSION is the GramJS StringSession string for the service account — generate
+# once using scripts/gen-tg-session.ts, then store in Key Vault and inject here.
+# If these are absent, autoCreate=true returns 503 and the manual-token path still works.
+TELEGRAM_API_ID=<integer>
+TELEGRAM_API_HASH=<string>
+TELEGRAM_SESSION=<GramJS StringSession string>
 ```
 
-Do not set these until the Gateway and Orchestrator are actually deployed —
+Do not set the Gateway/Orchestrator vars until those services are actually deployed —
 leaving them unset keeps iris-runtime in passthrough mode with no behaviour change.
+BotFactory vars are entirely optional; omitting them disables auto-create but has no
+effect on any other functionality.
 
 ---
 
