@@ -449,6 +449,35 @@ Set `OPENAI_BASE_URL` to the provider's API base URL, then set provider/model/ke
 >
 > If you are migrating from the old shared-pool model and want to keep existing linked workspaces running during migration, set `LEGACY_SHARED_BOT_MODE=1` in `/iris/.env` and add the old `IRIS_SLACK_APP_TOKEN` / `IRIS_SLACK_BOT_TOKEN` values. New setups should skip both variables entirely.
 
+#### Quick reference
+
+```
+  ┌─ Slack App Setup ────────────────────────────────────────────┐
+  │                                                               │
+  │  1. Go to https://api.slack.com/apps → Create New App        │
+  │     → From scratch → name it 'Iris' → pick your workspace    │
+  │                                                               │
+  │  2. Socket Mode (left sidebar)                                │
+  │     → Enable Socket Mode → generate App-Level Token          │
+  │     → name it 'iris-socket' → scope: connections:write       │
+  │     → copy the  xapp-...  token  (App Token)                 │
+  │                                                               │
+  │  3. OAuth & Permissions (left sidebar)                        │
+  │     → Bot Token Scopes → Add:                                 │
+  │         app_mentions:read  channels:history  channels:read    │
+  │         chat:write         groups:history    groups:read      │
+  │         im:history         im:read           im:write         │
+  │         mpim:history       reactions:write   users:read       │
+  │     → Install to Workspace → copy the  xoxb-...  token       │
+  │                                                               │
+  │  4. Event Subscriptions → Enable → subscribe to bot events:   │
+  │         app_mention  message.channels  message.groups        │
+  │         message.im   message.mpim                            │
+  │                                                               │
+  │  5. App Home → enable Messages Tab                           │
+  └───────────────────────────────────────────────────────────────┘
+```
+
 #### 3a — Create a Slack App (for a sub-agent)
 
 Each sub-agent that you want to reach via Slack needs its own dedicated Slack App in the workspace(s) it operates in. Iris uses Socket Mode — no public HTTPS endpoint needed.
