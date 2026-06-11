@@ -225,6 +225,30 @@ export function startBridgeServer(port: number, workingDir: string): void {
 			}
 		}
 
+		// Log user message to the channel's log.jsonl so it appears in chat history
+		// and is available for context sync. Only do this for v2-* (dashboard) and
+		// BRIDGE-* (ephemeral inter-agent) channels — Slack/Telegram channels are
+		// logged by their own bot handlers before the bridge is ever called.
+		if (channelId.startsWith("v2-") || channelId.startsWith("BRIDGE-")) {
+			try {
+				const { resolveChannelDir } = await import("./store.js");
+				const channelDir = resolveChannelDir(workingDir, channelId);
+				if (!existsSync(channelDir)) mkdirSync(channelDir, { recursive: true });
+				const logPath = join(channelDir, "log.jsonl");
+				const entry = JSON.stringify({
+					date: new Date().toISOString(),
+					ts:   Date.now().toString(),
+					user,
+					text,
+					attachments: [],
+					isBot:       false,
+				});
+				appendFileSync(logPath, entry + "\n", "utf-8");
+			} catch (err) {
+				log.logWarning("[bridge] Failed to log user message", err instanceof Error ? err.message : String(err));
+			}
+		}
+
 		// Register pending request BEFORE writing event file to avoid race.
 		// For persistent channels also store channelId → requestId mapping.
 		const responsePromise = new Promise<string>((resolve, reject) => {
