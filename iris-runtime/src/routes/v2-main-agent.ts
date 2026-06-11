@@ -11,7 +11,7 @@
  */
 
 import * as log from "../log.js";
-import { createSession, registerSessionRequest } from "../sessions.js";
+import { registerSessionRequest } from "../sessions.js";
 import { randomBytes } from "crypto";
 import type { V2Handler } from "./v2-types.js";
 import { ok, err } from "./v2-types.js";
@@ -28,19 +28,10 @@ export const handleV2MainAgent: V2Handler = async (method, parts, _req, readBody
     const bot = deps.getBot();
     if (!bot) return err(503, "Main agent not available (bot not started)");
 
-    // Use provided sessionId or auto-generate a transient one
-    let sessionId = body.sessionId;
-    if (!sessionId) {
-      sessionId = randomBytes(8).toString("hex");
-      createSession(deps.workingDir, {
-        originChannel:   `SESSION-${sessionId}`,
-        originThreadTs:  Date.now().toString(),
-        metadata:        { source: "v2-api", userId: deps.jwtContext?.userId },
-      });
-    } else {
-      const existing = deps.sessionManager.get(sessionId);
-      if (!existing) return err(404, `Session ${sessionId} not found`);
-    }
+    // Use provided sessionId or auto-generate a transient one.
+    // No session-store lookup needed — injectSessionMessage reuses the in-memory
+    // channel context for the given sessionId if it already exists.
+    let sessionId = body.sessionId ?? randomBytes(8).toString("hex");
 
     log.logInfo(`[v2/main-agent/message] session=${sessionId}: ${body.text.substring(0, 60)}`);
     try {
