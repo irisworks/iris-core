@@ -51,13 +51,18 @@ export const handleV2Telegram: V2Handler = async (method, parts, _req, readBody,
     // Resolve the linked agent for this bot
     const linkedInfo = await deps.telegramLinkManager.getLinkedAgent(body.botId);
     if (!linkedInfo) {
-      // Unlinked bot — only accept claim tokens
-      const isClaimToken = /^[0-9a-f]{64}$/.test(body.text.trim());
-      if (!isClaimToken)
+      // Unlinked bot — accept claim tokens sent either:
+      //   • as bare 64-hex text (legacy manual paste)
+      //   • as "/start {token}" (QR deep-link — Telegram sends this when user scans QR)
+      const raw = body.text.trim();
+      const claimToken =
+        raw.match(/^\/start ([0-9a-f]{64})$/i)?.[1] ??
+        (raw.match(/^[0-9a-f]{64}$/) ? raw : null);
+      if (!claimToken)
         return err(404, "No agent linked to this bot. Send a claim token to link one.");
 
       try {
-        await deps.telegramLinkManager.validateAndLink(body.botId, body.text.trim());
+        await deps.telegramLinkManager.validateAndLink(body.botId, claimToken);
         return ok({ response: "Bot linked successfully to agent." });
       } catch (e) {
         return err(400, `Token validation failed: ${e instanceof Error ? e.message : String(e)}`);
