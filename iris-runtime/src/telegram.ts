@@ -737,11 +737,16 @@ export class TelegramBot {
 		if (!this.dedicatedAgent || !text) return;
 		const agentName = this.dedicatedAgent.agentName;
 
-		if (!/^[0-9a-f]{64}$/.test(text)) {
+		// Accept bare token OR /start {token} (sent by Telegram when user scans a QR deep-link)
+		const claimToken =
+			text.match(/^\/start ([0-9a-f]{64})$/i)?.[1] ??
+			(/^[0-9a-f]{64}$/.test(text) ? text : null);
+
+		if (!claimToken) {
 			await this.postMessage(
 				channelId,
 				`This bot is registered to <b>${agentName}</b> but not yet verified.\n\n` +
-				`Send the claim token shown on the sub-agent's <b>Connect Telegram</b> dialog to prove you control this bot.`,
+				`Scan the QR code on the sub-agent's <b>Connect Telegram</b> dialog, or send the claim token directly.`,
 			);
 			return;
 		}
@@ -750,7 +755,7 @@ export class TelegramBot {
 			const resp = await fetch(`${this.irisApiUrl}/internal/integrations/telegram/verify`, {
 				method:  "POST",
 				headers: { "Content-Type": "application/json" },
-				body:    JSON.stringify({ agentId: this.dedicatedAgent.agentId, token: text }),
+				body:    JSON.stringify({ agentId: this.dedicatedAgent.agentId, token: claimToken }),
 			});
 			const result = (await resp.json().catch(() => ({}))) as { verified?: boolean };
 			if (result.verified) {
