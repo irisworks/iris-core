@@ -35,9 +35,21 @@ export interface IntegrationStatusSummary {
 }
 
 export interface AttachResult {
-  claimToken: string;
+  claimToken:       string;
   expiresInSeconds: number;
-  instructions: string;
+  instructions:     string;
+  botUsername?:     string;  // Telegram only — @username of the dedicated bot
+  qrUrl?:           string;  // Telegram only — deep link: t.me/{username}?start={token}
+}
+
+async function getBotUsername(token: string): Promise<string | null> {
+  try {
+    const res  = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(8_000) });
+    const body = await res.json() as { ok: boolean; result?: { username?: string } };
+    return body.ok ? (body.result?.username ?? null) : null;
+  } catch {
+    return null;
+  }
 }
 
 export class IntegrationManager {
@@ -59,19 +71,30 @@ export class IntegrationManager {
       throw new Error(`${platform} is already linked to "${agent.name}". Detach it first.`);
     }
 
-    const updated = await attachIntegration(agentId, platform, credentials);
+    // Resolve bot username via getMe before persisting — lets us store it alongside
+    // the ref and build the QR deep-link in a single attach call.
+    let botUsername: string | undefined;
+    if (platform === "telegram" && credentials.telegramBotToken) {
+      botUsername = await getBotUsername(credentials.telegramBotToken) ?? undefined;
+      if (!botUsername) log.logWarning("[integration] attach: getMe returned no username — QR link will be omitted");
+    }
+
+    const updated = await attachIntegration(agentId, platform, { ...credentials, botUsername });
     if (!updated) throw new Error(`Failed to store ${platform} credentials`);
 
     const claimToken = await this.issueClaimToken(agentId, platform);
+
     const dest = platform === "telegram"
       ? "your Telegram bot"
       : "your Slack app (as a direct message to its bot user)";
+    const instructions = `Send this token to ${dest} to prove you control it and finish linking "${agent.name}". Token expires in ${TOKEN_TTL_MS / 60_000} minutes.`;
 
-    return {
-      claimToken,
-      expiresInSeconds: TOKEN_TTL_MS / 1000,
-      instructions: `Send this token to ${dest} to prove you control it and finish linking "${agent.name}". Token expires in ${TOKEN_TTL_MS / 60_000} minutes.`,
-    };
+    if (platform === "telegram" && botUsername) {
+      const qrUrl = `https://t.me/${botUsername}?start=${claimToken}`;
+      return { claimToken, expiresInSeconds: TOKEN_TTL_MS / 1000, instructions, botUsername, qrUrl };
+    }
+
+    return { claimToken, expiresInSeconds: TOKEN_TTL_MS / 1000, instructions };
   }
 
   /**
