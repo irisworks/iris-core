@@ -26,6 +26,8 @@ import { handleV2SubAgents }   from "./v2-sub-agents.js";
 import { handleV2Skills }      from "./v2-skills.js";
 import { handleV2Telegram }    from "./v2-telegram.js";
 import { handleV2Slack }       from "./v2-slack.js";
+import { handleV2Files }       from "./v2-files.js";
+import { handleV2Artifacts }   from "./v2-artifacts.js";
 import type { V2Deps, V2Response } from "./v2-types.js";
 
 function writeResponse(res: ServerResponse, result: V2Response): void {
@@ -97,6 +99,10 @@ export async function handleV2Request(
       result = await handleV2Telegram(method, parts, req, rb, deps);
     } else if (resource === "slack") {
       result = await handleV2Slack(method, parts, req, rb, deps);
+    } else if (resource === "files") {
+      result = await handleV2Files(method, parts, req, rb, deps);
+    } else if (resource === "artifacts") {
+      result = await handleV2Artifacts(method, parts, req, rb, deps);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
