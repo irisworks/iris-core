@@ -100,8 +100,8 @@ async function callBridge(
     signal:  AbortSignal.timeout(120_000),
   });
   if (!resp.ok) throw new Error(`Bridge responded ${resp.status}`);
-  const data = (await resp.json()) as { response?: string };
-  return data.response ?? "";
+  const data = (await resp.json()) as { text?: string; response?: string };
+  return data.text ?? data.response ?? "";
 }
 
 export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody, deps) => {
@@ -305,7 +305,9 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
     return ok({ agentId: agent.agentId, channelId, history });
   }
 
-  // POST /v2/sub-agents/:id/integrations/:platform   { telegramBotToken } | { slackAppToken, slackBotToken }
+  // POST /v2/sub-agents/:id/integrations/:platform
+  //   Manual path:  { telegramBotToken } | { slackAppToken, slackBotToken }
+  //   Auto path:    { autoCreate: true, botName: "Research" }  (Telegram only)
   if (method === "POST" && parts[1] === "integrations" && parts[2]) {
     const platform = parts[2];
     if (platform !== "telegram" && platform !== "slack") return err(404, "Unknown platform");
@@ -313,9 +315,37 @@ export const handleV2SubAgents: V2Handler = async (method, parts, _req, readBody
     const agent = await getSubAgent(id);
     if (!agent) return err(404, "Agent not found");
 
-    let body: { telegramBotToken?: string; slackAppToken?: string; slackBotToken?: string };
+    let body: {
+      telegramBotToken?: string;
+      slackAppToken?: string;
+      slackBotToken?: string;
+      autoCreate?: boolean;
+      botName?: string;
+    };
     try { body = JSON.parse(await readBody()); } catch {
       return err(400, "invalid JSON body");
+    }
+
+    // Auto-create path: BotFactory creates the bot with BotFather, then
+    // the rest of the attach flow is identical to the manual path.
+    if (platform === "telegram" && body.autoCreate) {
+      if (!body.botName?.trim()) return err(400, "botName is required when autoCreate is true");
+      try {
+        const { createTelegramBot, BotFactoryUnavailableError } = await import("../bot-factory.js");
+        const created = await createTelegramBot(body.botName.trim());
+        body.telegramBotToken = created.botToken;
+        log.logInfo(`[v2/sub-agents/${agent.agentId}/integrations/telegram] BotFactory created @${created.botUsername}`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const isUnavailable = e instanceof Error && e.name === "BotFactoryUnavailableError";
+        const isRateLimited = /rate-limited|try again in|flood.*wait/i.test(msg);
+        return err(
+          isUnavailable ? 503 : isRateLimited ? 429 : 502,
+          isRateLimited
+            ? `Auto-create temporarily unavailable: ${msg}. Use "Paste bot token" to connect a bot created manually via @BotFather.`
+            : `Bot creation failed: ${msg}`,
+        );
+      }
     }
 
     try {
