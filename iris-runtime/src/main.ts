@@ -436,6 +436,13 @@ const handler: IrisHandler = {
 			const result = await state.runner.run(ctx as any, state.store);
 			await ctx.setWorking(false);
 
+			// Sync generated artifacts + agent state (MEMORY.md, scratch, events) to blob.
+			// syncAgentState is the write-half of the blob-restore loop in agent-provision.ts.
+			void import("./artifact-sync.js").then(({ syncChannelArtifacts, syncAgentState }) => {
+				void syncChannelArtifacts(workingDir, event.channel);
+				if (AGENT_ID) void syncAgentState(workingDir, AGENT_ID);
+			});
+
 			// Resolve pending session API request (POST /sessions/:id/message bridge pattern)
 			if (event.channel.startsWith("SESSION-")) {
 				const sessionId = event.channel.slice("SESSION-".length);
@@ -761,6 +768,7 @@ void startScheduler(schedulerCallbacks);
 
 // Start watchdog: polls Docker every 30s, detects crashes and recoveries.
 void startWatchdog({
+	workingDir,
 	onAgentCrashed: (agentId) => {
 		for (const bot of tgBotsForApi) {
 			bot.notifyLinkedAgentCrashed(agentId);
