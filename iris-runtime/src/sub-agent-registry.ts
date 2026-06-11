@@ -24,11 +24,12 @@ export interface SubAgentRecord {
 	updatedAt: string;
 
 	// Dedicated bot/app — Key Vault refs, never raw tokens (see keyvault.ts).
-	telegramBotTokenRef: string | null;
-	slackAppTokenRef: string | null;
-	slackBotTokenRef: string | null;
-	telegramStatus: IntegrationStatus;
-	slackStatus: IntegrationStatus;
+	telegramBotTokenRef:  string | null;
+	slackAppTokenRef:     string | null;
+	slackBotTokenRef:     string | null;
+	telegramStatus:       IntegrationStatus;
+	telegramBotUsername:  string | null;   // set after attach via getMe; used to build QR deep-link
+	slackStatus:          IntegrationStatus;
 }
 
 // slot_index doubles as the network-addressing key (Docker bridge port =
@@ -53,11 +54,12 @@ function rowToRecord(row: Record<string, unknown>): SubAgentRecord {
 		slotIndex:           row.slot_index as number,
 		createdAt:           row.created_at as string,
 		updatedAt:           row.updated_at as string,
-		telegramBotTokenRef: (row.telegram_bot_token_ref as string | null) ?? null,
-		slackAppTokenRef:    (row.slack_app_token_ref as string | null) ?? null,
-		slackBotTokenRef:    (row.slack_bot_token_ref as string | null) ?? null,
-		telegramStatus:      (row.telegram_status as IntegrationStatus | null) ?? "unattached",
-		slackStatus:         (row.slack_status as IntegrationStatus | null) ?? "unattached",
+		telegramBotTokenRef:  (row.telegram_bot_token_ref  as string | null) ?? null,
+		slackAppTokenRef:     (row.slack_app_token_ref     as string | null) ?? null,
+		slackBotTokenRef:     (row.slack_bot_token_ref     as string | null) ?? null,
+		telegramStatus:       (row.telegram_status         as IntegrationStatus | null) ?? "unattached",
+		telegramBotUsername:  (row.telegram_bot_username   as string | null) ?? null,
+		slackStatus:          (row.slack_status            as IntegrationStatus | null) ?? "unattached",
 	};
 }
 
@@ -351,7 +353,7 @@ export async function deleteSubAgent(agentId: string): Promise<boolean> {
 export async function attachIntegration(
 	agentId: string,
 	platform: IntegrationKind,
-	credentials: { telegramBotToken?: string; slackAppToken?: string; slackBotToken?: string },
+	credentials: { telegramBotToken?: string; slackAppToken?: string; slackBotToken?: string; botUsername?: string },
 ): Promise<SubAgentRecord | null> {
 	const db = getDb();
 	if (!db) return noDb("attachIntegration");
@@ -369,7 +371,8 @@ export async function attachIntegration(
 			const ref = await setSecret(`sub-agent-${agentId}-telegram-bot-token`, credentials.telegramBotToken);
 			if (!ref) throw new Error("failed to store secret in Key Vault");
 			patch.telegram_bot_token_ref = ref;
-			patch.telegram_status = "pending_verification";
+			patch.telegram_status        = "pending_verification";
+			patch.telegram_bot_username  = credentials.botUsername ?? null;
 		} else {
 			if (!credentials.slackAppToken || !credentials.slackBotToken) {
 				throw new Error("slackAppToken and slackBotToken are both required");
@@ -421,7 +424,8 @@ export async function detachIntegration(agentId: string, platform: IntegrationKi
 		if (platform === "telegram") {
 			await deleteSecretIfPresent(record.telegramBotTokenRef);
 			patch.telegram_bot_token_ref = null;
-			patch.telegram_status = "unattached";
+			patch.telegram_bot_username  = null;
+			patch.telegram_status        = "unattached";
 		} else {
 			await deleteSecretIfPresent(record.slackAppTokenRef);
 			await deleteSecretIfPresent(record.slackBotTokenRef);
