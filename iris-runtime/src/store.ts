@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync } from "fs";
 import { appendFile, writeFile } from "fs/promises";
 import { join } from "path";
 import * as log from "./log.js";
+import { blobWrite, BLOB_ENABLED } from "./blob.js";
 
 export interface Attachment {
 	original: string; // original filename from uploader
@@ -173,6 +174,19 @@ export class ChannelStore {
 
 		const line = `${JSON.stringify(message)}\n`;
 		await appendFile(logPath, line, "utf-8");
+
+		// Write-through to blob so thread history survives VM rebuild / disk loss.
+		// AGENT_ID is always set in Docker sub-agent containers; skip on main Iris.
+		if (BLOB_ENABLED) {
+			const agentId = process.env.AGENT_ID;
+			if (agentId) {
+				try {
+					const fullLog = readFileSync(logPath, "utf-8");
+					void blobWrite(`agents/${agentId}/threads/${channelId}/log.jsonl`, fullLog);
+				} catch { /* non-fatal */ }
+			}
+		}
+
 		return true;
 	}
 
