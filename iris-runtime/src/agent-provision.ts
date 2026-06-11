@@ -4,6 +4,7 @@ import { join } from "path";
 import { promisify } from "util";
 import * as log from "./log.js";
 import type { AgentRuntime } from "./sub-agent-registry.js";
+import { blobRead, blobList, BLOB_ENABLED } from "./blob.js";
 
 const execAsync = promisify(exec);
 
@@ -210,10 +211,37 @@ export interface ProvisionParams {
 }
 
 // ============================================================================
+// Blob state restore — fills in scratch + events from blob on VM rebuild.
+// Only writes files that are missing locally so a live reprovision (e.g.
+// credentials update) never overwrites fresher on-disk state.
+// ============================================================================
+
+async function restoreStateFromBlob(agentId: string, workspaceDir: string): Promise<void> {
+	if (!BLOB_ENABLED) return;
+	for (const subdir of ["scratch", "events"] as const) {
+		const localDir = join(workspaceDir, subdir);
+		mkdirSync(localDir, { recursive: true });
+		const blobs = await blobList(`agents/${agentId}/state/${subdir}/`);
+		for (const blobPath of blobs) {
+			const filename = blobPath.split("/").pop();
+			if (!filename) continue;
+			const localPath = join(localDir, filename);
+			if (!existsSync(localPath)) {
+				const content = await blobRead(blobPath);
+				if (content !== null) {
+					writeFileSync(localPath, content, "utf-8");
+					log.logInfo(`[agent-provision] Restored ${subdir}/${filename} from blob for ${agentId}`);
+				}
+			}
+		}
+	}
+}
+
+// ============================================================================
 // Docker provisioner
 // ============================================================================
 
-async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
+export async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 	const irisDir    = params.irisDir    ?? process.env.IRIS_DIR    ?? "/iris";
 	const irisHome   = params.irisHome   ?? process.env.IRIS_HOME   ?? "/home/azureuser";
 	const irisApiUrl = params.irisApiUrl ?? process.env.IRIS_API_URL ?? "http://172.18.0.1:3000";
@@ -228,10 +256,17 @@ async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 	mkdirSync(workspaceDir, { recursive: true });
 	log.logInfo(`[agent-provision] Docker workspace: ${workspaceDir}`);
 
-	writeFileSync(
-		join(workspaceDir, "MEMORY.md"),
-		buildMemoryContent(params.agentName, params.skills, "docker"),
-	);
+	// Preserve existing MEMORY.md — agent may have accumulated context.
+	// Only write if missing; try blob restore before falling back to the template.
+	const memoryPath = join(workspaceDir, "MEMORY.md");
+	if (!existsSync(memoryPath)) {
+		const blobContent = await blobRead(`agents/${params.agentId}/memory/MEMORY.md`);
+		writeFileSync(memoryPath, blobContent ?? buildMemoryContent(params.agentName, params.skills, "docker"));
+	}
+
+	// Restore scratch + events from blob — only fills missing files so a live
+	// reprovision (e.g. after credentials update) never clobbers fresh state.
+	await restoreStateFromBlob(params.agentId, workspaceDir);
 
 	// Populate per-agent skills dir with only assigned skills (not the full global set)
 	const globalSkillsDir = `${irisDir}/data/skills`;
@@ -242,6 +277,14 @@ async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 
 	const { provider, model, keyEnvVar, apiKey } = resolveLlmKey(irisDir);
 	const llmKeyEnv = apiKey ? `-e ${keyEnvVar}=${apiKey}` : "";
+
+	// Blob storage — passed as account+key (shell-safe, no semicolons) so the
+	// container's blob.ts can persist artifacts and thread history to Azure.
+	const storageAccount = process.env.AZURE_STORAGE_ACCOUNT ?? "";
+	const storageKey     = process.env.AZURE_STORAGE_KEY     ?? "";
+	const blobEnvs = (storageAccount && storageKey)
+		? [`-e BLOB_ENABLED=true`, `-e AZURE_STORAGE_ACCOUNT=${storageAccount}`, `-e AZURE_STORAGE_KEY=${storageKey}`]
+		: [];
 
 	// Dedicated bot credentials — only injected if this agent has its own.
 	// Same env var names main.ts's shared-bot code already read, by design:
@@ -270,6 +313,7 @@ async function provisionDockerAgent(params: ProvisionParams): Promise<string> {
 		`-e AGENT_ID=${params.agentId}`,
 		`-e IRIS_API_URL=${irisApiUrl}`,
 		`-e IRIS_BRIDGE_PORT=${bridgePort}`,
+		...blobEnvs,
 		`-v "${workspaceDir}:/workspace"`,
 		`-v "${logVolume}:/var/log/agent"`,
 		`-v "${irisDir}/data/models.json:/workspace/models.json:ro"`,
@@ -348,10 +392,15 @@ async function provisionFirecrackerAgent(params: ProvisionParams): Promise<strin
 	// Set up workspace directories inside the VM
 	await execInVm(execUrl, "mkdir -p /workspace/scratch /workspace/events /workspace/skills");
 
-	// Write MEMORY.md — base64-encode to avoid shell quoting issues
-	const memoryContent = buildMemoryContent(params.agentName, params.skills, "firecracker");
-	const memoryB64     = Buffer.from(memoryContent, "utf-8").toString("base64");
-	await execInVm(execUrl, `printf '%s' '${memoryB64}' | base64 -d > /workspace/MEMORY.md`);
+	// Write MEMORY.md only if missing — preserve agent's accumulated context.
+	// base64-encode to avoid shell quoting issues in the VM exec path.
+	const { stdout: memoryCheck } = await execAsync(`docker exec ${vmName} test -f /workspace/MEMORY.md && echo exists || echo missing`).catch(() => ({ stdout: "missing" }));
+	if (!memoryCheck.trim().includes("exists")) {
+		const blobContent = await blobRead(`agents/${params.agentId}/memory/MEMORY.md`);
+		const memoryContent = blobContent ?? buildMemoryContent(params.agentName, params.skills, "firecracker");
+		const memoryB64 = Buffer.from(memoryContent, "utf-8").toString("base64");
+		await execInVm(execUrl, `printf '%s' '${memoryB64}' | base64 -d > /workspace/MEMORY.md`);
+	}
 
 	// Copy only assigned skills into the VM (not the full global set)
 	const globalSkillsDir = `${irisDir}/data/skills`;
@@ -464,8 +513,20 @@ export function registerAgentBridge(
 		}
 	} catch { /* start fresh */ }
 
+	const newBridgeUrl = bridgeUrlForAgent(slotIndex, runtime);
+
+	// Remove any stale entries that share the same slot (same bridge_url) but
+	// belong to a different agent. Prevents ghost entries when an agent is
+	// deleted and a new one is created on the same slot.
+	for (const [name, entry] of Object.entries(registry)) {
+		if (name !== agentName && entry.bridge_url === newBridgeUrl) {
+			delete registry[name];
+			log.logInfo(`[agent-provision] Evicted stale slot entry "${name}" (was pointing to ${newBridgeUrl})`);
+		}
+	}
+
 	registry[agentName] = {
-		bridge_url:  bridgeUrlForAgent(slotIndex, runtime),
+		bridge_url:  newBridgeUrl,
 		description: `Sub-agent: ${agentName} (${runtime})`,
 		agentId,
 	};
@@ -481,4 +542,28 @@ export function unregisterAgentBridge(workingDir: string, agentName: string): vo
 		delete registry[agentName];
 		writeFileSync(agentsFile, JSON.stringify(registry, null, 2));
 	} catch { /* ignore */ }
+}
+
+/**
+ * Reconcile agents.json against the live set of agent IDs from Supabase.
+ * Removes any entries whose agentId is not in liveAgentIds. Called on startup
+ * so ghost entries from deleted agents don't persist across restarts.
+ */
+export function reconcileAgentRegistry(workingDir: string, liveAgentIds: Set<string>): void {
+	const agentsFile = join(workingDir, "agents.json");
+	try {
+		if (!existsSync(agentsFile)) return;
+		const registry = JSON.parse(readFileSync(agentsFile, "utf-8")) as Record<string, AgentBridgeEntry>;
+		let changed = false;
+		for (const [name, entry] of Object.entries(registry)) {
+			if (!liveAgentIds.has(entry.agentId)) {
+				delete registry[name];
+				log.logInfo(`[agent-provision] Removed stale agents.json entry "${name}" (agentId ${entry.agentId} no longer exists)`);
+				changed = true;
+			}
+		}
+		if (changed) writeFileSync(agentsFile, JSON.stringify(registry, null, 2));
+	} catch (err) {
+		log.logWarning("[agent-provision] reconcileAgentRegistry failed", String(err));
+	}
 }
