@@ -11,6 +11,7 @@
  *   agents/{agentId}/threads/{channelId}/log.jsonl
  *   agents/{agentId}/threads/{channelId}/context.jsonl
  *   agents/{agentId}/skills/{skillName}.md
+ *   agents/{agentId}/artifacts/{channelRelPath}/{filename}   ← generated files
  *   agents/{agentId}/logs/{date}.log
  *   agents/{agentId}/snapshots/{timestamp}.tar.gz
  *   sessions/{sessionId}.json
@@ -18,7 +19,7 @@
  *   memory/channels/{channelId}/MEMORY.md
  */
 
-import { BlobServiceClient } from "@azure/storage-blob";
+import { BlobServiceClient, StorageSharedKeyCredential } from "@azure/storage-blob";
 import * as log from "./log.js";
 
 export const BLOB_ENABLED   = process.env.BLOB_ENABLED === "true";
@@ -28,13 +29,23 @@ export const BLOB_CONTAINER  = process.env.BLOB_CONTAINER ?? "iris-runtime";
 let _client: BlobServiceClient | null = null;
 
 function getClient(): BlobServiceClient | null {
-  if (!BLOB_ENABLED || !CONNECTION_STRING) return null;
-  if (!_client) {
-    try {
+  if (!BLOB_ENABLED) return null;
+  if (_client) return _client;
+  try {
+    if (CONNECTION_STRING) {
       _client = BlobServiceClient.fromConnectionString(CONNECTION_STRING);
-    } catch (err) {
-      log.logWarning("[blob] Failed to initialise BlobServiceClient", String(err));
+    } else {
+      // Fallback: account name + key (safe to pass as individual env vars in containers)
+      const account = process.env.AZURE_STORAGE_ACCOUNT;
+      const key     = process.env.AZURE_STORAGE_KEY;
+      if (!account || !key) return null;
+      _client = new BlobServiceClient(
+        `https://${account}.blob.core.windows.net`,
+        new StorageSharedKeyCredential(account, key),
+      );
     }
+  } catch (err) {
+    log.logWarning("[blob] Failed to initialise BlobServiceClient", String(err));
   }
   return _client;
 }
@@ -51,6 +62,36 @@ export async function blobWrite(blobPath: string, content: string): Promise<void
     });
   } catch (err) {
     log.logWarning(`[blob] write failed: ${blobPath}`, String(err));
+  }
+}
+
+export async function blobWriteBuffer(blobPath: string, buf: Buffer, contentType = "application/octet-stream"): Promise<void> {
+  const client = getClient();
+  if (!client) return;
+  try {
+    const cc = client.getContainerClient(BLOB_CONTAINER);
+    await cc.createIfNotExists();
+    await cc.getBlockBlobClient(blobPath).upload(buf, buf.byteLength, {
+      blobHTTPHeaders: { blobContentType: contentType },
+    });
+  } catch (err) {
+    log.logWarning(`[blob] write failed: ${blobPath}`, String(err));
+  }
+}
+
+export async function blobReadBuffer(blobPath: string): Promise<Buffer | null> {
+  const client = getClient();
+  if (!client) return null;
+  try {
+    const download = await client
+      .getContainerClient(BLOB_CONTAINER)
+      .getBlockBlobClient(blobPath)
+      .downloadToBuffer();
+    return download;
+  } catch (err: unknown) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    log.logWarning(`[blob] read-buffer failed: ${blobPath}`, String(err));
+    return null;
   }
 }
 
