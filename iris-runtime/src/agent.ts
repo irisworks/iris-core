@@ -201,6 +201,19 @@ function buildSystemPrompt(
 
 	const identityLine = `You are Iris, the orchestrator that manages the runtime, skills, and specialized sub-agents. Be concise. No emojis.`;
 
+	// Detect whether this is a direct web-dashboard session or a messaging-platform channel.
+	const isWebSession = channelId.startsWith("SESSION-");
+	const interfaceSection = isWebSession
+		? `## Interface
+You are speaking directly with the user via the Iris web dashboard (not Slack, not Telegram).
+- The user interacts through a browser chat UI.
+- File paths you mention in your response are rendered as clickable links — the user can click them to view the file contents in a split-screen code viewer.
+- Always write code to files in \`${channelPath}/scratch/\` and reference the absolute path in your response. Do NOT dump raw code inline as a substitute for writing files.`
+		: `## Interface
+You are speaking with the user via a messaging platform (Slack or Telegram).
+- Users cannot access the VM filesystem directly from their messaging app.
+- For any code or content you produce, post it inline in the message so the user can read and copy it.`;
+
 	return `${identityLine}${constitutionSection}
 
 ## Context
@@ -208,10 +221,10 @@ function buildSystemPrompt(
 - You have access to previous conversation context including tool results from prior turns.
 - For older history beyond your context, search log.jsonl (contains user messages and your final responses, but not tool results).
 
+${interfaceSection}
+
 ## Response Formatting
-Write in plain, clear text. Avoid platform-specific markup (Slack mrkdwn, Markdown, HTML)
-— your response is relayed through sub-agent bridges, web sessions, and escalation flows
-that display it as raw text rather than rendering it.
+Write in plain, clear text. Avoid platform-specific markup (Slack mrkdwn, Markdown, HTML).
 
 ## Workspace Directory
 Channels: ${channelMappings}
