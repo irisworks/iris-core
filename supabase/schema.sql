@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS sub_agents (
     slack_app_token_ref     TEXT,
     slack_bot_token_ref     TEXT,
     telegram_status         TEXT        CHECK (telegram_status IN ('unattached', 'pending_verification', 'linked')),
+    telegram_bot_username   TEXT,
     slack_status            TEXT        CHECK (slack_status    IN ('unattached', 'pending_verification', 'linked')),
 
     UNIQUE (name),
@@ -236,11 +237,12 @@ ALTER TABLE sessions DISABLE ROW LEVEL SECURITY;
 -- fresh database that already has these columns from the CREATE TABLE above.
 
 ALTER TABLE sub_agents
-    ADD COLUMN IF NOT EXISTS telegram_bot_token_ref TEXT,
-    ADD COLUMN IF NOT EXISTS slack_app_token_ref    TEXT,
-    ADD COLUMN IF NOT EXISTS slack_bot_token_ref    TEXT,
-    ADD COLUMN IF NOT EXISTS telegram_status        TEXT,
-    ADD COLUMN IF NOT EXISTS slack_status           TEXT;
+    ADD COLUMN IF NOT EXISTS telegram_bot_token_ref  TEXT,
+    ADD COLUMN IF NOT EXISTS slack_app_token_ref     TEXT,
+    ADD COLUMN IF NOT EXISTS slack_bot_token_ref     TEXT,
+    ADD COLUMN IF NOT EXISTS telegram_status         TEXT,
+    ADD COLUMN IF NOT EXISTS telegram_bot_username   TEXT,
+    ADD COLUMN IF NOT EXISTS slack_status            TEXT;
 
 DO $$ BEGIN
     ALTER TABLE sub_agents ADD CONSTRAINT sub_agents_telegram_status_check
