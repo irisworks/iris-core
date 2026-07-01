@@ -94,11 +94,11 @@ function loadConstitution(workspaceDir: string): string {
 	}
 }
 
-function getMemory(channelDir: string): string {
+function getMemory(channelDir: string, workingDir: string): string {
 	const parts: string[] = [];
 
 	// Read workspace-level memory (shared across all channels)
-	const workspaceMemoryPath = join(channelDir, "..", "MEMORY.md");
+	const workspaceMemoryPath = join(workingDir, "MEMORY.md");
 	if (existsSync(workspaceMemoryPath)) {
 		try {
 			const content = readFileSync(workspaceMemoryPath, "utf-8").trim();
@@ -130,13 +130,13 @@ function getMemory(channelDir: string): string {
 	return parts.join("\n\n");
 }
 
-function loadIrisSkills(channelDir: string, workspacePath: string): Skill[] {
+function loadIrisSkills(channelDir: string, workspacePath: string, workingDir: string): Skill[] {
 	const skillMap = new Map<string, Skill>();
 
-	// channelDir is the host path (e.g., /Users/.../data/C0A34FL8PMH)
-	// hostWorkspacePath is the parent directory on host
+	// channelDir is the host path (e.g., /Users/.../data/telegram/tg-XXX)
+	// hostWorkspacePath is the workspace root on host
 	// workspacePath is the container path (e.g., /workspace)
-	const hostWorkspacePath = join(channelDir, "..");
+	const hostWorkspacePath = workingDir;
 
 	// Helper to translate host paths to container paths
 	const translatePath = (hostPath: string): string => {
@@ -444,11 +444,12 @@ export function getOrCreateRunner(
 	channelDir: string,
 	provider: string,
 	modelId: string,
+	workingDir: string,
 ): AgentRunner {
 	const existing = channelRunners.get(channelId);
 	if (existing) return existing;
 
-	const runner = createRunner(sandboxConfig, channelId, channelDir, provider, modelId);
+	const runner = createRunner(sandboxConfig, channelId, channelDir, provider, modelId, workingDir);
 	channelRunners.set(channelId, runner);
 	return runner;
 }
@@ -463,9 +464,10 @@ function createRunner(
 	channelDir: string,
 	provider: string,
 	modelId: string,
+	workingDir: string,
 ): AgentRunner {
 	const executor = createExecutor(sandboxConfig, channelId);
-	const workspaceDir = channelDir.replace(`/${channelId}`, "");
+	const workspaceDir = workingDir;
 	const workspacePath = executor.getWorkspacePath(workspaceDir);
 
 	// Create tools
@@ -514,9 +516,9 @@ function createRunner(
 	};
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
-	const memory = getMemory(channelDir);
+	const memory = getMemory(channelDir, workingDir);
 	const constitution = loadConstitution(workspaceDir);
-	const skills = loadIrisSkills(channelDir, workspacePath);
+	const skills = loadIrisSkills(channelDir, workspacePath, workingDir);
 	const agents = loadAgentRegistry(workspaceDir);
 	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, constitution, sandboxConfig, [], [], skills, agents);
 
@@ -524,7 +526,7 @@ function createRunner(
 	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
 	const contextFile = join(channelDir, "context.jsonl");
 	const sessionManager = SessionManager.open(contextFile, channelDir);
-	const settingsManager = createIrisSettingsManager(join(channelDir, ".."));
+	const settingsManager = createIrisSettingsManager(workingDir);
 
 	// Create agent
 	const agent = new Agent({
@@ -779,9 +781,9 @@ function createRunner(
 			}
 
 			// Update system prompt with fresh memory, constitution, channel/user info, and skills
-			const memory = getMemory(channelDir);
+			const memory = getMemory(channelDir, workingDir);
 			const constitution = loadConstitution(workspaceDir);
-			let skills = loadIrisSkills(channelDir, workspacePath);
+			let skills = loadIrisSkills(channelDir, workspacePath, workingDir);
 			// SESSION- channels are non-admin (thread mode) — no agent spawning allowed
 			if (channelId.startsWith("SESSION-")) {
 				skills = skills.filter((s) => s.name !== "spawn-agent");
@@ -802,7 +804,7 @@ function createRunner(
 
 			// Set up file upload function
 			setUploadFunction(async (filePath: string, title?: string) => {
-				const hostPath = translateToHostPath(filePath, channelDir, workspacePath, channelId);
+				const hostPath = translateToHostPath(filePath, channelDir, workspacePath, channelId, workingDir);
 				await ctx.uploadFile(hostPath, title);
 			});
 
@@ -1047,6 +1049,7 @@ function translateToHostPath(
 	channelDir: string,
 	workspacePath: string,
 	channelId: string,
+	workingDir: string,
 ): string {
 	if (workspacePath === "/workspace") {
 		const prefix = `/workspace/${channelId}/`;
@@ -1054,7 +1057,7 @@ function translateToHostPath(
 			return join(channelDir, containerPath.slice(prefix.length));
 		}
 		if (containerPath.startsWith("/workspace/")) {
-			return join(channelDir, "..", containerPath.slice("/workspace/".length));
+			return join(workingDir, containerPath.slice("/workspace/".length));
 		}
 	}
 	return containerPath;
