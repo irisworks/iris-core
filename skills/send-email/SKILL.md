@@ -112,7 +112,7 @@ fi
 ```bash
 # Escalate a failure to the human operator
 send-email \
-  --to rohit@example.com \
+  --to operator@example.com \
   --subject "Iris: sub-agent cricket is unresponsive" \
   --body "Cricket agent failed to respond after 3 retries. Manual intervention required."
 

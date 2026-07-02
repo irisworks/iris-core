@@ -48,7 +48,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/iris-core/iris-core.git",
+		"url": "git+https://github.com/irisworks/iris-core.git",
 		"directory": "iris-runtime"
 	},
 	"engines": {

@@ -33,7 +33,7 @@ set -euo pipefail
 
 IRIS_DIR="/iris"
 REPO_URL="${REPO_URL:-}"
-IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/irisflow.git}"
+IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}"
 KV_NAME="${KV_NAME:-}"
 KV_RESOURCE_GROUP="${KV_RESOURCE_GROUP:-}"
 REPO_DIR="${REPO_DIR:-}"
