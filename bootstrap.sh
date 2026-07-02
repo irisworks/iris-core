@@ -32,6 +32,10 @@
 set -euo pipefail
 
 IRIS_DIR="/iris"
+# The real operating user, even when this script is invoked via `sudo bash bootstrap.sh`
+# (plain $USER gets reset to "root" by sudo in that case, which would leave iris.service
+# and /iris file ownership pointed at root instead of the actual VM user).
+TARGET_USER="${SUDO_USER:-$(id -un)}"
 REPO_URL="${REPO_URL:-}"
 IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/irisflow.git}"
 KV_NAME="${KV_NAME:-}"
@@ -70,10 +74,29 @@ prompt() {
   echo "${answer:-$default}"
 }
 prompt_secret() {
-  local question="$1"
-  read -r -s -p "[iris-bootstrap] $question: " answer
+  local question="$1" default="${2:-}"
+  local hint=""; [[ -n "$default" ]] && hint=" [Enter to keep existing key on file]"
+  read -r -s -p "[iris-bootstrap] $question$hint: " answer
   echo "" >&2
-  echo "$answer"
+  echo "${answer:-$default}"
+}
+
+# Accepts a bare Foundry account name OR a full endpoint URL/hostname pasted by
+# mistake (e.g. "my-account.cognitiveservices.azure.com" or
+# "https://my-account.cognitiveservices.azure.com/openai/v1") and normalizes it
+# down to just the account name. Without this, feeding a full hostname into the
+# "<your-account>.cognitiveservices.azure.com" template produces a doubled,
+# unresolvable host like "my-account.cognitiveservices.cognitiveservices.azure.com" —
+# every LLM call then fails DNS resolution with a generic "Connection error."
+sanitize_foundry_account() {
+  local account="$1"
+  account="${account#https://}"
+  account="${account#http://}"
+  account="${account%%/*}"                       # strip any path/query
+  account="${account%.cognitiveservices.azure.com}"
+  account="${account%.azure.com}"
+  account="${account%.cognitiveservices}"
+  echo "$account"
 }
 
 # ────────────────────────────────────────────────────────────
@@ -127,7 +150,7 @@ sudo apt-get update -qq
 if ! command -v docker &>/dev/null; then
   log "Installing Docker..."
   curl -fsSL https://get.docker.com | sudo bash
-  sudo usermod -aG docker "$USER"
+  sudo usermod -aG docker "$TARGET_USER"
 fi
 
 # Azure CLI only needed when using Key Vault
@@ -220,7 +243,7 @@ if [[ "$FIRECRACKER_MODE" == true ]]; then
     fi
 
     # KVM group membership for current user
-    sudo usermod -aG kvm "$USER" 2>/dev/null || true
+    sudo usermod -aG kvm "$TARGET_USER" 2>/dev/null || true
 
     # Kernel image
     VMLINUX="/var/lib/iris/firecracker/vmlinux"
@@ -349,7 +372,7 @@ prompt_secrets() {
     case "$IRIS_PROVIDER" in
       anthropic)      default_model="claude-sonnet-4-5" ;;
       openai)         default_model="gpt-4o" ;;
-      foundry-e2)     default_model="gpt-4o" ;;
+      foundry-e2)     default_model="Kimi-K2.6" ;;
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       *)              default_model="gpt-4o" ;;
     esac
@@ -375,10 +398,28 @@ prompt_secrets() {
       [[ -z "$LLM_API_KEY" ]] && die "OpenAI API key is required."
       ;;
     foundry-e2)
-      LLM_API_KEY=$(prompt_secret "Azure AI Foundry API key")
+      # Reuse credentials already on file instead of forcing re-entry on every re-run.
+      EXISTING_FOUNDRY_KEY=""
+      EXISTING_FOUNDRY_ACCOUNT=""
+      if [[ -f "$IRIS_DIR/.env" ]]; then
+        EXISTING_FOUNDRY_KEY=$(grep -E '^FOUNDRY_E2_KEY=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+      fi
+      if [[ -z "$EXISTING_FOUNDRY_KEY" && "$NO_KEYVAULT" == false && -n "$KV_NAME" ]]; then
+        EXISTING_FOUNDRY_KEY=$(az keyvault secret show --vault-name "$KV_NAME" --name "FOUNDRY-E2-KEY" --query value -o tsv 2>/dev/null || true)
+      fi
+      if [[ -f "$IRIS_DIR/data/models.json" ]]; then
+        EXISTING_FOUNDRY_ACCOUNT=$(grep -oE 'https://[a-zA-Z0-9-]+\.cognitiveservices' "$IRIS_DIR/data/models.json" 2>/dev/null \
+          | head -1 | sed -E 's#https://##; s#\.cognitiveservices##')
+      fi
+      [[ -n "$EXISTING_FOUNDRY_KEY" ]] && log "Found an existing Foundry API key on this machine — reusing it."
+      LLM_API_KEY=$(prompt_secret "Azure AI Foundry API key" "$EXISTING_FOUNDRY_KEY")
       [[ -z "$LLM_API_KEY" ]] && die "Foundry API key is required."
-      FOUNDRY_ACCOUNT=$(prompt "Azure AI Foundry account name (e.g. my-account-eastus2)" "")
+      FOUNDRY_ACCOUNT=$(prompt "Azure AI Foundry account name — bare name only, not the full URL (e.g. my-account-eastus2)" "$EXISTING_FOUNDRY_ACCOUNT")
       [[ -z "$FOUNDRY_ACCOUNT" ]] && die "Foundry account name is required."
+      FOUNDRY_ACCOUNT_RAW="$FOUNDRY_ACCOUNT"
+      FOUNDRY_ACCOUNT=$(sanitize_foundry_account "$FOUNDRY_ACCOUNT")
+      [[ "$FOUNDRY_ACCOUNT" != "$FOUNDRY_ACCOUNT_RAW" ]] && \
+        log "Note: trimmed '$FOUNDRY_ACCOUNT_RAW' down to account name '$FOUNDRY_ACCOUNT' (looked like a full hostname/URL, not a bare account name)."
       ;;
     amazon-bedrock)
       echo ""
@@ -609,7 +650,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   else
     # Restore mode — defaults only
     [[ -z "$IRIS_PROVIDER" ]] && IRIS_PROVIDER="foundry-e2"
-    [[ -z "$IRIS_MODEL" ]]    && IRIS_MODEL="gpt-4o"
+    [[ -z "$IRIS_MODEL" ]]    && IRIS_MODEL="Kimi-K2.6"
   fi
 
 else
@@ -631,7 +672,7 @@ else
     source "$IRIS_DIR/.env" 2>/dev/null || true
     set -u
     IRIS_PROVIDER="${IRIS_PROVIDER:-foundry-e2}"
-    IRIS_MODEL="${IRIS_MODEL:-gpt-4o}"
+    IRIS_MODEL="${IRIS_MODEL:-Kimi-K2.6}"
     SLACK_APP_TOKEN="${IRIS_SLACK_APP_TOKEN:-}"
     SLACK_BOT_TOKEN="${IRIS_SLACK_BOT_TOKEN:-}"
     if [[ -n "$SLACK_APP_TOKEN" && "$SLACK_APP_TOKEN" != xapp-* ]]; then
@@ -669,6 +710,22 @@ if [[ "$SETUP_MODE" == true ]]; then
 
   if [[ "$IRIS_PROVIDER" == "foundry-e2" && -n "${FOUNDRY_ACCOUNT:-}" ]]; then
     sed "s|<your-account>|${FOUNDRY_ACCOUNT}|g" "$TEMPLATE" > /tmp/iris-models.json
+
+    # Hard guard: never let a malformed baseUrl (e.g. a doubled "cognitiveservices"
+    # segment from an un-sanitized account name) reach the live config. This is the
+    # exact bug class that caused every LLM call to fail DNS resolution in prod —
+    # catch it here at generation time, not at message-send time.
+    # NOTE: bash's [[ =~ ]] uses POSIX ERE, which has no backreferences, so we
+    # detect "adjacent duplicate label" by splitting the host on "." in awk instead.
+    GENERATED_FOUNDRY_URL=$(grep -oE 'https://[^"]+' /tmp/iris-models.json | head -1)
+    FOUNDRY_HOST=$(echo "$GENERATED_FOUNDRY_URL" | sed -E 's#https://##; s#/.*##')
+    if echo "$FOUNDRY_HOST" | awk -F. '{ for (i=2;i<=NF;i++) if ($i==$(i-1)) exit 0; exit 1 }'; then
+      die "Generated Foundry baseUrl looks malformed (repeated '.$(echo "$FOUNDRY_HOST" | awk -F. '{for(i=2;i<=NF;i++) if($i==$(i-1)) print $i}')' segment): $GENERATED_FOUNDRY_URL — check the account name you entered ('$FOUNDRY_ACCOUNT') isn't a full hostname/URL."
+    fi
+    if ! getent hosts "$FOUNDRY_HOST" >/dev/null 2>&1; then
+      log "⚠ Warning: '$FOUNDRY_HOST' does not currently resolve in DNS."
+      log "  Double-check the Foundry account name — Iris will fail to reach the LLM until this resolves."
+    fi
     log "✓ models.json generated for Foundry account: $FOUNDRY_ACCOUNT"
   elif [[ "$IRIS_PROVIDER" == "anthropic" ]]; then
     cat > /tmp/iris-models.json << 'MODELJSON'
@@ -871,7 +928,7 @@ log_h "Workspace"
 resolve_repo_dir
 
 sudo mkdir -p "$IRIS_DIR"
-sudo chown "$USER:$USER" "$IRIS_DIR"
+sudo chown -R "$TARGET_USER:$TARGET_USER" "$IRIS_DIR"
 
 if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
   if [[ ! -d "$REPO_DIR/.git" ]]; then
@@ -995,7 +1052,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${USER}
+User=${TARGET_USER}
 WorkingDirectory=${IRIS_DIR}
 ExecStart=${NODE_BIN} --require ${DOTENV_CONFIG} ${IRIS_RUNTIME_BIN} --sandbox=host ${IRIS_DIR}/data
 Restart=always
@@ -1265,9 +1322,20 @@ else
   log "  Slack:     not configured (add tokens to /iris/.env and restart)"
 fi
 if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  # Wait for Iris to start, then read the active token directly from the claim state file
-  sleep 5
-  CLAIM_TOKEN=$(jq -r '.pendingToken // empty' "${IRIS_DIR}/data/data/telegram-owner.json" 2>/dev/null || true)
+  # Poll for the claim state file — Iris needs a few seconds to connect to Telegram
+  # and write it, so a single fixed sleep was flaky. Retry for up to 30s.
+  CLAIM_FILE="${IRIS_DIR}/data/data/telegram-owner.json"
+  CLAIM_TOKEN=""
+  CLAIM_STATUS="false"
+  for _ in $(seq 1 15); do
+    sleep 2
+    if [[ -r "$CLAIM_FILE" ]]; then
+      CLAIM_TOKEN=$(jq -r '.pendingToken // empty' "$CLAIM_FILE" 2>/dev/null || true)
+      CLAIM_STATUS=$(jq -r '.claimed // false' "$CLAIM_FILE" 2>/dev/null || echo false)
+      [[ -n "$CLAIM_TOKEN" || "$CLAIM_STATUS" == "true" ]] && break
+    fi
+  done
+
   if [[ -n "$CLAIM_TOKEN" ]]; then
     log ""
     log "  ┌─ Telegram Claim Token ──────────────────────────────────────────┐"
@@ -1278,6 +1346,19 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "  │                                                                 │"
     log "  │  Token expires in 10 minutes.                                  │"
     log "  └─────────────────────────────────────────────────────────────────┘"
+  elif [[ "$CLAIM_STATUS" == "true" ]]; then
+    log ""
+    log "  ⚠ Telegram bot is already claimed from a previous run (state file: $CLAIM_FILE)."
+    log "    If this is a different bot token or a new owner, force a re-claim with:"
+    log "    IRIS_TELEGRAM_FORCE_RECLAIM=true sudo systemctl restart iris"
+  elif [[ ! -r "$CLAIM_FILE" ]]; then
+    log ""
+    log "  ⚠ Could not read $CLAIM_FILE after 30s — likely a permissions issue between"
+    log "    the account running this script (${TARGET_USER}) and iris.service's User=."
+    log "    Check ownership with: ls -la ${IRIS_DIR}/data/data/ && sudo systemctl status iris"
+  else
+    log ""
+    log "  ⚠ No Telegram claim token appeared after 30s. Check: sudo journalctl -u iris -n 50"
   fi
 fi
 if [[ "$FIRECRACKER_MODE" == true ]]; then
