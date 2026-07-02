@@ -1,6 +1,8 @@
 # Iris Core
 
-Iris is an always-on AI orchestrator that runs on a cloud VM, listens on Slack or Telegram, and manages a fleet of specialized sub-agents. Each sub-agent runs in an isolated Firecracker microVM — lightweight virtual machines with their own Linux kernel, booting in ~125ms.
+Iris is an always-on AI orchestrator that runs on any Linux machine — a laptop, VPS, or cloud VM — listens on Slack or Telegram, and manages a fleet of specialized sub-agents. Sub-agents can optionally run in isolated Firecracker microVMs — lightweight virtual machines with their own Linux kernel, booting in ~125ms.
+
+The default install has **zero cloud dependencies**: secrets in `/iris/.env`, sub-agents in Docker. Azure Key Vault, Terraform, and Firecracker are opt-in profiles for production hardening (Options 2–4 below).
 
 This repository is the source of truth for Iris's constitution, runtime, infrastructure, skills, and sub-agent scaffolding.
 
@@ -15,13 +17,13 @@ This repository is the source of truth for Iris's constitution, runtime, infrast
 - `skills/` — Iris's top-level skills (hot-reloaded without restart)
 - `agents/` — sub-agent scaffolds (newsletter, public-sandbox)
 - `data/models.json` — LLM provider and model configuration
-- `terraform/` — dynamic Azure resources Iris provisions on demand
+- `terraform/` — (optional profile) dynamic Azure resources Iris provisions on demand
 
 ## Architecture
 
 ```
 You (Slack or Telegram)
-└── Iris  (Azure VM, systemd service)
+└── Iris  (any Linux VM, systemd service)
     ├── iris-runtime
     ├── CONSTITUTION.md       read-only operator rules, injected every prompt
     ├── MEMORY.md             mutable global memory
@@ -88,8 +90,10 @@ Pick the path that matches your environment — one command does everything:
 
 | | No Firecracker | With Firecracker (isolated microVMs) |
 |---|---|---|
-| **No Azure** | [Option 1](#option-1--no-azure-no-firecracker) — simplest | [Option 3](#option-3--no-azure-with-firecracker) |
+| **No Azure** | [Option 1](#option-1--no-azure-no-firecracker) — **quickstart, zero cloud deps** | [Option 3](#option-3--no-azure-with-firecracker) |
 | **Azure Key Vault** | [Option 2](#option-2--azure-key-vault-no-firecracker) | [Option 4](#option-4--azure-key-vault--firecracker-full-production) — full production |
+
+Azure, Key Vault, and Terraform are **optional** — Option 1 runs entirely on the machine in front of you.
 
 All options prompt for both Slack and Telegram tokens during setup — answer `Y` to whichever you want. See [Telegram Setup](#telegram-setup) for details.
 
@@ -130,9 +134,9 @@ sudo systemctl restart iris
 
 ## Option 1 — No Azure, No Firecracker
 
-Iris runs on your VM and executes commands directly on the host. No Azure account, no KVM needed.
+Iris runs on your machine and executes commands directly on the host. No Azure account, no KVM needed.
 
-**Requirements:** Ubuntu 22.04 VM · LLM provider API key · Slack workspace (admin) · GitHub account (optional)
+**Requirements:** Ubuntu 22.04 (laptop, VPS, or any VM) · LLM provider API key · Slack workspace (admin) · GitHub account (optional)
 
 ```bash
 bash bootstrap.sh --setup --no-keyvault
@@ -641,7 +645,7 @@ iris-core/
 ├── agents/
 │   ├── newsletter/                 # newsletter sub-agent scaffold
 │   └── public-sandbox/             # Firecracker-isolated public sub-agent
-└── terraform/
+└── terraform/                      # optional profile — only for installs using Azure
     ├── agents.tf                   # sub-agent definitions (uncomment to provision)
     ├── backend.tf
     ├── main.tf
