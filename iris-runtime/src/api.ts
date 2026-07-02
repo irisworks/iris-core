@@ -2,8 +2,10 @@
  * Internal HTTP API for iris-runtime.
  *
  * Always-on: started on IRIS_API_PORT (default 3000).
- * Binds to 0.0.0.0 so sub-agent Docker containers can reach it via the
- * iris-internal network gateway (172.18.0.1 by default).
+ * Binds to 127.0.0.1 by default. To let sub-agent Docker containers reach it
+ * via the iris-internal network gateway (172.18.0.1 by default), set
+ * IRIS_API_HOST=0.0.0.0 AND set IRIS_API_TOKEN — all endpoints except
+ * GET /health then require an `Authorization: Bearer <token>` header.
  *
  * Endpoints:
  *   GET  /health                         — liveness check
@@ -26,7 +28,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import * as log from "./log.js";
 import {
 	createSession,
@@ -62,6 +64,15 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 	res.end(payload);
 }
 
+function bearerTokenMatches(authHeader: string | undefined, expected: string): boolean {
+	const match = /^Bearer\s+(.+)$/i.exec(authHeader ?? "");
+	if (!match) return false;
+	// Hash both sides so timingSafeEqual gets equal-length buffers
+	const presented = createHash("sha256").update(match[1]).digest();
+	const wanted = createHash("sha256").update(expected).digest();
+	return timingSafeEqual(presented, wanted);
+}
+
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
 	const eventId = `api-${Date.now()}-${randomBytes(4).toString("hex")}`;
 	const eventFile = join(eventsDir, `${eventId}.json`);
@@ -81,6 +92,8 @@ export function startApiServer(
 	getBot: () => SessionInjector | null = () => null,
 ): void {
 	const eventsDir = join(workingDir, "events");
+	const apiHost = process.env.IRIS_API_HOST ?? "127.0.0.1";
+	const apiToken = process.env.IRIS_API_TOKEN ?? "";
 
 	const server = createServer(async (req, res) => {
 		const url = req.url ?? "/";
@@ -92,6 +105,12 @@ export function startApiServer(
 			// ── GET /health ────────────────────────────────────────────────────────────
 			if (method === "GET" && url === "/health") {
 				json(res, 200, { ok: true, channels: channelStates.size });
+				return;
+			}
+
+			// ── Auth (all endpoints except /health when IRIS_API_TOKEN is set) ─────
+			if (apiToken && !bearerTokenMatches(req.headers.authorization, apiToken)) {
+				json(res, 401, { error: "unauthorized" });
 				return;
 			}
 
@@ -457,9 +476,15 @@ export function startApiServer(
 		}
 	});
 
-	// Bind to 0.0.0.0 so Docker containers on iris-internal network can reach Iris
-	server.listen(port, "0.0.0.0", () => {
-		log.logInfo(`[api] Internal API listening on http://0.0.0.0:${port}`);
+	// Default bind is loopback. Installs whose sub-agent containers call this API
+	// via the Docker gateway must set IRIS_API_HOST=0.0.0.0 and IRIS_API_TOKEN.
+	if (apiHost !== "127.0.0.1" && apiHost !== "localhost" && !apiToken) {
+		log.logWarning(
+			`[api] IRIS_API_HOST=${apiHost} exposes the API beyond loopback without IRIS_API_TOKEN — anyone who can reach port ${port} can inject messages. Set IRIS_API_TOKEN.`,
+		);
+	}
+	server.listen(port, apiHost, () => {
+		log.logInfo(`[api] Internal API listening on http://${apiHost}:${port}`);
 	});
 
 	server.on("error", (err) => {

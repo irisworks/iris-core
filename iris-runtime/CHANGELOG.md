@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Security
+
+- Internal API (`api.ts`) and bridge server (`bridge.ts`) now bind `127.0.0.1` by default instead of `0.0.0.0`. Override with `IRIS_API_HOST` / `IRIS_BRIDGE_HOST`.
+- New optional `IRIS_API_TOKEN`: when set, all internal API endpoints except `GET /health` require `Authorization: Bearer <token>`. The runtime logs a warning when the API is exposed beyond loopback without a token.
+
+### UPGRADING
+
+- Installs whose sub-agent Docker containers call the internal API via the Docker gateway (e.g. `http://172.18.0.1:3000`) must set `IRIS_API_HOST=0.0.0.0` (or the gateway IP) and should set `IRIS_API_TOKEN`, passing the token to sub-agents.
+
 ## [0.66.1] - 2026-04-08
 
 ## [0.66.0] - 2026-04-08
