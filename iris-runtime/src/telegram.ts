@@ -498,7 +498,28 @@ export class TelegramBot {
 
 	async start(): Promise<void> {
 		this.running = true;
-		const me = (await this.call("getMe")) as { username?: string; first_name?: string };
+
+		let me: { id: number; username?: string; first_name?: string };
+		try {
+			me = (await this.call("getMe")) as typeof me;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			// Most common cause: TELEGRAM_BOT_TOKEN in /iris/.env is invalid/revoked, or
+			// there's no network path to api.telegram.org. Fail loudly with a pointer to
+			// the fix rather than letting a bare fetch error bubble up.
+			throw new Error(
+				`[telegram] Could not connect to Telegram (check TELEGRAM_BOT_TOKEN in /iris/.env): ${msg}`,
+			);
+		}
+
+		// If the token now points at a different bot than last time, the persisted claim
+		// (if any) belongs to that old bot and is meaningless here — clear it automatically.
+		if (this.claim.syncBotIdentity(me.id)) {
+			log.logInfo(
+				`[telegram] Bot token changed since last run (now bot id ${me.id}) — previous claim cleared, this bot is unclaimed.`,
+			);
+		}
+
 		log.logInfo(`[telegram] Connected as @${me.username ?? me.first_name ?? "unknown"}`);
 		log.logConnected();
 		void this.poll();
