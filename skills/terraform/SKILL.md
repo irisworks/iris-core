@@ -63,7 +63,7 @@ echo "[terraform] Done."
 
 ## Notes
 
-- Terraform state: Azure Storage Account `iristfstate`, container `tfstate`, key `iris-core.terraform.tfstate`
+- Terraform state: Azure Storage Account per install (see `terraform/backend.tf` for backend-config), container `tfstate`
 - If state is locked: `terraform force-unlock <lock-id>` (use with care)
 - New resources: write the `.tf` file → commit → run this skill
 - Destroying resources: must be intentional and confirmed before proceeding

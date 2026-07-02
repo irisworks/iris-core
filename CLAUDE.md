@@ -3,7 +3,7 @@
 ## Infrastructure as Code
 - Always use Terraform to define and manage infrastructure. No manual cloud resource creation.
 - Terraform in this repo (`terraform/`) is scoped to **dynamic resources** Iris provisions on demand (storage, DNS, sub-agent VMs, blobs). The bootstrap VM itself is NOT managed here — it is intentionally outside this state to prevent self-destruction.
-- Terraform state: `iristfstate30` storage account, `tfstate` container, key `iris-dynamic.terraform.tfstate`.
+- Terraform state lives in an Azure Blob backend configured per install (storage account, container, and state key are install-specific settings — set them in the install's backend config, e.g. via `terraform init -backend-config` or the install overlay; do not hardcode them in core).
 
 ## Runtime
 - Iris runs as `iris.service` (systemd) on the host VM, **not in Docker**.

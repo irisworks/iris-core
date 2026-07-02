@@ -14,7 +14,7 @@ GitHub is Iris's long-term memory. The VM is ephemeral.
 2. Commit message should describe what changed and why
 3. Never commit `.env` files, secrets, or `*.tfstate`
 4. Push immediately after committing — don't let commits sit local-only
-5. If GitHub is unreachable, halt and escalate to Rohit
+5. If GitHub is unreachable, halt and escalate to the operator
 
 ## Usage
 

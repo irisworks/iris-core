@@ -97,7 +97,7 @@ All four paths start the same way:
 
 ```bash
 sudo mkdir -p /iris && sudo chown $USER:$USER /iris
-git clone https://github.com/irisworks/irisflow.git /iris/repo
+git clone https://github.com/irisworks/iris-core.git /iris/repo
 cd /iris/repo
 ```
 
@@ -592,7 +592,7 @@ Optional secrets (all providers):
 ## Repository Layout
 
 ```
-irisflow/
+iris-core/
 ├── bootstrap.sh                    # rebuild Iris on a fresh VM
 ├── CLAUDE.md                       # repo-level writing rules
 ├── CONSTITUTION.md                 # operator rules — injected into every prompt
@@ -658,7 +658,7 @@ irisflow/
 | VM boots but `/health` times out | exec-server not started | Check `journalctl -u iris-fc-<name>` |
 | Jailer fails to chroot | `irisjailer` user missing | `sudo groupadd -g 10000 irisjailer 2>/dev/null; sudo useradd -u 10000 -g 10000 -r -s /usr/sbin/nologin irisjailer` |
 | rootfs missing | Build script not run | `sudo bash scripts/build-firecracker-rootfs.sh` |
-| `fatal: repository not found` during bootstrap | Upstream remote points to a private repo you don't have access to | Update with: `git remote set-url upstream https://github.com/irisworks/irisflow.git && git fetch upstream` |
+| `fatal: repository not found` during bootstrap | Upstream remote points to a private repo you don't have access to | Update with: `git remote set-url upstream https://github.com/irisworks/iris-core.git && git fetch upstream` |
 
 ---
 
@@ -667,7 +667,7 @@ irisflow/
 ```bash
 gh repo create iris-yourcompany --private
 cd iris-yourcompany
-git submodule add https://github.com/irisworks/irisflow.git core
+git submodule add https://github.com/irisworks/iris-core.git core
 mkdir -p overlay/{agents,skills,data}
 ```
 
