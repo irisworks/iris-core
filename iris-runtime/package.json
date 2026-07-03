@@ -1,6 +1,6 @@
 {
 	"name": "@iris-core/runtime",
-	"version": "0.66.1",
+	"version": "0.90.0",
 	"description": "Iris runtime — provider-agnostic fork of pi-mom for sub-agent orchestration",
 	"type": "module",
 	"bin": {

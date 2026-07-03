@@ -2,14 +2,38 @@
 
 ## [Unreleased]
 
+## [0.90.0] - 2026-07-03
+
+Consolidation baseline: generic features upstreamed from install forks, plus repo
+hygiene and security hardening for public launch. Last release on the flat `src/`
+layout before the transport-interface refactor.
+
+### Added
+
+- LLM retry with exponential backoff on 429/timeout/transient errors — up to `IRIS_LLM_MAX_RETRIES` (default 3) attempts, jittered backoff via `IRIS_LLM_RETRY_BASE_MS` (default 2s), visible `_Retrying (n/3)..._` notices (#26, ported from 30signals/iris-core `ebe7f25`; fixes #13)
+- Pre-run auto-compaction: estimated context above `IRIS_COMPACT_THRESHOLD` (default 0.6 of the model window) compacts toward `IRIS_COMPACT_TARGET` (default 0.1) before prompting, up to 3 passes; the post-run ≥70% check remains as backstop (#28)
+- Configurable passthrough mode in `data/channels.json`: `payload` JSON template with `{{placeholders}}`, `secretName` resolved via the get-secret skill, `replyPrefix`; session routes for interactive-thread channels rebuilt from `sessions.json` on startup (#29)
+- CI workflow (build + bridge-only smoke test) and `docs/RELEASING.md` (#23)
+
+### Fixed
+
+- Thinking blocks truncated at 2,900 chars and posted only to threads; safe Slack message limit lowered 40,000 → 30,000, overridable via `IRIS_SLACK_MAX_CHARS` (#27, ported from 30signals/iris-core `4f96613`)
+- Per-attempt LLM timeout default lowered 300s → 90s (`IRIS_LLM_TIMEOUT_SECS`) — with retries, shorter attempts recover faster from hung calls (#26)
+
 ### Security
 
-- Internal API (`api.ts`) and bridge server (`bridge.ts`) now bind `127.0.0.1` by default instead of `0.0.0.0`. Override with `IRIS_API_HOST` / `IRIS_BRIDGE_HOST`.
-- New optional `IRIS_API_TOKEN`: when set, all internal API endpoints except `GET /health` require `Authorization: Bearer <token>`. The runtime logs a warning when the API is exposed beyond loopback without a token.
+- Internal API (`api.ts`) and bridge server (`bridge.ts`) now bind `127.0.0.1` by default instead of `0.0.0.0`. Override with `IRIS_API_HOST` / `IRIS_BRIDGE_HOST` (#24)
+- New optional `IRIS_API_TOKEN`: when set, all internal API endpoints except `GET /health` require `Authorization: Bearer <token>`. The runtime logs a warning when the API is exposed beyond loopback without a token (#24)
+
+### Changed
+
+- Terraform/Azure repositioned as an opt-in profile; default install path is any Linux machine with Docker and `/iris/.env`, zero cloud dependencies (#25)
+- De-personalized CONSTITUTION.md and skill docs; fixed repo identity URLs; removed install-specific terraform example module (#23)
 
 ### UPGRADING
 
 - Installs whose sub-agent Docker containers call the internal API via the Docker gateway (e.g. `http://172.18.0.1:3000`) must set `IRIS_API_HOST=0.0.0.0` (or the gateway IP) and should set `IRIS_API_TOKEN`, passing the token to sub-agents.
+- If you relied on the 300s LLM timeout, set `IRIS_LLM_TIMEOUT_SECS=300`.
 
 ## [0.66.1] - 2026-04-08
 
