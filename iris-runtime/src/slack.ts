@@ -6,8 +6,8 @@ import * as log from "./log.js";
 import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
 import { resolveChannelDir, type Attachment, type ChannelStore } from "./store.js";
 
-// Slack has a 40,000 character limit for message text
-const SLACK_MAX_LENGTH = 40000;
+// Slack message text limit (safely under the actual 40K limit); IRIS_SLACK_MAX_CHARS overrides
+const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
 
 /**
  * Truncate text to fit within Slack's message limit.

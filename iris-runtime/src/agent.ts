@@ -686,12 +686,14 @@ function createRunner(
 
 				const text = textParts.join("\n");
 
+				const MAX_THINKING = 2900;
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
-					if (!isSessionChannel) {
-						queue.enqueueMessage(`_${thinking}_`, "main", "thinking main");
-						queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
-					}
+					const truncated =
+						thinking.length > MAX_THINKING
+							? thinking.substring(0, MAX_THINKING) + "\n\n_(thinking truncated)_"
+							: thinking;
+					queue.enqueueMessage(`_${truncated}_`, "thread", "thinking thread", false);
 				}
 
 				if (text.trim()) {
@@ -724,7 +726,7 @@ function createRunner(
 	});
 
 	// Slack message limit
-	const SLACK_MAX_LENGTH = 40000;
+	const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
 	const splitForSlack = (text: string): string[] => {
 		if (text.length <= SLACK_MAX_LENGTH) return [text];
 		const parts: string[] = [];
