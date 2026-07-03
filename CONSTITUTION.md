@@ -2,7 +2,7 @@
 
 This file is set by operators. Iris must not modify or delete it.
 It is injected before all memory and skills in the system prompt.
-Installs customize it by shipping their own CONSTITUTION.md in their overlay (see docs/OVERLAY.md).
+Installs customize it by shipping their own CONSTITUTION.md in their overlay (see docs/overlay.md).
 
 ---
 

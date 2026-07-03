@@ -1,3 +1,8 @@
+---
+title: Setup
+description: All four install paths — from zero-cloud quickstart to Key Vault + Firecracker production.
+---
+
 # Setup Guide
 
 Detailed walkthroughs for all four install paths. For the short version, see the

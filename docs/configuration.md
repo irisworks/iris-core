@@ -1,0 +1,62 @@
+---
+title: Configuration
+description: Environment variables, CLI flags, and the security posture of the internal API.
+---
+
+# Configuration
+
+Iris reads configuration from `/iris/.env` (written by bootstrap) and CLI flags
+(`--provider`, `--model`, `--sandbox`, `--transport`, `--api-port`). Flags override
+env vars.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `IRIS_PROVIDER` / `IRIS_MODEL` | `anthropic` / provider default | LLM provider and model (see `data/models.json`) |
+| `IRIS_SLACK_APP_TOKEN` / `IRIS_SLACK_BOT_TOKEN` | — | Slack tokens; presence enables the Slack transport |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram token; presence enables the Telegram transport |
+| `IRIS_ENV` | `prod` | `preview` \| `prod` |
+| `IRIS_API_PORT` / `IRIS_API_HOST` | `3000` / `127.0.0.1` | Internal HTTP API bind (always on) |
+| `IRIS_API_TOKEN` | — | When set, API requires `Authorization: Bearer <token>` (except `/health`) |
+| `IRIS_BRIDGE_PORT` / `IRIS_BRIDGE_HOST` | — / `127.0.0.1` | Sub-agent bridge server (sub-agents only) |
+| `IRIS_LLM_TIMEOUT_SECS` | `90` | Per-attempt LLM timeout |
+| `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_RETRY_BASE_MS` | `3` / `2000` | Retry with exponential backoff on 429/timeout/transient errors |
+| `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
+| `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
+| `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
+| `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | Identity injected into the constitution |
+| `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
+| `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |
+| `PASSTHROUGH_API_KEY` | — | Fallback API key for passthrough channels (see [Channel Modes](channel-modes.md)) |
+
+## Models and providers
+
+The runtime loads provider endpoints and model definitions from
+`<workspace>/models.json` (generated from `data/models.json.template` at bootstrap).
+Anthropic and OpenAI work out of the box; custom endpoints (Azure AI Foundry,
+AWS Bedrock) are defined in the template. Switch with:
+
+```bash
+IRIS_PROVIDER=anthropic
+IRIS_MODEL=claude-sonnet-4-5
+```
+
+## Internal API security
+
+The internal API binds to loopback by default. If sub-agent containers reach Iris
+via the Docker gateway (`172.18.0.1:3000`), set `IRIS_API_HOST=0.0.0.0` **and**
+`IRIS_API_TOKEN` — never expose the API beyond loopback without a token. Iris logs
+a warning at startup if you do.
+
+## LLM resilience
+
+Two mechanisms keep long-running channels healthy:
+
+- **Retry with backoff** — failed LLM calls (429, timeout, connection reset) retry
+  up to `IRIS_LLM_MAX_RETRIES` times with jittered exponential backoff, posting a
+  visible `_Retrying (n/3)..._` notice.
+- **Auto-compaction** — before each prompt, if the estimated context exceeds
+  `IRIS_COMPACT_THRESHOLD` of the model window, Iris summarises older history down
+  toward `IRIS_COMPACT_TARGET` (up to 3 passes). A post-run check at ≥70% real
+  usage acts as a backstop.

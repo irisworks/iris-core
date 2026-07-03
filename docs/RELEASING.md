@@ -1,3 +1,8 @@
+---
+title: Releasing
+description: Version scheme, changelog rules, and the install upgrade procedure.
+---
+
 # Releasing iris-core
 
 ## Versioning
