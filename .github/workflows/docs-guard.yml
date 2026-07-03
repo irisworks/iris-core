@@ -1,0 +1,50 @@
+name: Docs Guard
+
+# Behavior-changing PRs must update the changelog and docs in the same PR.
+# Escape hatches (maintainer-applied labels):
+#   docs-not-needed       — change has no user-facing docs impact
+#   changelog-not-needed  — change is invisible to operators (pure refactor, CI, tests)
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  docs-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require changelog + docs updates for behavior changes
+        env:
+          SKIP_DOCS: ${{ contains(github.event.pull_request.labels.*.name, 'docs-not-needed') }}
+          SKIP_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'changelog-not-needed') }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          CHANGED="$(git diff --name-only "origin/$BASE_REF"...HEAD)"
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          code_changed=$(echo "$CHANGED" | grep -cE '^(iris-runtime/src/|skills/|scripts/|agents/|bootstrap\.sh|install\.sh)' || true)
+          docs_changed=$(echo "$CHANGED" | grep -cE '^(docs/|README\.md|CONSTITUTION\.md)' || true)
+          changelog_changed=$(echo "$CHANGED" | grep -cE '^iris-runtime/CHANGELOG\.md$' || true)
+
+          if [ "$code_changed" -eq 0 ]; then
+            echo "No behavior-relevant paths changed — guard passes."
+            exit 0
+          fi
+
+          fail=0
+          if [ "$changelog_changed" -eq 0 ] && [ "$SKIP_CHANGELOG" != "true" ]; then
+            echo "::error::This PR changes behavior-relevant paths but does not update iris-runtime/CHANGELOG.md. Add an entry under [Unreleased], or apply the 'changelog-not-needed' label."
+            fail=1
+          fi
+          if [ "$docs_changed" -eq 0 ] && [ "$SKIP_DOCS" != "true" ]; then
+            echo "::error::This PR changes behavior-relevant paths but does not touch docs/ or README.md. Update the relevant docs page, or apply the 'docs-not-needed' label."
+            fail=1
+          fi
+          exit "$fail"

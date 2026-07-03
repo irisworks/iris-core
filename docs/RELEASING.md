@@ -13,7 +13,11 @@ description: Version scheme, changelog rules, and the install upgrade procedure.
 
 ## Changelog
 
-- Every PR adds an entry to `iris-runtime/CHANGELOG.md`.
+- Every behavior-changing PR adds an entry to `iris-runtime/CHANGELOG.md` under
+  `[Unreleased]` and updates the relevant `docs/` page — the **docs-guard** CI
+  workflow enforces both. Maintainers can bypass with the `changelog-not-needed`
+  / `docs-not-needed` labels when a change is genuinely invisible to operators.
+- No empty releases: a version heading must have content before it is tagged.
 - Features ported from install forks cite the source repo and commit SHA.
 - Breaking changes (renamed env vars, config schema, data-dir layout) get an `UPGRADING` note in the release entry.
 

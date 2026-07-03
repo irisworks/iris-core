@@ -19,6 +19,10 @@
 - Always leave README notes with enough detail that a future instance (or a complete rebuild from scratch) can replicate the full setup — even if this instance and all its infrastructure are deleted.
 - README must include: purpose, dependencies, environment setup, deployment steps, and any non-obvious configuration.
 
+## Docs With Code
+- Every behavior-changing PR updates `iris-runtime/CHANGELOG.md` (under `[Unreleased]`) and the relevant `docs/` page in the same PR. The docs-guard CI workflow fails PRs that don't; `changelog-not-needed` / `docs-not-needed` labels are the maintainer escape hatches.
+- `docs/` is the documentation source of truth — it is rendered on the public website, so pages must stand alone (frontmatter title/description, no repo-internal jargon).
+
 ## Repo Guidance
 - Keep `CLAUDE.md` current as the latest repo-level guidance file. When workflows, conventions, or maintenance expectations change, update `CLAUDE.md` with them.
 - Keep `README.md` and `plan.md` aligned with the actual live VM state. When bootstrap, runtime wiring, model defaults, or verification status change, update those docs in the same workstream.
