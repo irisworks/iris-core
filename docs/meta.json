@@ -1,0 +1,14 @@
+{
+	"title": "Iris Docs",
+	"pages": [
+		"index",
+		"SETUP",
+		"configuration",
+		"channel-modes",
+		"skills",
+		"sub-agents",
+		"overlay",
+		"troubleshooting",
+		"RELEASING"
+	]
+}

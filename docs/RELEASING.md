@@ -1,9 +1,14 @@
+---
+title: Releasing
+description: Version scheme, changelog rules, and the install upgrade procedure.
+---
+
 # Releasing iris-core
 
 ## Versioning
 
 - Semver tags `vX.Y.Z` on the repo root. `iris-runtime/package.json` version must match the tag.
-- The pinned upstream `@mariozechner/pi-*` dependencies (0.66.1) version independently; do not couple our version to theirs.
+- The pinned `@mariozechner/pi-*` library dependencies (0.66.1) version independently; do not couple our version to theirs.
 - Planned milestones: `v0.66.1-baseline` (pre-consolidation anchor) → `v0.90.0` (fork features upstreamed) → `v1.0.0` (transport refactor) → `v1.1.0` (panel API / cloud generics).
 
 ## Changelog
