@@ -1,5 +1,6 @@
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
+import { execFileSync } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "./log.js";
@@ -8,6 +9,35 @@ import { resolveChannelDir, type Attachment, type ChannelStore } from "./store.j
 
 // Slack message text limit (safely under the actual 40K limit); IRIS_SLACK_MAX_CHARS overrides
 const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
+
+/**
+ * Per-channel passthrough configuration (data/channels.json, mode "passthrough"):
+ *   url          — external endpoint messages are forwarded to (required)
+ *   secretName   — API key resolved via the get-secret skill; falls back to
+ *                  the PASSTHROUGH_API_KEY env var when unset
+ *   payload      — JSON body template; string values support placeholders:
+ *                  {{text}} {{user_id}} {{user_name}} {{user_handle}} {{sender_id}} {{channel}} {{ts}}
+ *                  Default: { "text": "{{text}}", "user": "{{user_name}}", "sender_id": "{{sender_id}}" }
+ *   replyPrefix  — optional prefix prepended to the endpoint's reply when posted back
+ */
+interface PassthroughConfig {
+	url: string;
+	secretName?: string;
+	payload?: unknown;
+	replyPrefix?: string;
+}
+
+/** Recursively substitute {{placeholders}} in string values of a JSON template. */
+function renderPayloadTemplate(node: unknown, vars: Record<string, string>): unknown {
+	if (typeof node === "string") return node.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? "");
+	if (Array.isArray(node)) return node.map((item) => renderPayloadTemplate(item, vars));
+	if (node && typeof node === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(node)) out[key] = renderPayloadTemplate(value, vars);
+		return out;
+	}
+	return node;
+}
 
 /**
  * Truncate text to fit within Slack's message limit.
@@ -166,7 +196,8 @@ export class SlackBot {
 
 	// Channel modes loaded from workingDir/data/channels.json
 	private channelModes = new Map<string, "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin">();
-	private channelPassthroughUrls = new Map<string, string>(); // channel -> endpoint URL for passthrough mode
+	private channelPassthrough = new Map<string, PassthroughConfig>(); // channel -> passthrough config
+	private passthroughSecretCache = new Map<string, string>(); // secretName -> resolved value
 	private channelRequireMention = new Set<string>(); // channels where top-level messages require @mention
 
 	// SESSION-<id> → real Slack { channel, threadTs } for routing postMessage/updateMessage
@@ -199,13 +230,21 @@ export class SlackBot {
 		const channelsPath = join(this.workingDir, "data", "channels.json");
 		if (!existsSync(channelsPath)) return;
 		try {
-			const raw = JSON.parse(readFileSync(channelsPath, "utf-8")) as Record<string, { mode: string; url?: string; requireMentionForTopLevel?: boolean }>;
+			const raw = JSON.parse(readFileSync(channelsPath, "utf-8")) as Record<
+				string,
+				{ mode: string; url?: string; requireMentionForTopLevel?: boolean; secretName?: string; payload?: unknown; replyPrefix?: string }
+			>;
 			for (const [id, config] of Object.entries(raw)) {
 				if (config.mode === "thread" || config.mode === "interactive-thread" || config.mode === "passthrough" || config.mode === "leads" || config.mode === "dm" || config.mode === "admin") {
 					this.channelModes.set(id, config.mode);
 				}
 				if (config.mode === "passthrough" && config.url) {
-					this.channelPassthroughUrls.set(id, config.url);
+					this.channelPassthrough.set(id, {
+						url: config.url,
+						secretName: config.secretName,
+						payload: config.payload,
+						replyPrefix: config.replyPrefix,
+					});
 				}
 				if (config.requireMentionForTopLevel) {
 					this.channelRequireMention.add(id);
@@ -215,6 +254,78 @@ export class SlackBot {
 		} catch (err) {
 			log.logWarning("[channels] Failed to load channels.json", err instanceof Error ? err.message : String(err));
 		}
+	}
+
+	/**
+	 * Resolve the API key for a passthrough endpoint.
+	 * Order: PASSTHROUGH_API_KEY env var, then the channel's secretName via the
+	 * get-secret skill (cached per secret name for the process lifetime).
+	 */
+	private resolvePassthroughKey(secretName?: string): string {
+		if (process.env.PASSTHROUGH_API_KEY) return process.env.PASSTHROUGH_API_KEY;
+		if (!secretName) return "";
+		if (!/^[A-Za-z0-9_-]+$/.test(secretName)) {
+			log.logWarning(`[passthrough] invalid secretName: ${secretName}`);
+			return "";
+		}
+		const cached = this.passthroughSecretCache.get(secretName);
+		if (cached !== undefined) return cached;
+		try {
+			const script = join(this.workingDir, "skills", "get-secret", "get-secret");
+			const value = execFileSync("bash", [script, secretName], { encoding: "utf8" }).trim();
+			this.passthroughSecretCache.set(secretName, value);
+			return value;
+		} catch (err) {
+			log.logWarning(`[passthrough] failed to resolve secret ${secretName}`, err instanceof Error ? err.message : String(err));
+			return "";
+		}
+	}
+
+	/**
+	 * Forward a message to a passthrough endpoint and post the reply in-thread.
+	 * Fire-and-forget — callers ack() before invoking.
+	 */
+	private forwardToPassthrough(
+		config: PassthroughConfig,
+		channel: string,
+		threadTs: string,
+		userId: string,
+		text: string,
+		eventTs: string,
+		errorNotice: boolean,
+	): void {
+		const user = this.users.get(userId);
+		const userName = user?.displayName || user?.userName || userId;
+		const senderId = `slack_${threadTs.replace(".", "")}`;
+		void (async () => {
+			try {
+				const apiKey = this.resolvePassthroughKey(config.secretName);
+				const vars: Record<string, string> = {
+					text,
+					user_id: userId,
+					user_name: userName,
+					user_handle: userName.toLowerCase().replace(/\s+/g, "."),
+					sender_id: senderId,
+					channel,
+					ts: eventTs,
+				};
+				const template = config.payload ?? { text: "{{text}}", user: "{{user_name}}", sender_id: "{{sender_id}}" };
+				const body = JSON.stringify(renderPayloadTemplate(template, vars));
+				const resp = await fetch(config.url, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
+					body,
+				});
+				const json = await resp.json() as { response?: string; text?: string; error?: string };
+				const reply = json.response || json.text || json.error || "(no response)";
+				await this.postInThread(channel, threadTs, `${config.replyPrefix ?? ""}${reply}`);
+			} catch (err) {
+				log.logWarning(`[${channel}] passthrough error`, err instanceof Error ? err.message : String(err));
+				if (errorNotice) {
+					await this.postInThread(channel, eventTs, "_Bot unavailable, please try again._");
+				}
+			}
+		})();
 	}
 
 	/**
@@ -295,6 +406,24 @@ export class SlackBot {
 		log.logInfo(`Loaded ${this.channels.size} channels, ${this.users.size} users`);
 
 		await this.backfillAllChannels();
+
+		// Rebuild sessionRoutes from disk for interactive-thread channels.
+		// Sessions store originChannel + originThreadTs so replies route correctly after restart.
+		const sessions = loadSessions(this.workingDir);
+		for (const [sessionId, session] of sessions) {
+			const slack = session.integrations?.slack;
+			if (slack?.originChannel && slack?.originThreadTs) {
+				if (this.getChannelMode(slack.originChannel) === "interactive-thread") {
+					this.sessionRoutes.set(`SESSION-${sessionId}`, {
+						channel: slack.originChannel,
+						threadTs: slack.originThreadTs,
+					});
+				}
+			}
+		}
+		if (this.sessionRoutes.size > 0) {
+			log.logInfo(`Rebuilt ${this.sessionRoutes.size} session routes from sessions.json`);
+		}
 
 		this.setupEventHandlers();
 		this.setupSocketWatchdog();
@@ -599,35 +728,14 @@ export class SlackBot {
 
 			// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs
 			if (channelMode === "passthrough") {
-				const passthroughUrl = this.channelPassthroughUrls.get(e.channel);
-				if (!passthroughUrl) {
+				const ptConfig = this.channelPassthrough.get(e.channel);
+				if (!ptConfig) {
 					log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
 					ack();
 					return;
 				}
-				const threadTs = e.thread_ts ?? e.ts;
-				const user = this.users.get(slackEvent.user);
-				const userName = user?.displayName || user?.userName || slackEvent.user;
-				const senderId = `slack_${threadTs.replace(".", "")}`;
 				ack();
-				// Fire async — don't block the ack
-				(async () => {
-					try {
-						const apiKey = process.env.PASSTHROUGH_API_KEY ?? "";
-						const body = JSON.stringify({ text: slackEvent.text, user: userName, sender_id: senderId });
-						const resp = await fetch(passthroughUrl, {
-							method: "POST",
-							headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
-							body,
-						});
-						const json = await resp.json() as { response?: string; text?: string; error?: string };
-						const reply = json.response || json.text || json.error || "(no response)";
-						await this.postInThread(e.channel, threadTs, reply);
-					} catch (err) {
-						log.logWarning(`[${e.channel}] passthrough error`, err instanceof Error ? err.message : String(err));
-						await this.postInThread(e.channel, e.ts, "_Bot unavailable, please try again._");
-					}
-				})();
+				this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts ?? e.ts, slackEvent.user, slackEvent.text, e.ts, true);
 				return;
 			}
 
@@ -924,28 +1032,10 @@ export class SlackBot {
 					return;
 				}
 				if (channelMode === "passthrough") {
-					const passthroughUrl = this.channelPassthroughUrls.get(e.channel);
-					if (passthroughUrl) {
-						const user = this.users.get(slackEvent.user);
-						const userName = user?.displayName || user?.userName || slackEvent.user;
-						const senderId = `slack_${e.thread_ts.replace(".", "")}`;
+					const ptConfig = this.channelPassthrough.get(e.channel);
+					if (ptConfig) {
 						ack();
-						(async () => {
-							try {
-								const apiKey = process.env.PASSTHROUGH_API_KEY ?? "";
-								const body = JSON.stringify({ text: slackEvent.text, user: userName, sender_id: senderId });
-								const resp = await fetch(passthroughUrl, {
-									method: "POST",
-									headers: { "Content-Type": "application/json", ...(apiKey ? { "X-API-Key": apiKey } : {}) },
-									body,
-								});
-								const json = await resp.json() as { response?: string; text?: string; error?: string };
-								const reply = json.response || json.text || json.error || "(no response)";
-								await this.postInThread(e.channel, e.thread_ts!, reply);
-							} catch (err) {
-								log.logWarning(`[${e.channel}] passthrough error`, err instanceof Error ? err.message : String(err));
-							}
-						})();
+						this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts, slackEvent.user, slackEvent.text, e.ts, false);
 						return;
 					}
 				}
