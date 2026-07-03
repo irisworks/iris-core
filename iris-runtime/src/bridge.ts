@@ -140,8 +140,11 @@ export function startBridgeServer(port: number, workingDir: string): void {
 		}
 	});
 
-	server.listen(port, "0.0.0.0", () => {
-		log.logInfo(`[bridge] Bridge server listening on http://0.0.0.0:${port}`);
+	// Default bind is loopback; set IRIS_BRIDGE_HOST when the bridge must be
+	// reachable from outside the container/host (e.g. cross-host sub-agents).
+	const bridgeHost = process.env.IRIS_BRIDGE_HOST ?? "127.0.0.1";
+	server.listen(port, bridgeHost, () => {
+		log.logInfo(`[bridge] Bridge server listening on http://${bridgeHost}:${port}`);
 	});
 
 	server.on("error", (err) => {

@@ -535,8 +535,15 @@ IRIS_PROVIDER=foundry-e2
 IRIS_MODEL=Kimi-K2.5
 IRIS_ENV=prod          # preview | prod
 IRIS_API_PORT=3001     # 0 = disabled (default)
+IRIS_API_HOST=127.0.0.1  # API bind address (default loopback); set 0.0.0.0 for Docker sub-agents
+IRIS_API_TOKEN=...     # optional; when set, API requires Authorization: Bearer <token> (except /health)
 IRIS_TRANSPORT=slack   # slack (default) | telegram
 ```
+
+> **Security note:** the internal API binds to loopback by default. If your sub-agent
+> containers reach Iris via the Docker gateway (`172.18.0.1:3000`), set
+> `IRIS_API_HOST=0.0.0.0` **and** `IRIS_API_TOKEN` — never expose the API beyond
+> loopback without a token.
 
 Supported providers out of the box (configure in `data/models.json`):
 
