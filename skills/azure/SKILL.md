@@ -5,6 +5,8 @@ description: Common Azure CLI patterns for auth, infrastructure, and operational
 
 # Skill: azure
 
+> **Opt-in profile:** this skill only applies to installs running on Azure (Key Vault / Terraform profile). Local/Docker-only installs have no Azure resources.
+
 Common Azure CLI patterns. Use these patterns consistently.
 Never use Azure CLI to manage secrets directly — use the `get-secret` skill.
 

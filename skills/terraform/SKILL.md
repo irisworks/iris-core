@@ -5,6 +5,8 @@ description: Plan and apply Terraform changes using the safe Iris workflow.
 
 # Skill: terraform
 
+> **Opt-in profile:** this skill only applies to installs using the Azure/Terraform profile. Local/Docker-only installs have no Terraform-managed infrastructure — do not use this skill there.
+
 Apply Terraform changes safely. Always plan before applying. Always commit before applying.
 
 ## Rules

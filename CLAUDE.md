@@ -1,7 +1,7 @@
 # Constitution Rules - For Code Writing
 
 ## Infrastructure as Code
-- Always use Terraform to define and manage infrastructure. No manual cloud resource creation.
+- The Terraform/Azure profile is **optional** — core's default path is any Linux box with Docker and `/iris/.env`, zero cloud dependencies. On installs that do use cloud infrastructure, always define and manage it with Terraform; no manual cloud resource creation there.
 - Terraform in this repo (`terraform/`) is scoped to **dynamic resources** Iris provisions on demand (storage, DNS, sub-agent VMs, blobs). The bootstrap VM itself is NOT managed here — it is intentionally outside this state to prevent self-destruction.
 - Terraform state lives in an Azure Blob backend configured per install (storage account, container, and state key are install-specific settings — set them in the install's backend config, e.g. via `terraform init -backend-config` or the install overlay; do not hardcode them in core).
 
