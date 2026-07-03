@@ -905,6 +905,42 @@ function createRunner(
 			};
 			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
 
+			// Pre-run auto-compaction: if the estimated context exceeds IRIS_COMPACT_THRESHOLD
+			// (default 60%) of the model window, compact down toward IRIS_COMPACT_TARGET
+			// (default 10%) before prompting — prevents mid-run context overflow.
+			// The post-run >=70% check below remains as a backstop using real usage numbers.
+			const windowTokens = model.contextWindow || 200000;
+			const compactThreshold = (Number(process.env.IRIS_COMPACT_THRESHOLD) || 0.6) * windowTokens;
+			const compactTarget = (Number(process.env.IRIS_COMPACT_TARGET) || 0.1) * windowTokens;
+			// Rough token estimate: chars / 4 (good enough for cl100k/tiktoken-like encodings)
+			const estimateTokens = () =>
+				Math.round((systemPrompt.length + JSON.stringify(session.messages).length) / 4);
+			const estimatedTokens = estimateTokens();
+			if (estimatedTokens > compactThreshold) {
+				log.logInfo(
+					`[${channelId}] Pre-run auto-compact: ~${estimatedTokens.toLocaleString()} est. tokens > ${Math.round(compactThreshold).toLocaleString()} threshold`,
+				);
+				const notifyCompact = !channelId.startsWith("SESSION-");
+				if (notifyCompact) {
+					runState.queue.enqueue(
+						() => ctx.respond(`_Auto-compacting context (~${estimatedTokens.toLocaleString()} tokens)..._`, false),
+						"auto-compact start",
+					);
+				}
+				for (let attempt = 1; attempt <= 3; attempt++) {
+					const result = await doCompact();
+					if (!result) break;
+					const newTokens = estimateTokens();
+					log.logInfo(
+						`[${channelId}] Compact attempt ${attempt}: ${result.tokensBefore.toLocaleString()} → ~${newTokens.toLocaleString()} est. tokens`,
+					);
+					if (newTokens <= compactTarget) break;
+				}
+				if (notifyCompact) {
+					runState.queue.enqueue(() => ctx.respond("_Context compacted_", false), "auto-compact end");
+				}
+			}
+
 			// Retry loop with per-call timeout and exponential backoff for rate-limit / transient errors
 			const LLM_TIMEOUT_MS = (Number(process.env.IRIS_LLM_TIMEOUT_SECS) || 90) * 1000;
 			const MAX_RETRIES = Number(process.env.IRIS_LLM_MAX_RETRIES) || 3;
