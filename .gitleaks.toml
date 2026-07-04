@@ -1,0 +1,17 @@
+# Gitleaks config — extends the default ruleset.
+# CI scans the full git history on every PR (see .github/workflows/ci.yml).
+
+[extend]
+useDefault = true
+
+# Documentation placeholders that trip the generic-api-key rule.
+# These appear in README revisions on archived branches (dev/old-main):
+# - two synthetic "claim token" examples (a 16-hex-char unit repeated 4x)
+# - a bare JWT header followed by a literal "..." (no payload, no signature)
+[[allowlists]]
+description = "Documentation placeholder tokens (not real secrets)"
+regexes = [
+	'''a3f9c2e1b8d7f4a3''',
+	'''b7e4d1f2a9c3e8b7''',
+	'''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.\.\.''',
+]
