@@ -7,16 +7,22 @@ description: Configure how Iris behaves per Slack channel — from mention-only 
 
 How Iris behaves in a Slack channel is configured per channel in
 `<workspace>/data/channels.json`. Keys are channel IDs; prefix wildcards like `D*`
-are supported.
+are supported. An exact channel ID always wins over wildcards; when several
+wildcards match, the longest prefix wins (e.g. `DA*` beats `D*`).
 
 | Mode | Behavior |
 |---|---|
 | `dm` | Default. Responds in DMs; channels need an `@iris` mention |
 | `admin` | Like `dm`, plus `stop` / `compact` / `reset` control commands |
 | `thread` | Only responds inside registered session threads (sessions created via the API) |
-| `interactive-thread` | Top-level `@iris` mention opens a session; replies in that thread continue it without further mentions |
+| `interactive-thread` | A top-level message opens a session; replies in that thread continue it without further mentions |
 | `leads` | Every top-level message triggers Iris — no mention needed |
-| `passthrough` | Messages are forwarded to an external HTTP endpoint; the reply is posted back. Iris's LLM never runs |
+| `passthrough` | Every message is forwarded to an external HTTP endpoint; the reply is posted back. Iris's LLM never runs |
+
+`requireMentionForTopLevel` (per channel entry) gates what a *top-level* channel
+message does in `interactive-thread` and `passthrough` channels: when set, only
+an `@iris` mention opens a session / gets forwarded, and plain top-level messages
+are logged but otherwise ignored.
 
 ```json
 {
@@ -34,8 +40,11 @@ are supported.
 
 ## Passthrough configuration
 
-Passthrough channels forward every message to `url` as a JSON POST and post the
-endpoint's reply back into the thread.
+Passthrough channels forward every message — top-level channel messages,
+thread replies, `@iris` mentions, and DMs — to `url` as a JSON POST and post the
+endpoint's reply back into the thread. Nothing is interpreted by Iris herself:
+even `stop` / `compact` / `reset` are forwarded verbatim, and scheduled events
+cannot target a passthrough channel.
 
 - **`payload`** — a JSON template for the request body. String values may use
   placeholders, substituted recursively: `{{text}}`, `{{user_id}}`, `{{user_name}}`,
