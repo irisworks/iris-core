@@ -385,6 +385,55 @@ export class SlackBot {
 		return this.resolveChannelConfig(channelId)?.requireMentionForTopLevel ?? false;
 	}
 
+	/** Whether the (lowercased, trimmed) text is one of the admin control commands. */
+	private static isAdminCommand(text: string): text is "stop" | "compact" | "reset" {
+		return text === "stop" || text === "compact" || text === "reset";
+	}
+
+	/** Execute an admin control command. Callers must have verified the channel is in "admin" mode. */
+	private runAdminCommand(channelId: string, cmd: "stop" | "compact" | "reset"): void {
+		if (cmd === "stop") {
+			if (this.handler.isRunning(channelId)) {
+				this.handler.handleStop(channelId, this); // Don't await, don't queue
+			} else {
+				this.postMessage(channelId, "_Nothing running_");
+			}
+		} else if (cmd === "compact") {
+			this.handler.handleCompact(channelId, this);
+		} else {
+			this.handler.handleReset(channelId, this);
+		}
+	}
+
+	/**
+	 * Route a message into a session: rekey the event to SESSION-<id>, register the
+	 * Slack route so replies post back into the originating thread, mirror the user
+	 * message into the session directory, and enqueue the run (bounded queue).
+	 * Shared by the app_mention and message paths for thread/interactive-thread modes.
+	 */
+	private dispatchToSession(slackEvent: SlackEvent, realChannel: string, threadTs: string, sessionId: string): void {
+		const sessionChannel = `SESSION-${sessionId}`;
+		this.sessionRoutes.set(sessionChannel, { channel: realChannel, threadTs });
+		const user = this.users.get(slackEvent.user);
+		this.logToFile(sessionChannel, {
+			date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
+			ts: slackEvent.ts,
+			user: slackEvent.user,
+			userName: user?.userName,
+			displayName: user?.displayName,
+			text: slackEvent.text,
+			attachments: slackEvent.attachments || [],
+			isBot: false,
+		});
+		slackEvent.channel = sessionChannel;
+		const queue = this.getQueue(sessionChannel);
+		if (queue.size() >= 5) {
+			this.postInThread(realChannel, threadTs, "_Too many messages queued. Please wait._");
+		} else {
+			queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+		}
+	}
+
 	// ==========================================================================
 	// Session message injection (used by API POST /sessions/:id/message)
 	// ==========================================================================
@@ -693,436 +742,267 @@ export class SlackBot {
 	private setupEventHandlers(): void {
 		// Channel @mentions
 		this.socketClient.on("app_mention", ({ event, ack }) => {
-			const e = event as {
-				text: string;
-				channel: string;
-				user: string;
-				ts: string;
-				thread_ts?: string;
-				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
+			// Every exit path must ack or Slack redelivers the envelope; the finally
+			// below guarantees exactly one ack even if the handler throws.
+			let acked = false;
+			const ackOnce = () => {
+				if (!acked) {
+					acked = true;
+					void ack();
+				}
 			};
+			try {
+				const e = event as {
+					text: string;
+					channel: string;
+					user: string;
+					ts: string;
+					thread_ts?: string;
+					files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
+				};
 
-			// Skip DMs (handled by message event)
-			if (e.channel.startsWith("D")) {
-				ack();
-				return;
-			}
+				// Skip DMs (handled by message event)
+				if (e.channel.startsWith("D")) return;
 
-			const slackEvent: SlackEvent = {
-				type: "mention",
-				channel: e.channel,
-				ts: e.ts,
-				user: e.user,
-				text: e.text.replace(/<@[A-Z0-9]+>/gi, "").trim(),
-				files: e.files,
-			};
+				const slackEvent: SlackEvent = {
+					type: "mention",
+					channel: e.channel,
+					ts: e.ts,
+					user: e.user,
+					text: e.text.replace(/<@[A-Z0-9]+>/gi, "").trim(),
+					files: e.files,
+				};
 
-			// SYNC: Log to log.jsonl (ALWAYS, even for old messages)
-			// Also downloads attachments in background and stores local paths
-			slackEvent.attachments = this.logUserMessage(slackEvent);
+				// SYNC: Log to log.jsonl (ALWAYS, even for old messages)
+				// Also downloads attachments in background and stores local paths
+				slackEvent.attachments = this.logUserMessage(slackEvent);
 
-			// Only trigger processing for messages AFTER startup (not replayed old messages)
-			if (this.startupTs && e.ts < this.startupTs) {
-				log.logInfo(
-					`[${e.channel}] Logged old message (pre-startup), not triggering: ${slackEvent.text.substring(0, 30)}`,
-				);
-				ack();
-				return;
-			}
-
-			// Only respond to allowed channels (if filter is configured)
-			if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) {
-				ack();
-				return;
-			}
-
-			const channelMode = this.getChannelMode(e.channel);
-
-			// Check for admin commands — only allowed in "admin" mode channels
-			const cmdText = slackEvent.text.toLowerCase().trim();
-			if (cmdText === "stop" || cmdText === "compact" || cmdText === "reset") {
-				if (channelMode !== "admin") {
-					// Silently ignore admin commands in thread/dm channels
-					ack();
+				// Only trigger processing for messages AFTER startup (not replayed old messages)
+				if (this.startupTs && e.ts < this.startupTs) {
+					log.logInfo(
+						`[${e.channel}] Logged old message (pre-startup), not triggering: ${slackEvent.text.substring(0, 30)}`,
+					);
 					return;
 				}
-				if (cmdText === "stop") {
-					if (this.handler.isRunning(e.channel)) {
-						this.handler.handleStop(e.channel, this); // Don't await, don't queue
-					} else {
-						this.postMessage(e.channel, "_Nothing running_");
+
+				// Only respond to allowed channels (if filter is configured)
+				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) return;
+
+				const channelMode = this.getChannelMode(e.channel);
+
+				// Admin commands — executed in "admin" mode channels, silently swallowed elsewhere
+				const cmdText = slackEvent.text.toLowerCase().trim();
+				if (SlackBot.isAdminCommand(cmdText)) {
+					if (channelMode === "admin") this.runAdminCommand(e.channel, cmdText);
+					return;
+				}
+
+				// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs
+				if (channelMode === "passthrough") {
+					const ptConfig = this.getPassthroughConfig(e.channel);
+					if (!ptConfig) {
+						log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
+						return;
 					}
-					ack();
+					ackOnce();
+					this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts ?? e.ts, slackEvent.user, slackEvent.text, e.ts, true);
 					return;
 				}
-				if (cmdText === "compact") {
-					this.handler.handleCompact(e.channel, this);
-					ack();
+
+				// Thread-mode channels: only respond inside registered session threads;
+				// top-level messages and unrecognised threads are logged only.
+				if (channelMode === "thread") {
+					if (!e.thread_ts) return;
+					const session = findByThread(loadSessions(this.workingDir), e.channel, e.thread_ts);
+					if (!session) return;
+					this.dispatchToSession(slackEvent, e.channel, e.thread_ts, session.sessionId);
 					return;
 				}
-				if (cmdText === "reset") {
-					this.handler.handleReset(e.channel, this);
-					ack();
+
+				// Interactive-thread mode: top-level @mention creates a session;
+				// subsequent replies in the same thread continue it without needing @mention.
+				// A reply in an unrecognised thread creates a session anchored to that thread.
+				if (channelMode === "interactive-thread") {
+					const threadTs = e.thread_ts ?? e.ts; // top-level: ts becomes the thread anchor
+					const session =
+						findByThread(loadSessions(this.workingDir), e.channel, threadTs) ??
+						createSession(this.workingDir, { originChannel: e.channel, originThreadTs: threadTs });
+					this.dispatchToSession(slackEvent, e.channel, threadTs, session.sessionId);
 					return;
 				}
-			}
 
-			// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs
-			if (channelMode === "passthrough") {
-				const ptConfig = this.getPassthroughConfig(e.channel);
-				if (!ptConfig) {
-					log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
-					ack();
-					return;
-				}
-				ack();
-				this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts ?? e.ts, slackEvent.user, slackEvent.text, e.ts, true);
-				return;
-			}
-
-			// Thread-mode channels: only respond inside registered session threads
-			if (channelMode === "thread") {
-				if (!e.thread_ts) {
-					// Top-level message in a thread channel — log only, no LLM run
-					ack();
-					return;
-				}
-				const sessions = loadSessions(this.workingDir);
-				const session = findByThread(sessions, e.channel, e.thread_ts);
-				if (!session) {
-					// Unrecognised thread — log only, no response
-					ack();
-					return;
-				}
-				// Rekey to SESSION-<id> and store the Slack route for postMessage routing
-				const sessionChannel = `SESSION-${session.sessionId}`;
-				this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
-				// Also log user message to the session directory
-				const user = this.users.get(slackEvent.user);
-				this.logToFile(sessionChannel, {
-					date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
-					ts: slackEvent.ts,
-					user: slackEvent.user,
-					userName: user?.userName,
-					displayName: user?.displayName,
-					text: slackEvent.text,
-					attachments: slackEvent.attachments || [],
-					isBot: false,
-				});
-				slackEvent.channel = sessionChannel;
-			}
-
-			// Interactive-thread mode: top-level @mention creates a session;
-			// subsequent replies in the same thread continue it without needing @mention.
-			if (channelMode === "interactive-thread") {
-				const sessions = loadSessions(this.workingDir);
-				const threadTs = e.thread_ts ?? e.ts; // top-level: ts becomes the thread anchor
-
-				let session = findByThread(sessions, e.channel, threadTs);
-
-				if (!session) {
-					if (e.thread_ts) {
-						// Reply in an unrecognised thread — create a session anchored to the thread
-						session = createSession(this.workingDir, {
-							originChannel: e.channel,
-							originThreadTs: e.thread_ts,
-						});
-					} else {
-						// Top-level @mention — create a new session anchored to this message's ts
-						session = createSession(this.workingDir, {
-							originChannel: e.channel,
-							originThreadTs: e.ts,
-						});
-					}
-				}
-
-				const sessionChannel = `SESSION-${session.sessionId}`;
-				this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs });
-				const user = this.users.get(slackEvent.user);
-				this.logToFile(sessionChannel, {
-					date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
-					ts: slackEvent.ts,
-					user: slackEvent.user,
-					userName: user?.userName,
-					displayName: user?.displayName,
-					text: slackEvent.text,
-					attachments: slackEvent.attachments || [],
-					isBot: false,
-				});
-				slackEvent.channel = sessionChannel;
-			}
-
-			// dm/admin mode: queue normally. Also handles rekeyed SESSION- events.
-			const queue = this.getQueue(slackEvent.channel);
-			if (queue.size() >= 5) {
-				if (slackEvent.channel.startsWith("SESSION-")) {
-					const route = this.sessionRoutes.get(slackEvent.channel);
-					if (route) this.postInThread(route.channel, route.threadTs, "_Too many messages queued. Please wait._");
+				// dm/admin/leads: queue an LLM run in the channel context
+				const queue = this.getQueue(e.channel);
+				if (queue.size() >= 5) {
+					this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
 				} else {
-					this.postMessage(slackEvent.channel, "_Too many messages queued. Say `stop` to cancel._");
+					queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
 				}
-			} else {
-				queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+			} catch (err) {
+				log.logWarning("[app_mention] handler error", err instanceof Error ? err.message : String(err));
+			} finally {
+				ackOnce();
 			}
-
-			ack();
 		});
 
 		// All messages (for logging) + DMs (for triggering)
 		this.socketClient.on("message", ({ event, ack }) => {
-			const e = event as {
-				text?: string;
-				channel: string;
-				user?: string;
-				ts: string;
-				thread_ts?: string;
-				channel_type?: string;
-				subtype?: string;
-				bot_id?: string;
-				files?: Array<{ name: string; url_private_download?: string; url_private?: string; filetype?: string; plain_text?: string; preview_plain_text?: string; subject?: string }>;
-				blocks?: Array<{ type: string; text?: { type: string; text: string }; elements?: any[] }>;
+			// Every exit path must ack or Slack redelivers the envelope; the finally
+			// below guarantees exactly one ack even if the handler throws.
+			let acked = false;
+			const ackOnce = () => {
+				if (!acked) {
+					acked = true;
+					void ack();
+				}
 			};
+			try {
+				const e = event as {
+					text?: string;
+					channel: string;
+					user?: string;
+					ts: string;
+					thread_ts?: string;
+					channel_type?: string;
+					subtype?: string;
+					bot_id?: string;
+					files?: Array<{ name: string; url_private_download?: string; url_private?: string; filetype?: string; plain_text?: string; preview_plain_text?: string; subject?: string }>;
+					blocks?: Array<{ type: string; text?: { type: string; text: string }; elements?: any[] }>;
+				};
 
-			// Skip bot messages, edits, etc.
-			// Exception: in leads mode, allow all bot/integration messages (n8n, insta, email, etc.)
-			// Only skip own bot messages to avoid loops.
-			const isEmailLead = !!e.bot_id && !e.user &&
-				Array.isArray((e as any).files) &&
-				(e as any).files.some((f: any) => f.filetype === "email");
+				// Skip bot messages, edits, etc.
+				// Exception: in leads mode, allow all bot/integration messages (n8n, insta, email, etc.)
+				// Only skip own bot messages to avoid loops.
+				const isEmailLead = !!e.bot_id && !e.user &&
+					Array.isArray((e as any).files) &&
+					(e as any).files.some((f: any) => f.filetype === "email");
 
-			const channelModeForFilter = this.getChannelMode(e.channel);
-			const isLeadsChannel = channelModeForFilter === "leads";
-
-			// Subtype filter — allow bot_message in leads channels (workflow/n8n/insta/email bots)
-			if (e.subtype !== undefined && e.subtype !== "file_share") {
-				if (!(isLeadsChannel && e.subtype === "bot_message")) {
-					ack();
-					return;
-				}
-			}
-
-			// Bot/user filter — in leads channels allow all integrations, only skip our own messages
-			if (isLeadsChannel) {
-				if (e.user === this.botUserId || e.bot_id === this.botId) {
-					ack();
-					return;
-				}
-			} else {
-				// In interactive-thread mode, allow bot messages ONLY if they're top-level (thread anchors)
-				// This lets skills post thread openers that trigger session creation
-				const isInteractiveThread = channelModeForFilter === "interactive-thread";
-				const isTopLevel = !e.thread_ts;
-				const isBotMessage = e.bot_id || !e.user || e.user === this.botUserId;
-
-				if (isBotMessage && !(isInteractiveThread && isTopLevel)) {
-					// Skip bot messages except for top-level in interactive-thread channels
-					ack();
-					return;
-				}
-			}
-
-			if (!e.text && (!e.files || e.files.length === 0)) {
-				ack();
-				return;
-			}
-
-			const isDM = e.channel_type === "im";
-			const isBotMention = e.text?.includes(`<@${this.botUserId}>`);
-			// TEMP DEBUG: log channel_type so we can see what Slack sends for DMs
-			if (e.channel.startsWith("D")) {
-				log.logInfo(`[debug] DM channel=${e.channel} channel_type=${JSON.stringify(e.channel_type)} isDM=${isDM} text=${(e.text||"").substring(0,20)}`);
-			}
-
-			// Skip channel @mentions - already handled by app_mention event
-			if (!isDM && isBotMention) {
-				ack();
-				return;
-			}
-
-			const slackEvent: SlackEvent = {
-				type: isDM ? "dm" : "mention",
-				channel: e.channel,
-				ts: e.ts,
-				user: e.user || e.bot_id || "integration",
-				text: (() => {
-					// For email leads, extract plain_text from the email file
-					if (isEmailLead) {
-						const emailFile = (e as any).files?.find((f: any) => f.filetype === "email");
-						const subject = emailFile?.subject ? `Subject: ${emailFile.subject}\n` : "";
-						const body = emailFile?.plain_text || emailFile?.preview_plain_text || "";
-						return `${subject}${body}`.trim();
-					}
-					// For block-based messages (insta-bot, n8n) — blocks have the full content, e.text is a short fallback
-					if (isLeadsChannel && e.blocks && e.blocks.length > 0) {
-						const blockText = e.blocks
-							.map((b: any) => b.text?.text || b.elements?.map((el: any) => el.text || "").join("") || "")
-							.join("\n")
-							.trim();
-						if (blockText && blockText.length > (e.text || "").length) {
-							return blockText.replace(/<@[A-Z0-9]+>/gi, "").trim();
-						}
-					}
-					// For all other messages — use text as-is
-					return (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim();
-				})(),
-				files: e.files,
-			};
-
-			// SYNC: Log to log.jsonl (ALL messages - channel chatter and DMs)
-			// Also downloads attachments in background and stores local paths
-			slackEvent.attachments = this.logUserMessage(slackEvent);
-
-			// Only trigger processing for messages AFTER startup (not replayed old messages)
-			// Exception: "leads" mode channels process missed messages on restart
-			const channelMode = this.getChannelMode(e.channel);
-			if (this.startupTs && e.ts < this.startupTs && channelMode !== "leads") {
-				log.logInfo(`[${e.channel}] Skipping old message (pre-startup): ${slackEvent.text.substring(0, 30)}`);
-				ack();
-				return;
-			}
-
-			// Only respond to allowed channels (if filter is configured)
-			if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) {
-				ack();
-				return;
-			}
-
-			// Leads mode: top-level message (no thread) fires LLM without @mention needed
-			if (!isDM && !isBotMention && !e.thread_ts) {
 				const channelMode = this.getChannelMode(e.channel);
-				if (channelMode === "leads") {
+				const isLeadsChannel = channelMode === "leads";
+				const isBotMessage = !!e.bot_id || !e.user || e.user === this.botUserId;
+
+				// Subtype filter — allow bot_message in leads channels (workflow/n8n/insta/email bots)
+				if (e.subtype !== undefined && e.subtype !== "file_share") {
+					if (!(isLeadsChannel && e.subtype === "bot_message")) return;
+				}
+
+				// Bot/user filter — in leads channels allow all integrations, only skip our own messages
+				if (isLeadsChannel) {
+					if (e.user === this.botUserId || e.bot_id === this.botId) return;
+				} else {
+					// In interactive-thread mode, allow bot messages ONLY if they're top-level (thread anchors).
+					// This lets skills post thread openers; the session is created when a human replies.
+					if (isBotMessage && !(channelMode === "interactive-thread" && !e.thread_ts)) return;
+				}
+
+				if (!e.text && (!e.files || e.files.length === 0)) return;
+
+				const isDM = e.channel_type === "im";
+				const isBotMention = e.text?.includes(`<@${this.botUserId}>`) ?? false;
+
+				// Skip channel @mentions - already handled by app_mention event
+				if (!isDM && isBotMention) return;
+
+				const slackEvent: SlackEvent = {
+					type: isDM ? "dm" : "mention",
+					channel: e.channel,
+					ts: e.ts,
+					user: e.user || e.bot_id || "integration",
+					text: (() => {
+						// For email leads, extract plain_text from the email file
+						if (isEmailLead) {
+							const emailFile = (e as any).files?.find((f: any) => f.filetype === "email");
+							const subject = emailFile?.subject ? `Subject: ${emailFile.subject}\n` : "";
+							const body = emailFile?.plain_text || emailFile?.preview_plain_text || "";
+							return `${subject}${body}`.trim();
+						}
+						// For block-based messages (insta-bot, n8n) — blocks have the full content, e.text is a short fallback
+						if (isLeadsChannel && e.blocks && e.blocks.length > 0) {
+							const blockText = e.blocks
+								.map((b: any) => b.text?.text || b.elements?.map((el: any) => el.text || "").join("") || "")
+								.join("\n")
+								.trim();
+							if (blockText && blockText.length > (e.text || "").length) {
+								return blockText.replace(/<@[A-Z0-9]+>/gi, "").trim();
+							}
+						}
+						// For all other messages — use text as-is
+						return (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim();
+					})(),
+					files: e.files,
+				};
+
+				// SYNC: Log to log.jsonl (ALL messages - channel chatter and DMs)
+				// Also downloads attachments in background and stores local paths
+				slackEvent.attachments = this.logUserMessage(slackEvent);
+
+				// Only trigger processing for messages AFTER startup (not replayed old messages)
+				// Exception: "leads" mode channels process missed messages on restart
+				if (this.startupTs && e.ts < this.startupTs && channelMode !== "leads") {
+					log.logInfo(`[${e.channel}] Skipping old message (pre-startup): ${slackEvent.text.substring(0, 30)}`);
+					return;
+				}
+
+				// Only respond to allowed channels (if filter is configured)
+				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) return;
+
+				// Leads mode: top-level message (no thread) fires LLM without @mention needed
+				if (!isDM && !e.thread_ts && channelMode === "leads") {
 					const queue = this.getQueue(e.channel);
 					queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
-					ack();
 					return;
 				}
-			}
 
-			// Session thread routing for thread-mode channels (non-DM, non-@mention)
-			if (!isDM && !isBotMention && e.thread_ts) {
-				const channelMode = this.getChannelMode(e.channel);
-				if (channelMode === "thread") {
-					const sessions = loadSessions(this.workingDir);
-					const session = findByThread(sessions, e.channel, e.thread_ts);
-					if (session) {
-						const sessionChannel = `SESSION-${session.sessionId}`;
-						this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
-						const user = this.users.get(slackEvent.user);
-						this.logToFile(sessionChannel, {
-							date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
-							ts: slackEvent.ts,
-							user: slackEvent.user,
-							userName: user?.userName,
-							displayName: user?.displayName,
-							text: slackEvent.text,
-							attachments: slackEvent.attachments || [],
-							isBot: false,
-						});
-						slackEvent.channel = sessionChannel;
-						const sessionQueue = this.getQueue(sessionChannel);
-						if (sessionQueue.size() >= 5) {
-							this.postInThread(e.channel, e.thread_ts, "_Too many messages queued. Please wait._");
-						} else {
-							sessionQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+				// Session thread routing for thread-mode channels (non-DM, non-@mention)
+				if (!isDM && e.thread_ts) {
+					// Thread mode: only registered session threads respond; others are logged only
+					if (channelMode === "thread") {
+						const session = findByThread(loadSessions(this.workingDir), e.channel, e.thread_ts);
+						if (session) {
+							this.dispatchToSession(slackEvent, e.channel, e.thread_ts, session.sessionId);
+							return;
 						}
-						ack();
+					}
+					// Interactive-thread: replies continue their session; a reply in an
+					// unrecognised thread creates a session anchored to that thread
+					if (channelMode === "interactive-thread") {
+						const session =
+							findByThread(loadSessions(this.workingDir), e.channel, e.thread_ts) ??
+							createSession(this.workingDir, { originChannel: e.channel, originThreadTs: e.thread_ts });
+						this.dispatchToSession(slackEvent, e.channel, e.thread_ts, session.sessionId);
 						return;
 					}
-				}
-				if (channelMode === "interactive-thread") {
-					const sessions = loadSessions(this.workingDir);
-					let session = findByThread(sessions, e.channel, e.thread_ts);
-
-					if (!session) {
-						if (!e.thread_ts) {
-							// Top-level non-mention message — only create session if mention not required
-							if (this.requiresMentionForTopLevel(e.channel)) {
-								// requireMentionForTopLevel: ignore, @mention via app_mention will create the session
-								ack();
-								return;
-							}
+					if (channelMode === "passthrough") {
+						const ptConfig = this.getPassthroughConfig(e.channel);
+						if (ptConfig) {
+							ackOnce();
+							this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts, slackEvent.user, slackEvent.text, e.ts, false);
+							return;
 						}
-						// Unknown thread — create a session anchored to it
-						session = createSession(this.workingDir, {
-							originChannel: e.channel,
-							originThreadTs: e.thread_ts ?? e.ts,
-						});
+					}
+				}
+
+				// Only trigger handler for DMs
+				if (isDM) {
+					// Admin commands — executed in "admin" mode DMs, silently swallowed elsewhere
+					const cmdText = slackEvent.text.toLowerCase().trim();
+					if (SlackBot.isAdminCommand(cmdText)) {
+						if (channelMode === "admin") this.runAdminCommand(e.channel, cmdText);
+						return;
 					}
 
-					const sessionChannel = `SESSION-${session.sessionId}`;
-					this.sessionRoutes.set(sessionChannel, { channel: e.channel, threadTs: e.thread_ts });
-					const user = this.users.get(slackEvent.user);
-					this.logToFile(sessionChannel, {
-						date: new Date(parseFloat(slackEvent.ts) * 1000).toISOString(),
-						ts: slackEvent.ts,
-						user: slackEvent.user,
-						userName: user?.userName,
-						displayName: user?.displayName,
-						text: slackEvent.text,
-						attachments: slackEvent.attachments || [],
-						isBot: false,
-					});
-					slackEvent.channel = sessionChannel;
-					const sessionQueue = this.getQueue(sessionChannel);
-					if (sessionQueue.size() >= 5) {
-						this.postInThread(e.channel, e.thread_ts, "_Too many messages queued. Please wait._");
+					const dmQueue = this.getQueue(e.channel);
+					if (dmQueue.size() >= 5) {
+						this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
 					} else {
-						sessionQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
-					}
-					ack();
-					return;
-				}
-				if (channelMode === "passthrough") {
-					const ptConfig = this.getPassthroughConfig(e.channel);
-					if (ptConfig) {
-						ack();
-						this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts, slackEvent.user, slackEvent.text, e.ts, false);
-						return;
+						dmQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
 					}
 				}
+			} catch (err) {
+				log.logWarning("[message] handler error", err instanceof Error ? err.message : String(err));
+			} finally {
+				ackOnce();
 			}
-
-			// Only trigger handler for DMs
-			if (isDM) {
-				const channelMode = this.getChannelMode(e.channel);
-				// Check for stop/compact/reset commands — only allowed in "admin" mode
-				const dmCmdText = slackEvent.text.toLowerCase().trim();
-				if (dmCmdText === "stop" || dmCmdText === "compact" || dmCmdText === "reset") {
-					if (channelMode === "admin") {
-						if (dmCmdText === "stop") {
-							if (this.handler.isRunning(e.channel)) {
-								this.handler.handleStop(e.channel, this); // Don't await, don't queue
-							} else {
-								this.postMessage(e.channel, "_Nothing running_");
-							}
-							ack();
-							return;
-						}
-						if (dmCmdText === "compact") {
-							this.handler.handleCompact(e.channel, this);
-							ack();
-							return;
-						}
-						if (dmCmdText === "reset") {
-							this.handler.handleReset(e.channel, this);
-							ack();
-							return;
-						}
-					}
-					// Silently ignore admin commands in dm/thread mode
-					ack();
-					return;
-				}
-
-				const dmQueue = this.getQueue(e.channel);
-				if (dmQueue.size() >= 5) {
-					this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
-				} else {
-					dmQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
-				}
-			}
-
-			ack();
 		});
 	}
 
