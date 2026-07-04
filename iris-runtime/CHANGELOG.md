@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Slack channel-mode consistency pass:
+  - `passthrough` channels now forward **every** message shape. Top-level channel messages without an `@iris` mention were silently dropped, and DMs on a passthrough-configured channel ID ran the LLM — both contradicting "forwarded to the endpoint, LLM never runs". Top-level forwarding honours `requireMentionForTopLevel`.
+  - `@iris stop` / `compact` / `reset` in a passthrough channel are forwarded verbatim instead of being swallowed by the admin-command filter.
+  - Wildcard entries in `channels.json` (e.g. `"D*"`) now resolve *all* settings — passthrough `url`/`payload`/`secretName`, `requireMentionForTopLevel`, and the leads missed-message replay — not just the mode. When multiple wildcards match, the longest prefix wins (previously whichever came first in the file).
+  - `interactive-thread`: a top-level human message without a mention now opens a session unless `requireMentionForTopLevel` is set. The flag was previously unreachable dead code, so every interactive-thread channel behaved as mention-gated regardless of configuration.
+  - Interrupted-run resume at startup no longer re-dispatches LLM runs in `thread` / `interactive-thread` / `passthrough` channels. Their channel logs never contain in-channel bot replies, so every conversation looked "interrupted" and each restart started a spurious top-level LLM run there.
+  - Scheduled events targeting a `passthrough` channel are refused with a warning instead of running the LLM into the relay channel.
+  - Leads dispatch is bounded to the same 5-message queue as every other dispatch path (overflow logs a warning; the message text remains in `log.jsonl`).
+  - Slack envelopes are now acked exactly once on every handler exit, including handler errors — an exception mid-handler previously left the envelope unacked, so Slack redelivered it and the failure repeated.
+  - `channels.json` entries with an unknown `mode` are skipped with a warning instead of half-applying (`requireMentionForTopLevel` used to take effect even when the mode string was invalid).
+
+### UPGRADING
+
+- `interactive-thread` channels that relied on top-level non-mention messages being ignored (the previous, unintended behaviour) must now set `"requireMentionForTopLevel": true` in `data/channels.json`.
+- If overlapping wildcard patterns exist in `channels.json` (e.g. `"D*"` and `"DA*"`), the longest matching prefix now wins regardless of file order — review any installs that depended on entry order.
+
 ## [0.90.0] - 2026-07-03
 
 Consolidation baseline: generic features upstreamed from install forks, plus repo
