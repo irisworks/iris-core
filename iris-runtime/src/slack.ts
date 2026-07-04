@@ -973,6 +973,17 @@ export class SlackBot {
 					return;
 				}
 
+				// Interactive-thread mode: a top-level human message opens a session, unless
+				// the channel requires an @mention for top-level messages (in which case the
+				// session is opened by the mention via app_mention). Bot-posted thread openers
+				// are logged only — their session is created when the first human reply arrives.
+				if (!isDM && !e.thread_ts && channelMode === "interactive-thread") {
+					if (isBotMessage || this.requiresMentionForTopLevel(e.channel)) return;
+					const session = createSession(this.workingDir, { originChannel: e.channel, originThreadTs: e.ts });
+					this.dispatchToSession(slackEvent, e.channel, e.ts, session.sessionId);
+					return;
+				}
+
 				// Session thread routing for thread-mode channels (non-DM, non-@mention)
 				if (!isDM && e.thread_ts) {
 					// Thread mode: only registered session threads respond; others are logged only
