@@ -790,14 +790,9 @@ export class SlackBot {
 
 				const channelMode = this.getChannelMode(e.channel);
 
-				// Admin commands — executed in "admin" mode channels, silently swallowed elsewhere
-				const cmdText = slackEvent.text.toLowerCase().trim();
-				if (SlackBot.isAdminCommand(cmdText)) {
-					if (channelMode === "admin") this.runAdminCommand(e.channel, cmdText);
-					return;
-				}
-
-				// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs
+				// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs.
+				// Checked before the admin-command filter so every message (including "stop"/"reset",
+				// which are perfectly ordinary things to say to an external bot) is forwarded verbatim.
 				if (channelMode === "passthrough") {
 					const ptConfig = this.getPassthroughConfig(e.channel);
 					if (!ptConfig) {
@@ -806,6 +801,13 @@ export class SlackBot {
 					}
 					ackOnce();
 					this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts ?? e.ts, slackEvent.user, slackEvent.text, e.ts, true);
+					return;
+				}
+
+				// Admin commands — executed in "admin" mode channels, silently swallowed elsewhere
+				const cmdText = slackEvent.text.toLowerCase().trim();
+				if (SlackBot.isAdminCommand(cmdText)) {
+					if (channelMode === "admin") this.runAdminCommand(e.channel, cmdText);
 					return;
 				}
 
@@ -946,6 +948,24 @@ export class SlackBot {
 				// Only respond to allowed channels (if filter is configured)
 				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) return;
 
+				// Passthrough mode: every message shape — DMs, top-level channel messages and
+				// thread replies — is forwarded to the external endpoint; Iris's LLM never runs.
+				// (@mentions arrive via app_mention, which forwards them itself.)
+				if (channelMode === "passthrough") {
+					const ptConfig = this.getPassthroughConfig(e.channel);
+					if (!ptConfig) {
+						log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
+						return;
+					}
+					// Top-level channel messages honour requireMentionForTopLevel
+					if (!isDM && !e.thread_ts && this.requiresMentionForTopLevel(e.channel)) return;
+					ackOnce();
+					// Error notice for DMs (a direct conversation going silent is confusing);
+					// channel traffic keeps the pre-existing quiet-failure behaviour.
+					this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts ?? e.ts, slackEvent.user, slackEvent.text, e.ts, isDM);
+					return;
+				}
+
 				// Leads mode: top-level message (no thread) fires LLM without @mention needed
 				if (!isDM && !e.thread_ts && channelMode === "leads") {
 					const queue = this.getQueue(e.channel);
@@ -971,14 +991,6 @@ export class SlackBot {
 							createSession(this.workingDir, { originChannel: e.channel, originThreadTs: e.thread_ts });
 						this.dispatchToSession(slackEvent, e.channel, e.thread_ts, session.sessionId);
 						return;
-					}
-					if (channelMode === "passthrough") {
-						const ptConfig = this.getPassthroughConfig(e.channel);
-						if (ptConfig) {
-							ackOnce();
-							this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts, slackEvent.user, slackEvent.text, e.ts, false);
-							return;
-						}
 					}
 				}
 
