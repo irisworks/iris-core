@@ -716,6 +716,12 @@ export class SlackBot {
 	 * Returns true if enqueued, false if queue is full (max 5).
 	 */
 	enqueueEvent(event: SlackEvent): boolean {
+		// Passthrough channels never run the LLM — a scheduled event targeting one
+		// is a misconfiguration, and its output would pollute the relay channel.
+		if (this.getChannelMode(event.channel) === "passthrough") {
+			log.logWarning(`Refusing event for passthrough channel ${event.channel}: ${event.text.substring(0, 50)}`);
+			return false;
+		}
 		const queue = this.getQueue(event.channel);
 		if (queue.size() >= 5) {
 			log.logWarning(`Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
@@ -969,7 +975,13 @@ export class SlackBot {
 				// Leads mode: top-level message (no thread) fires LLM without @mention needed
 				if (!isDM && !e.thread_ts && channelMode === "leads") {
 					const queue = this.getQueue(e.channel);
-					queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+					if (queue.size() >= 5) {
+						// Don't post a notice into a leads channel (often an external-facing feed,
+						// and `stop` doesn't work here) — the message is already in log.jsonl.
+						log.logWarning(`[${e.channel}] leads queue full, not dispatching: ${slackEvent.text.substring(0, 50)}`);
+					} else {
+						queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+					}
 					return;
 				}
 
@@ -1153,6 +1165,14 @@ export class SlackBot {
 	 */
 	private async resumeInterruptedRuns(): Promise<void> {
 		for (const [channelId] of this.channels) {
+			// Only dm/admin/leads channels run the LLM in channel context and log its
+			// replies to the channel's log.jsonl. Session-mode channels log replies under
+			// SESSION-<id>/ and passthrough channels never log bot replies at all, so the
+			// placeholder heuristic below would see every conversation there as an
+			// interrupted run and start a spurious in-channel LLM run on each restart.
+			const mode = this.getChannelMode(channelId);
+			if (mode === "thread" || mode === "interactive-thread" || mode === "passthrough") continue;
+
 			const logPath = join(resolveChannelDir(this.workingDir, channelId), "log.jsonl");
 			if (!existsSync(logPath)) continue;
 
