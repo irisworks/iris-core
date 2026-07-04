@@ -27,6 +27,17 @@ interface PassthroughConfig {
 	replyPrefix?: string;
 }
 
+type ChannelMode = "dm" | "admin" | "thread" | "interactive-thread" | "leads" | "passthrough";
+
+const CHANNEL_MODES: ReadonlySet<string> = new Set(["dm", "admin", "thread", "interactive-thread", "leads", "passthrough"]);
+
+/** One resolved entry of data/channels.json (keyed by channel ID or prefix wildcard). */
+interface ChannelConfig {
+	mode: ChannelMode;
+	requireMentionForTopLevel: boolean;
+	passthrough?: PassthroughConfig;
+}
+
 /** Recursively substitute {{placeholders}} in string values of a JSON template. */
 function renderPayloadTemplate(node: unknown, vars: Record<string, string>): unknown {
 	if (typeof node === "string") return node.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? "");
@@ -194,11 +205,10 @@ export class SlackBot {
 	private queues = new Map<string, ChannelQueue>();
 	private allowedChannels = new Set<string>(); // If non-empty, only respond to these channel IDs
 
-	// Channel modes loaded from workingDir/data/channels.json
-	private channelModes = new Map<string, "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin">();
-	private channelPassthrough = new Map<string, PassthroughConfig>(); // channel -> passthrough config
+	// Channel behaviour loaded from workingDir/data/channels.json.
+	// Keyed by channel ID or prefix wildcard (e.g. "D*"); resolved via resolveChannelConfig().
+	private channelConfigs = new Map<string, ChannelConfig>();
 	private passthroughSecretCache = new Map<string, string>(); // secretName -> resolved value
-	private channelRequireMention = new Set<string>(); // channels where top-level messages require @mention
 
 	// SESSION-<id> → real Slack { channel, threadTs } for routing postMessage/updateMessage
 	private sessionRoutes = new Map<string, { channel: string; threadTs: string }>();
@@ -235,22 +245,29 @@ export class SlackBot {
 				{ mode: string; url?: string; requireMentionForTopLevel?: boolean; secretName?: string; payload?: unknown; replyPrefix?: string }
 			>;
 			for (const [id, config] of Object.entries(raw)) {
-				if (config.mode === "thread" || config.mode === "interactive-thread" || config.mode === "passthrough" || config.mode === "leads" || config.mode === "dm" || config.mode === "admin") {
-					this.channelModes.set(id, config.mode);
+				if (!CHANNEL_MODES.has(config.mode)) {
+					log.logWarning(`[channels] ${id}: unknown mode "${config.mode}" — entry ignored`);
+					continue;
 				}
-				if (config.mode === "passthrough" && config.url) {
-					this.channelPassthrough.set(id, {
-						url: config.url,
-						secretName: config.secretName,
-						payload: config.payload,
-						replyPrefix: config.replyPrefix,
-					});
+				const entry: ChannelConfig = {
+					mode: config.mode as ChannelMode,
+					requireMentionForTopLevel: config.requireMentionForTopLevel === true,
+				};
+				if (config.mode === "passthrough") {
+					if (config.url) {
+						entry.passthrough = {
+							url: config.url,
+							secretName: config.secretName,
+							payload: config.payload,
+							replyPrefix: config.replyPrefix,
+						};
+					} else {
+						log.logWarning(`[channels] ${id}: passthrough mode without url — messages will not be forwarded`);
+					}
 				}
-				if (config.requireMentionForTopLevel) {
-					this.channelRequireMention.add(id);
-				}
+				this.channelConfigs.set(id, entry);
 			}
-			log.logInfo(`[channels] Loaded ${this.channelModes.size} channel mode entries`);
+			log.logInfo(`[channels] Loaded ${this.channelConfigs.size} channel mode entries`);
 		} catch (err) {
 			log.logWarning("[channels] Failed to load channels.json", err instanceof Error ? err.message : String(err));
 		}
@@ -329,19 +346,43 @@ export class SlackBot {
 	}
 
 	/**
-	 * Get the configured mode for a channel.
-	 * Checks exact match first, then prefix wildcards (e.g. "D*").
-	 * Defaults to "dm" (non-admin unless explicitly configured).
+	 * Resolve the channels.json entry for a channel.
+	 * An exact ID match wins; otherwise the longest matching prefix wildcard
+	 * (e.g. "D*") wins, so more specific patterns take precedence regardless
+	 * of their order in channels.json.
 	 */
-	private getChannelMode(channelId: string): "thread" | "interactive-thread" | "passthrough" | "leads" | "dm" | "admin" {
-		const exact = this.channelModes.get(channelId);
+	private resolveChannelConfig(channelId: string): ChannelConfig | undefined {
+		const exact = this.channelConfigs.get(channelId);
 		if (exact) return exact;
-		for (const [pattern, mode] of this.channelModes) {
-			if (pattern.endsWith("*") && channelId.startsWith(pattern.slice(0, -1))) {
-				return mode;
+		let best: ChannelConfig | undefined;
+		let bestPrefixLen = -1;
+		for (const [pattern, config] of this.channelConfigs) {
+			if (!pattern.endsWith("*")) continue;
+			const prefix = pattern.slice(0, -1);
+			if (channelId.startsWith(prefix) && prefix.length > bestPrefixLen) {
+				best = config;
+				bestPrefixLen = prefix.length;
 			}
 		}
-		return "dm"; // default — non-admin unless explicitly configured
+		return best;
+	}
+
+	/**
+	 * Get the configured mode for a channel.
+	 * Defaults to "dm" (non-admin unless explicitly configured).
+	 */
+	private getChannelMode(channelId: string): ChannelMode {
+		return this.resolveChannelConfig(channelId)?.mode ?? "dm";
+	}
+
+	/** Passthrough endpoint config for a channel (wildcard-aware, like getChannelMode). */
+	private getPassthroughConfig(channelId: string): PassthroughConfig | undefined {
+		return this.resolveChannelConfig(channelId)?.passthrough;
+	}
+
+	/** Whether top-level messages in this channel require an @mention (wildcard-aware). */
+	private requiresMentionForTopLevel(channelId: string): boolean {
+		return this.resolveChannelConfig(channelId)?.requireMentionForTopLevel ?? false;
 	}
 
 	// ==========================================================================
@@ -728,7 +769,7 @@ export class SlackBot {
 
 			// Passthrough mode: forward directly to external endpoint, post raw reply — Iris LLM never runs
 			if (channelMode === "passthrough") {
-				const ptConfig = this.channelPassthrough.get(e.channel);
+				const ptConfig = this.getPassthroughConfig(e.channel);
 				if (!ptConfig) {
 					log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
 					ack();
@@ -933,7 +974,7 @@ export class SlackBot {
 
 			// Only trigger processing for messages AFTER startup (not replayed old messages)
 			// Exception: "leads" mode channels process missed messages on restart
-			const channelMode = this.channelModes.get(e.channel);
+			const channelMode = this.getChannelMode(e.channel);
 			if (this.startupTs && e.ts < this.startupTs && channelMode !== "leads") {
 				log.logInfo(`[${e.channel}] Skipping old message (pre-startup): ${slackEvent.text.substring(0, 30)}`);
 				ack();
@@ -995,7 +1036,7 @@ export class SlackBot {
 					if (!session) {
 						if (!e.thread_ts) {
 							// Top-level non-mention message — only create session if mention not required
-							if (this.channelRequireMention.has(e.channel)) {
+							if (this.requiresMentionForTopLevel(e.channel)) {
 								// requireMentionForTopLevel: ignore, @mention via app_mention will create the session
 								ack();
 								return;
@@ -1032,7 +1073,7 @@ export class SlackBot {
 					return;
 				}
 				if (channelMode === "passthrough") {
-					const ptConfig = this.channelPassthrough.get(e.channel);
+					const ptConfig = this.getPassthroughConfig(e.channel);
 					if (ptConfig) {
 						ack();
 						this.forwardToPassthrough(ptConfig, e.channel, e.thread_ts, slackEvent.user, slackEvent.text, e.ts, false);
