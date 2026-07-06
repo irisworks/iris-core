@@ -64,3 +64,13 @@ The endpoint's response is read as JSON; the first of `response`, `text`, or
 conversation containers created via the [internal API](sub-agents.md) or by a
 top-level mention in an interactive-thread channel. Session state lives on disk
 and survives restarts; routes are rebuilt from `sessions.json` at startup.
+
+## Channel workspace layout
+
+Real Telegram and Slack channels live two levels under the data root:
+`data/telegram/tg-<id>/` for Telegram chats and `data/slack/<id>/` for Slack
+channels. The workspace root is resolved from the explicit working directory
+passed through runner creation — not inferred from the channel directory's
+depth — so custom model providers (`models.json`), memory (`MEMORY.md`), and
+skills are discovered correctly for real conversations, exactly as they are for
+synthetic session channels.
