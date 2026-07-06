@@ -153,6 +153,12 @@ echo "IRIS_TELEGRAM_FORCE_RECLAIM=true" >> /iris/.env && sudo systemctl restart 
 Send the freshly printed token from the new account, then remove
 `IRIS_TELEGRAM_FORCE_RECLAIM` from `/iris/.env`.
 
+**Swapping bots:** the claim is scoped to the bot's identity. If you replace
+`TELEGRAM_BOT_TOKEN` with a token for a *different* bot, the old claim is cleared
+automatically on startup and a fresh claim token is printed — no
+`IRIS_TELEGRAM_FORCE_RECLAIM` needed. (Force-reclaim is only for transferring the
+*same* bot to a new owner.)
+
 **Bot commands:** `/reset` (clear history) · `/compact` (summarise context) ·
 `/stop` (abort a running response)
 

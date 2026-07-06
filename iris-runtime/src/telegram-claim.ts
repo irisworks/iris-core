@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { randomBytes } from "crypto";
 import { join } from "path";
+import * as log from "./log.js";
 
 // ============================================================================
 // Types
@@ -11,9 +12,14 @@ interface ClaimState {
 	chatId: number | null;
 	pendingToken: string | null;
 	tokenExpiresAt: string | null; // ISO timestamp
+	botId: number | null; // Telegram bot id this claim belongs to (from getMe())
 }
 
 const TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function emptyState(botId: number | null = null): ClaimState {
+	return { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null, botId };
+}
 
 // ============================================================================
 // TelegramClaimManager
@@ -32,21 +38,60 @@ export class TelegramClaimManager {
 
 	private load(): ClaimState {
 		if (!existsSync(this.filePath)) {
-			return { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null };
+			return emptyState();
 		}
 		try {
-			return JSON.parse(readFileSync(this.filePath, "utf-8")) as ClaimState;
-		} catch {
-			return { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null };
+			const parsed = JSON.parse(readFileSync(this.filePath, "utf-8")) as Partial<ClaimState>;
+			// botId is a newer field — older state files won't have it. Treat missing as
+			// "unknown identity" rather than "different identity" so we don't nuke an
+			// existing claim purely because of the upgrade.
+			return { ...emptyState(), ...parsed, botId: parsed.botId ?? null };
+		} catch (err) {
+			log.logWarning(
+				"[telegram] Failed to parse claim state file — starting unclaimed",
+				`${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return emptyState();
 		}
 	}
 
 	private save(): void {
-		writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
+		try {
+			writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
+		} catch (err) {
+			// In-memory state is still correct for this process; only persistence failed.
+			// Surface it loudly since a stuck claim state after a crash/restart is exactly
+			// the kind of silent failure that's confusing to debug later.
+			log.logWarning(
+				"[telegram] Failed to persist claim state — will retry on next change",
+				`${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
 	}
 
 	isClaimed(): boolean {
 		return this.state.claimed;
+	}
+
+	// Call once at startup with the bot id from getMe(). If the previously-persisted
+	// claim belongs to a *different* bot id (i.e. TELEGRAM_BOT_TOKEN was swapped for a
+	// different bot), the old claim is meaningless — clear it automatically instead of
+	// forcing the operator to figure out IRIS_TELEGRAM_FORCE_RECLAIM. Returns true if a
+	// stale claim was cleared.
+	syncBotIdentity(botId: number): boolean {
+		if (this.state.botId == null) {
+			// First time we've recorded an identity for this state file (fresh install,
+			// or upgrade from a state file predating this field) — just record it.
+			this.state.botId = botId;
+			this.save();
+			return false;
+		}
+		if (this.state.botId !== botId) {
+			this.state = emptyState(botId);
+			this.save();
+			return true;
+		}
+		return false;
 	}
 
 	isOwner(chatId: number): boolean {
@@ -94,9 +139,9 @@ export class TelegramClaimManager {
 		return this.state.pendingToken;
 	}
 
-	// Reset claim state so a new owner can claim.
+	// Reset claim state so a new owner can claim (same bot, e.g. IRIS_TELEGRAM_FORCE_RECLAIM).
 	reset(): void {
-		this.state = { claimed: false, chatId: null, pendingToken: null, tokenExpiresAt: null };
+		this.state = emptyState(this.state.botId);
 		this.save();
 	}
 
