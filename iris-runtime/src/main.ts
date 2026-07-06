@@ -185,7 +185,7 @@ function getState(channelId: string): ChannelState {
 		const channelDir = resolveChannelDir(workingDir, channelId);
 		state = {
 			running: false,
-			runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model),
+			runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model, workingDir),
 			store: new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! }),
 			stopRequested: false,
 		};

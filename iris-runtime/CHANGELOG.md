@@ -14,6 +14,7 @@
   - Leads dispatch is bounded to the same 5-message queue as every other dispatch path (overflow logs a warning; the message text remains in `log.jsonl`).
   - Slack envelopes are now acked exactly once on every handler exit, including handler errors — an exception mid-handler previously left the envelope unacked, so Slack redelivered it and the failure repeated.
   - `channels.json` entries with an unknown `mode` are skipped with a warning instead of half-applying (`requireMentionForTopLevel` used to take effect even when the mode string was invalid).
+- Fixed workspace-root resolution for real Telegram and Slack channels by threading `workingDir` through runner creation and path helpers. This restores correct loading of custom model providers, memory, and skills for real conversation channels ([#34](https://github.com/irisworks/iris-core/pull/34) by @avinashsingh-ai)
 
 ### UPGRADING
 
