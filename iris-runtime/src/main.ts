@@ -9,9 +9,10 @@ import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
-import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
+import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent, slackPromptProfile } from "./slack.js";
 import { TelegramBot, type IrisTelegramHandler, type TelegramEvent } from "./telegram.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
+import { registerPromptProfile } from "./transport/types.js";
 
 // ============================================================================
 // Config
@@ -683,7 +684,10 @@ const eventsWatcherBot = SLACK_ENABLED
 		return bot;
 	})()
 	: (() => {
-		// Bridge-only stub — used when no Slack tokens but events watcher still needs a bot
+		// Bridge-only stub — used when no Slack tokens but events watcher still needs a bot.
+		// Bridge runs reuse the Slack prompt fragments (status quo before profiles existed);
+		// a bridge-specific profile is a product decision for the transport-interface work.
+		registerPromptProfile({ ...slackPromptProfile, transportId: "bridge" });
 		const stubBot = {
 			transportId: "bridge",
 			getUser: () => undefined,

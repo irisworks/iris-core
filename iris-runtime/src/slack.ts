@@ -6,6 +6,12 @@ import { basename, join } from "path";
 import * as log from "./log.js";
 import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
 import { resolveChannelDir, type Attachment, type ChannelStore } from "./store.js";
+import {
+	registerPromptProfile,
+	type ChannelInfo,
+	type TransportPromptProfile,
+	type UserInfo,
+} from "./transport/types.js";
 
 // Slack message text limit (safely under the actual 40K limit); IRIS_SLACK_MAX_CHARS overrides
 const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
@@ -90,6 +96,38 @@ export interface SlackChannel {
 // Shared transport types — moved to transport/types.ts; re-exported for compat
 export type { ChannelInfo, UserInfo } from "./transport/types.js";
 export type { MessageContext as SlackContext } from "./transport/types.js";
+
+// ============================================================================
+// Prompt profile
+// ============================================================================
+
+// Fragment wording is load-bearing: buildSystemPrompt output for Slack must stay
+// byte-identical to the pre-profile hardcoded prompt (verified via last_prompt.jsonl).
+export const slackPromptProfile: TransportPromptProfile = {
+	transportId: "slack",
+	identityLine: "You are Iris, a Slack-connected orchestrator for specialized sub-agents.",
+	formattingSection: `## Slack Formatting (mrkdwn, NOT Markdown)
+Bold: *text*, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: <url|text>
+Do NOT use **double asterisks** or [markdown](links).`,
+	directorySection: (channels: ChannelInfo[], users: UserInfo[]) => {
+		const channelMappings =
+			channels.length > 0 ? channels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
+		const userMappings =
+			users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
+		return `## Slack IDs
+Channels: ${channelMappings}
+
+Users: ${userMappings}
+
+When mentioning users, use <@username> format (e.g., <@mario>).`;
+	},
+	silentNote: "This deletes the status message and posts nothing to Slack.",
+	attachNote: "Share files to Slack",
+	attachmentsTagName: "slack_attachments",
+	maxMessageChars: SLACK_MAX_LENGTH,
+};
+
+registerPromptProfile(slackPromptProfile);
 
 export interface IrisHandler {
 	/**

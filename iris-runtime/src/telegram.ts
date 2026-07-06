@@ -4,6 +4,12 @@ import * as log from "./log.js";
 import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
 import { TelegramClaimManager } from "./telegram-claim.js";
+import {
+	registerPromptProfile,
+	type ChannelInfo,
+	type TransportPromptProfile,
+	type UserInfo,
+} from "./transport/types.js";
 
 // ============================================================================
 // Constants
@@ -99,6 +105,35 @@ export interface TelegramEvent {
 
 // Shared transport types — moved to transport/types.ts; re-exported for compat
 export type { MessageContext as TelegramContext } from "./transport/types.js";
+
+// ============================================================================
+// Prompt profile
+// ============================================================================
+
+// Formatting guidance mirrors toTelegramHtml() below: **bold**, _italic_, and
+// backtick code are converted to HTML (parse_mode: "HTML"); single *asterisks*
+// and [markdown](links) are NOT converted and would render literally.
+export const telegramPromptProfile: TransportPromptProfile = {
+	transportId: "telegram",
+	identityLine: "You are Iris, a Telegram-connected orchestrator for specialized sub-agents.",
+	formattingSection: `## Telegram Formatting (Markdown subset, converted to HTML)
+Bold: **text**, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`
+Do NOT use single *asterisks* for bold or [markdown](links) — write URLs plainly, they render as-is.`,
+	directorySection: (channels: ChannelInfo[], _users: UserInfo[]) => {
+		const chatMappings =
+			channels.length > 0 ? channels.map((c) => `${c.id}\t${c.name}`).join("\n") : "(no chats loaded)";
+		return `## Telegram Chats
+${chatMappings}
+
+When mentioning users, use @username format.`;
+	},
+	silentNote: "This deletes the status message and posts nothing to Telegram.",
+	attachNote: "Share files to Telegram",
+	attachmentsTagName: "telegram_attachments",
+	maxMessageChars: 30000,
+};
+
+registerPromptProfile(telegramPromptProfile);
 
 export interface IrisTelegramHandler {
 	isRunning(channelId: string): boolean;
