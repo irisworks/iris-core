@@ -87,40 +87,9 @@ export interface SlackChannel {
 	mode?: string;
 }
 
-// Types used by agent.ts
-export interface ChannelInfo {
-	id: string;
-	name: string;
-}
-
-export interface UserInfo {
-	id: string;
-	userName: string;
-	displayName: string;
-}
-
-export interface SlackContext {
-	message: {
-		text: string;
-		rawText: string;
-		user: string;
-		userName?: string;
-		channel: string;
-		ts: string;
-		attachments: Array<{ local: string }>;
-	};
-	channelName?: string;
-	channels: ChannelInfo[];
-	users: UserInfo[];
-	respond: (text: string, shouldLog?: boolean) => Promise<void>;
-	replaceMessage: (text: string) => Promise<void>;
-	respondInThread: (text: string) => Promise<void>;
-	setTyping: (isTyping: boolean) => Promise<void>;
-	uploadFile: (filePath: string, title?: string) => Promise<void>;
-	setWorking: (working: boolean) => Promise<void>;
-	deleteMessage: () => Promise<void>;
-	getAccumulatedText: () => string;
-}
+// Shared transport types — moved to transport/types.ts; re-exported for compat
+export type { ChannelInfo, UserInfo } from "./transport/types.js";
+export type { MessageContext as SlackContext } from "./transport/types.js";
 
 export interface IrisHandler {
 	/**
@@ -190,6 +159,7 @@ class ChannelQueue {
 // ============================================================================
 
 export class SlackBot {
+	readonly transportId = "slack";
 	private socketClient: SocketModeClient;
 	private webClient: WebClient;
 	private handler: IrisHandler;

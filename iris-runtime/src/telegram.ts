@@ -97,27 +97,8 @@ export interface TelegramEvent {
 	attachments?: Attachment[];
 }
 
-export interface TelegramContext {
-	message: {
-		text: string;
-		rawText: string;
-		user: string;
-		channel: string;
-		ts: string;
-		attachments: Array<{ local: string }>;
-	};
-	channelName?: string;
-	channels: Array<{ id: string; name: string }>;
-	users: Array<{ id: string; userName: string; displayName: string }>;
-	respond: (text: string, shouldLog?: boolean) => Promise<void>;
-	replaceMessage: (text: string) => Promise<void>;
-	respondInThread: (text: string) => Promise<void>;
-	setTyping: (isTyping: boolean) => Promise<void>;
-	uploadFile: (filePath: string, title?: string) => Promise<void>;
-	setWorking: (working: boolean) => Promise<void>;
-	deleteMessage: () => Promise<void>;
-	getAccumulatedText: () => string;
-}
+// Shared transport types — moved to transport/types.ts; re-exported for compat
+export type { MessageContext as TelegramContext } from "./transport/types.js";
 
 export interface IrisTelegramHandler {
 	isRunning(channelId: string): boolean;
@@ -209,6 +190,7 @@ function splitIntoChunks(text: string, maxChars: number): string[] {
 // ============================================================================
 
 export class TelegramBot {
+	readonly transportId = "telegram";
 	private token: string;
 	private handler: IrisTelegramHandler;
 	private workingDir: string;
