@@ -5,6 +5,7 @@
 ### Changed
 
 - Internal: shared transport types moved to `src/transport/types.ts` — `ChannelInfo`, `UserInfo`, and `MessageContext` (rename of `SlackContext`, which stays as a compat re-export alongside `TelegramContext`). Contexts now carry a `transportId` (`"slack" | "telegram" | "bridge"`), and a `TransportPromptProfile` registry is in place for the upcoming prompt de-Slacking. The engine (`agent.ts`) no longer imports transport modules. No behavior change.
+- Internal: the near-identical Slack and Telegram run/stop/compact/reset handlers in main.ts are unified into one engine (`src/engine.ts`, `createEngine`) owning the per-channel state map and run dispatch; the transport handlers are now thin adapters. One user-visible convergence: on Telegram, `/stop` now edits the "_Stopping..._" status message to "_Stopped_" (matching Slack) instead of posting a second message.
 - The system prompt is now composed from the transport's `TransportPromptProfile` (identity line, formatting rules, channel/user directory, `[SILENT]`/attach notes, attachment tag name, message-split limit) instead of hardcoded Slack text. Slack prompts are byte-identical to before; bridge-only runs keep the Slack fragments. The `"Slack API error (…)"` log line is now `"Transport API error (…)"` — update any log grep that matched on it.
 
 ### Fixed
