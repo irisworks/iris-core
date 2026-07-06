@@ -15,6 +15,7 @@
   - Slack envelopes are now acked exactly once on every handler exit, including handler errors — an exception mid-handler previously left the envelope unacked, so Slack redelivered it and the failure repeated.
   - `channels.json` entries with an unknown `mode` are skipped with a warning instead of half-applying (`requireMentionForTopLevel` used to take effect even when the mode string was invalid).
 - Fixed workspace-root resolution for real Telegram and Slack channels by threading `workingDir` through runner creation and path helpers. This restores correct loading of custom model providers, memory, and skills for real conversation channels ([#34](https://github.com/irisworks/iris-core/pull/34) by @avinashsingh-ai)
+- Bootstrap now sanitizes the Azure AI Foundry account name (full URLs or hostnames pasted from the portal are trimmed to the bare account name) and validates the generated endpoint URL — aborting on a malformed hostname and warning when it doesn't resolve in DNS. Previously a pasted hostname produced an unresolvable `…cognitiveservices.cognitiveservices…` endpoint and every LLM call failed with a generic connection error ([#35](https://github.com/irisworks/iris-core/pull/35) by @avinashsingh-ai)
 
 ### UPGRADING
 
