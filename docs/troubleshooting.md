@@ -28,6 +28,7 @@ sudo systemctl start iris
 | Slack messages ignored | Wrong channel mode | Check `data/channels.json` — default mode needs an `@iris` mention outside DMs |
 | Telegram bot silent | Bot not claimed | Send the claim token printed at startup — see [Setup](SETUP.md#telegram-setup) |
 | `Timed out waiting for LLM response` | Provider rate limits | Retries are automatic; tune `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_TIMEOUT_SECS` |
+| Every reply is `Error: Connection error` | LLM endpoint hostname doesn't resolve (e.g. malformed Foundry `baseUrl` in `models.json`) | Check `getent hosts <host>` for the `baseUrl` host; re-run `bootstrap.sh --setup` with the bare Foundry account name |
 | API returns 401 | `IRIS_API_TOKEN` set | Send `Authorization: Bearer <token>` |
 | `/dev/kvm` not found | VM series without KVM | On Azure, resize to Ddsv5 (e.g. `Standard_D4ds_v5`) |
 | `firecracker: permission denied` | Not in kvm group | `sudo usermod -aG kvm $USER`, re-login |

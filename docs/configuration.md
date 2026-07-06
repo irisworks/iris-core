@@ -42,6 +42,11 @@ IRIS_PROVIDER=anthropic
 IRIS_MODEL=claude-sonnet-4-5
 ```
 
+For Azure AI Foundry, bootstrap asks for the **bare account name** (e.g.
+`my-account-eastus2`), not the full endpoint URL. Pasted URLs or hostnames are
+trimmed automatically, and the generated `baseUrl` is validated — bootstrap aborts
+on a malformed hostname and warns if it doesn't resolve in DNS.
+
 ## Internal API security
 
 The internal API binds to loopback by default. If sub-agent containers reach Iris
