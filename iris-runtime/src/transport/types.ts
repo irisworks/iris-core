@@ -6,6 +6,10 @@
 // implement these shapes and re-export them for backward compatibility.
 // ============================================================================
 
+// Engine-owned per-channel state; type-only import so this module stays runtime-free
+// of engine dependencies (the engine imports this module at runtime, not vice versa).
+import type { ChannelState } from "../engine.js";
+
 export interface ChannelInfo {
 	id: string;
 	name: string;
@@ -78,6 +82,31 @@ export interface TransportPromptProfile {
 	attachmentsTagName: string;
 	/** Chunking limit for a single outbound message on this transport */
 	maxMessageChars: number;
+}
+
+/**
+ * A chat platform plugged into the engine. Implementations: SlackBot,
+ * TelegramBot, BridgeTransport. Structurally a superset of the engine's
+ * EngineTransport surface, so any ChannelTransport plugs straight into
+ * engine dispatch. Adding a transport must require ZERO engine edits.
+ */
+export interface ChannelTransport {
+	transportId: string;
+	/** Prompt fragments for this transport; also registered in the profile registry */
+	promptProfile: TransportPromptProfile;
+	/** How the user stops a run, e.g. "say `stop` first" — used in engine status messages */
+	stopCommandHint: string;
+	start(): Promise<void> | void;
+	stop(): Promise<void> | void;
+	/** Whether this transport owns the given channel id (e.g. "tg-*" → telegram) */
+	ownsChannel(channelId: string): boolean;
+	getChannels(): ChannelInfo[];
+	getUsers(): UserInfo[];
+	postMessage(channelId: string, text: string): Promise<string>;
+	updateMessage(channelId: string, messageId: string, text: string): Promise<void>;
+	/** Queue an inbound event for processing; false when the channel queue is full */
+	enqueueEvent(event: TransportEvent): boolean;
+	createContext(event: TransportEvent, state: ChannelState, isEvent?: boolean): MessageContext;
 }
 
 const promptProfiles = new Map<string, TransportPromptProfile>();

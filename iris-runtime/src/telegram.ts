@@ -4,9 +4,13 @@ import * as log from "./log.js";
 import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
 import { TelegramClaimManager } from "./telegram-claim.js";
+import type { ChannelState } from "./engine.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
+	type ChannelTransport,
+	type MessageContext,
+	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
 } from "./transport/types.js";
@@ -224,8 +228,10 @@ function splitIntoChunks(text: string, maxChars: number): string[] {
 // TelegramBot
 // ============================================================================
 
-export class TelegramBot {
+export class TelegramBot implements ChannelTransport {
 	readonly transportId = "telegram";
+	readonly promptProfile = telegramPromptProfile;
+	readonly stopCommandHint = "send /stop first";
 	private token: string;
 	private handler: IrisTelegramHandler;
 	private workingDir: string;
@@ -454,6 +460,26 @@ export class TelegramBot {
 
 	getAllChats(): Array<{ id: string; name: string }> {
 		return Array.from(this.chatNames.entries()).map(([id, name]) => ({ id, name }));
+	}
+
+	// ==========================================================================
+	// ChannelTransport surface
+	// ==========================================================================
+
+	ownsChannel(channelId: string): boolean {
+		return channelId.startsWith("tg-");
+	}
+
+	getChannels(): ChannelInfo[] {
+		return this.getAllChats();
+	}
+
+	getUsers(): UserInfo[] {
+		return [];
+	}
+
+	createContext(event: TransportEvent, state: ChannelState): MessageContext {
+		return createTelegramContext(event as TelegramEvent, this, state);
 	}
 
 	// ==========================================================================
@@ -716,4 +742,105 @@ export class TelegramBot {
 			queue.enqueue(() => this.handler.handleEvent(event, this));
 		}
 	}
+}
+
+// ============================================================================
+// Telegram context adapter
+// ============================================================================
+
+export function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: ChannelState) {
+	let messageId: string | null = null;
+	const extraMessageIds: string[] = [];
+	let accumulatedText = "";
+	let updatePromise = Promise.resolve();
+
+	return {
+		transportId: bot.transportId,
+		message: {
+			text: event.text,
+			rawText: event.text,
+			user: event.user,
+			channel: event.channel,
+			ts: event.ts,
+			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
+		},
+		channelName: bot.getChatName(event.channel),
+		store: state.store,
+		channels: bot.getAllChats(),
+		users: [],
+
+		respond: async (text: string, shouldLog = true) => {
+			updatePromise = updatePromise.then(async () => {
+				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
+				if (shouldLog && messageId) {
+					bot.logBotResponse(event.channel, text, messageId);
+				}
+			});
+			await updatePromise;
+		},
+
+		replaceMessage: async (text: string) => {
+			updatePromise = updatePromise.then(async () => {
+				try {
+					if (messageId) {
+						await bot.finalizeMessage(event.channel, messageId, text);
+					} else {
+						messageId = await bot.postMessage(event.channel, text);
+					}
+				} catch (err) {
+					log.logWarning("Telegram replaceMessage error", err instanceof Error ? err.message : String(err));
+				}
+			});
+			await updatePromise;
+		},
+
+		respondInThread: async (text: string) => {
+			updatePromise = updatePromise.then(async () => {
+				try {
+					const id = await bot.postInThread(event.channel, messageId ?? event.ts, text);
+					extraMessageIds.push(id);
+				} catch (err) {
+					log.logWarning("Telegram respondInThread error", err instanceof Error ? err.message : String(err));
+				}
+			});
+			await updatePromise;
+		},
+
+		setTyping: async (isTyping: boolean) => {
+			if (isTyping && !messageId) {
+				updatePromise = updatePromise.then(async () => {
+					try {
+						if (!messageId) {
+							messageId = await bot.postMessage(event.channel, "_Thinking..._");
+						}
+					} catch (err) {
+						log.logWarning("Telegram setTyping error", err instanceof Error ? err.message : String(err));
+					}
+				});
+				await updatePromise;
+			}
+		},
+
+		uploadFile: async (filePath: string, title?: string) => {
+			await bot.uploadFile(event.channel, filePath, title);
+		},
+
+		setWorking: async (_working: boolean) => {},
+
+		deleteMessage: async () => {
+			updatePromise = updatePromise.then(async () => {
+				for (let i = extraMessageIds.length - 1; i >= 0; i--) {
+					try { await bot.deleteMessage(event.channel, extraMessageIds[i]); } catch {}
+				}
+				extraMessageIds.length = 0;
+				if (messageId) {
+					await bot.deleteMessage(event.channel, messageId);
+					messageId = null;
+				}
+			});
+			await updatePromise;
+		},
+
+		getAccumulatedText: () => accumulatedText,
+	};
 }
