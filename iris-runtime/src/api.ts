@@ -38,11 +38,15 @@ import {
 	type Session,
 } from "./sessions.js";
 
-// Minimal interface so api.ts doesn't import SlackBot directly (avoids circular deps)
-interface SessionInjector {
+// Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
+export interface SessionInjector {
 	injectSessionMessage(sessionId: string, user: string, text: string): Promise<string>;
 	postMessage(channel: string, text: string): Promise<string>;
 	resetSessionContext(sessionId: string): void;
+}
+
+interface ApiTransport extends SessionInjector {
+	ownsChannel(channelId: string): boolean;
 }
 
 interface ChannelState {
@@ -89,8 +93,16 @@ export function startApiServer(
 	port: number,
 	workingDir: string,
 	channelStates: Map<string, ChannelState>,
-	getBot: () => SessionInjector | null = () => null,
+	getTransports: () => ApiTransport[] = () => [],
 ): void {
+	// Channel-addressed operations route to the transport that owns the channel.
+	// Session operations use the first transport — registry order is the
+	// preference order (Slack, then Telegram, then Bridge), matching the old
+	// single-bot behavior.
+	const findTransport = (channelId: string): ApiTransport | null =>
+		getTransports().find((t) => t.ownsChannel(channelId)) ?? null;
+	const sessionTransport = (): ApiTransport | null => getTransports()[0] ?? null;
+
 	const eventsDir = join(workingDir, "events");
 	const apiHost = process.env.IRIS_API_HOST ?? "127.0.0.1";
 	const apiToken = process.env.IRIS_API_TOKEN ?? "";
@@ -213,7 +225,7 @@ export function startApiServer(
 					json(res, 400, { error: "channel and text are required" });
 					return;
 				}
-				const bot = getBot();
+				const bot = findTransport(body.channel);
 				if (!bot) {
 					json(res, 503, { error: "bot not started" });
 					return;
@@ -253,7 +265,7 @@ export function startApiServer(
 					json(res, 404, { error: "no session found for this email" });
 					return;
 				}
-				const bot = getBot();
+				const bot = sessionTransport();
 				if (!bot) {
 					json(res, 503, { error: "session injection not available (bot not started)" });
 					return;
@@ -360,7 +372,7 @@ export function startApiServer(
 					json(res, 400, { error: "text is required" });
 					return;
 				}
-				const bot = getBot();
+				const bot = sessionTransport();
 				if (!bot) {
 					json(res, 503, { error: "session injection not available (bot not started)" });
 					return;
@@ -417,7 +429,7 @@ export function startApiServer(
 				if (ef(join(sessionDir, "log.jsonl")))     wf(join(sessionDir, "log.jsonl"), "");
 				if (ef(join(sessionDir, "last_prompt.jsonl"))) wf(join(sessionDir, "last_prompt.jsonl"), "");
 				// Also reset the in-memory agent context
-				const bot = getBot();
+				const bot = sessionTransport();
 				if (bot) {
 					try { bot.resetSessionContext(sessionId); } catch { /* best effort */ }
 				}

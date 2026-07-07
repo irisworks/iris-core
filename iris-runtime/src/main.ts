@@ -2,7 +2,7 @@
 
 import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
 import { join, resolve } from "path";
-import { startApiServer } from "./api.js";
+import { startApiServer, type SessionInjector } from "./api.js";
 import { startBridgeServer } from "./bridge.js";
 import { downloadChannel } from "./download.js";
 import { createEngine } from "./engine.js";
@@ -13,6 +13,7 @@ import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from 
 import { TelegramBot, type IrisTelegramHandler } from "./telegram.js";
 import { ChannelStore } from "./store.js";
 import { BridgeTransport } from "./transport/bridge.js";
+import type { ChannelTransport, TransportEvent } from "./transport/types.js";
 
 // ============================================================================
 // Config
@@ -218,11 +219,43 @@ log.logInfo(`iris-runtime: provider=${provider} model=${model} environment=${env
 // Migrate flat channel dirs to slack/ and telegram/ subdirectories
 migrateChannelDirs(workingDir);
 
+// ============================================================================
+// Transports — constructed from env: Slack if tokens, Telegram if token,
+// Bridge always. Registry order is the preference order for session
+// operations (Slack, then Telegram, then Bridge).
+// ============================================================================
+
+const transports: (ChannelTransport & SessionInjector)[] = [];
+
+const slackBot = SLACK_ENABLED
+	? new SlackBotClass(handler, {
+		appToken: IRIS_SLACK_APP_TOKEN,
+		botToken: IRIS_SLACK_BOT_TOKEN,
+		workingDir,
+		store: new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! }),
+	})
+	: null;
+if (slackBot) transports.push(slackBot);
+
+const tgBot = TELEGRAM_BOT_TOKEN ? new TelegramBot(telegramHandler, { token: TELEGRAM_BOT_TOKEN, workingDir }) : null;
+if (tgBot) transports.push(tgBot);
+
+// Bridge is always available — sub-agents and the internal API can drive runs
+// without any chat tokens. Reuses the Slack prompt fragments (status quo
+// before profiles existed); a bridge-specific prompt is a decision for later.
+const bridge = new BridgeTransport({
+	promptProfile: { ...slackPromptProfile, transportId: "bridge" },
+	dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
+});
+transports.push(bridge);
+
+// ============================================================================
+// Wiring — API server, bridge server, transport startup, events watchers
+// ============================================================================
+
 // Start internal API server (default port 3000, always-on for sub-agent escalation)
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
-// botRef is set after bot construction below; the closure captures it by reference
-let botRef: SlackBotClass | TelegramBot | BridgeTransport | null = null;
-startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => botRef as any);
+startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => transports);
 
 // Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
 const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
@@ -230,36 +263,13 @@ if (bridgePort > 0) {
 	startBridgeServer(bridgePort, workingDir);
 }
 
-const eventsWatcherBot = SLACK_ENABLED
-	? (() => {
-		const sharedStore = new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! });
-		const bot = new SlackBotClass(handler, {
-			appToken: IRIS_SLACK_APP_TOKEN,
-			botToken: IRIS_SLACK_BOT_TOKEN,
-			workingDir,
-			store: sharedStore,
-		});
-		botRef = bot;
-		bot.start();
-		return bot;
-	})()
-	: (() => {
-		// Bridge-only mode — no chat tokens; the events watcher and internal API
-		// drive runs. Reuses the Slack prompt fragments (status quo before profiles
-		// existed); a bridge-specific prompt is a product decision for later.
-		const bridge = new BridgeTransport({
-			promptProfile: { ...slackPromptProfile, transportId: "bridge" },
-			dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
-		});
-		botRef = bridge;
-		log.logInfo("Slack tokens not set — running in bridge-only mode");
-		return bridge;
-	})();
+if (slackBot) {
+	slackBot.start();
+} else {
+	log.logInfo("Slack tokens not set — running in bridge-only mode");
+}
 
-if (TELEGRAM_BOT_TOKEN) {
-	const tgBot = new TelegramBot(telegramHandler, { token: TELEGRAM_BOT_TOKEN, workingDir });
-	// Use tgBot as botRef only if Slack is not available (API server prefers Slack)
-	if (!SLACK_ENABLED) botRef = tgBot;
+if (tgBot) {
 	await tgBot.start();
 
 	// Force reclaim — reset owner so a new user can claim
@@ -285,27 +295,21 @@ if (TELEGRAM_BOT_TOKEN) {
 	log.logInfo("Telegram token not set — Telegram transport disabled");
 }
 
-if (!SLACK_ENABLED && !TELEGRAM_BOT_TOKEN) {
+if (!slackBot && !tgBot) {
 	log.logInfo("⚡️ Bridge-only mode active");
 }
 
-// Create a universal router bot that dispatches events to the right transport
-// based on channelId prefix: tg-* → TelegramBot, everything else → SlackBot/stub
-const tgBotRef = (TELEGRAM_BOT_TOKEN ? (botRef instanceof TelegramBot ? botRef : null) : null);
-const universalBot = {
-	...eventsWatcherBot,
-	enqueueEvent: (event: any) => {
-		if (event.channel?.startsWith("tg-") && tgBotRef) {
-			return tgBotRef.enqueueEvent(event);
-		}
-		return eventsWatcherBot.enqueueEvent(event);
-	},
-} as any;
+// Route synthetic events to the transport that owns the channel
+// (tg-* → Telegram; Slack, then Bridge, is the fallback owner)
+const routeEvent = (event: TransportEvent & { type: "mention" }): boolean => {
+	const transport = transports.find((t) => t.ownsChannel(event.channel));
+	return transport ? transport.enqueueEvent(event) : false;
+};
 
 // Watch slack/events/, telegram/events/, and root events/ for backward compat
 const watchDirs = ["slack/events", "telegram/events", "events"];
 const watchers = watchDirs.map(sub => {
-	const w = createEventsWatcher(workingDir, universalBot, sub === "events" ? undefined : sub.split("/")[0]);
+	const w = createEventsWatcher(workingDir, { enqueueEvent: routeEvent }, sub === "events" ? undefined : sub.split("/")[0]);
 	w.start();
 	return w;
 });
