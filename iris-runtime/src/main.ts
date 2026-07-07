@@ -2,16 +2,16 @@
 
 import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
 import { join, resolve } from "path";
-import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { startApiServer } from "./api.js";
 import { startBridgeServer } from "./bridge.js";
 import { downloadChannel } from "./download.js";
+import { createEngine, type ChannelState, type EngineTransport } from "./engine.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent, slackPromptProfile } from "./slack.js";
 import { TelegramBot, type IrisTelegramHandler, type TelegramEvent } from "./telegram.js";
-import { ChannelStore, resolveChannelDir } from "./store.js";
+import { ChannelStore } from "./store.js";
 import { registerPromptProfile } from "./transport/types.js";
 
 // ============================================================================
@@ -124,18 +124,10 @@ const SLACK_ENABLED = !!(IRIS_SLACK_APP_TOKEN && IRIS_SLACK_BOT_TOKEN);
 await validateSandbox(sandbox);
 
 // ============================================================================
-// State (per channel)
+// Engine (per-channel state + run/stop/compact/reset flows)
 // ============================================================================
 
-interface ChannelState {
-	running: boolean;
-	runner: AgentRunner;
-	store: ChannelStore;
-	stopRequested: boolean;
-	stopMessageTs?: string;
-}
-
-const channelStates = new Map<string, ChannelState>();
+const engine = createEngine({ workingDir, sandbox, provider, model, botToken: IRIS_SLACK_BOT_TOKEN });
 
 // ============================================================================
 // Migration — move flat channel dirs into slack/ and telegram/ subdirectories
@@ -178,21 +170,6 @@ function migrateChannelDirs(dir: string): void {
 	}
 
 	if (migrated > 0) log.logInfo(`[migrate] Moved ${migrated} channel director${migrated === 1 ? "y" : "ies"} to transport subdirectories`);
-}
-
-function getState(channelId: string): ChannelState {
-	let state = channelStates.get(channelId);
-	if (!state) {
-		const channelDir = resolveChannelDir(workingDir, channelId);
-		state = {
-			running: false,
-			runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model, workingDir),
-			store: new ChannelStore({ workingDir, botToken: IRIS_SLACK_BOT_TOKEN! }),
-			stopRequested: false,
-		};
-		channelStates.set(channelId, state);
-	}
-	return state;
 }
 
 // ============================================================================
@@ -363,96 +340,22 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 // Handler
 // ============================================================================
 
+// Adapt a SlackBot (or the bridge-only stub) into the engine's transport surface
+function slackEngineTransport(slack: SlackBot): EngineTransport {
+	return {
+		postMessage: (channelId, text) => slack.postMessage(channelId, text),
+		updateMessage: (channelId, messageId, text) => slack.updateMessage(channelId, messageId, text),
+		stopCommandHint: "say `stop` first",
+		createContext: (event, state, isEvent) => createSlackContext(event as SlackEvent, slack, state, isEvent),
+	};
+}
+
 const handler: IrisHandler = {
-	isRunning(channelId: string): boolean {
-		const state = channelStates.get(channelId);
-		return state?.running ?? false;
-	},
-
-	async handleStop(channelId: string, slack: SlackBot): Promise<void> {
-		const state = channelStates.get(channelId);
-		if (state?.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-			const ts = await slack.postMessage(channelId, "_Stopping..._");
-			state.stopMessageTs = ts; // Save for updating later
-		} else {
-			await slack.postMessage(channelId, "_Nothing running_");
-		}
-	},
-
-	async handleCompact(channelId: string, slack: SlackBot): Promise<void> {
-		if (handler.isRunning(channelId)) {
-			await slack.postMessage(channelId, "_Can't compact while running — say `stop` first_");
-			return;
-		}
-		const state = getState(channelId);
-		const ts = await slack.postMessage(channelId, "_Compacting context..._");
-		try {
-			const result = await state.runner.compact();
-			if (result) {
-				await slack.updateMessage(channelId, ts!, `_Compacted: ${result.tokensBefore.toLocaleString()} tokens summarised_`);
-			} else {
-				await slack.updateMessage(channelId, ts!, "_Compaction complete_");
-			}
-		} catch (err) {
-			const errMsg = err instanceof Error ? err.message : String(err);
-			await slack.updateMessage(channelId, ts!, `_Compaction failed: ${errMsg}_`);
-		}
-	},
-
-	async handleReset(channelId: string, slack: SlackBot): Promise<void> {
-		const state = getState(channelId);
-		// Abort any in-progress run first, then reset — works even when stuck
-		if (state.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-		}
-		state.runner.reset();
-		state.running = false;
-		await slack.postMessage(channelId, "_Context cleared — starting fresh_");
-	},
-
-	async handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void> {
-		const state = getState(event.channel);
-
-		// Start run
-		state.running = true;
-		state.stopRequested = false;
-
-		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
-
-		try {
-			// Create context adapter
-			const ctx = createSlackContext(event, slack, state, isEvent);
-
-			// Run the agent
-			await ctx.setTyping(true);
-			await ctx.setWorking(true);
-			const result = await state.runner.run(ctx as any, state.store);
-			await ctx.setWorking(false);
-
-			// Resolve pending session API request (POST /sessions/:id/message bridge pattern)
-			if (event.channel.startsWith("SESSION-")) {
-				const sessionId = event.channel.slice("SESSION-".length);
-				const { resolveSessionRequest } = await import("./sessions.js");
-				resolveSessionRequest(sessionId, ctx.getAccumulatedText());
-			}
-
-			if (result.stopReason === "aborted" && state.stopRequested) {
-				if (state.stopMessageTs) {
-					await slack.updateMessage(event.channel, state.stopMessageTs, "_Stopped_");
-					state.stopMessageTs = undefined;
-				} else {
-					await slack.postMessage(event.channel, "_Stopped_");
-				}
-			}
-		} catch (err) {
-			log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
-		} finally {
-			state.running = false;
-		}
-	},
+	isRunning: (channelId) => engine.isRunning(channelId),
+	handleStop: (channelId, slack) => engine.handleStop(channelId, slackEngineTransport(slack)),
+	handleCompact: (channelId, slack) => engine.handleCompact(channelId, slackEngineTransport(slack)),
+	handleReset: (channelId, slack) => engine.handleReset(channelId, slackEngineTransport(slack)),
+	handleEvent: (event, slack, isEvent) => engine.handleEvent(event, slackEngineTransport(slack), isEvent),
 };
 
 // ============================================================================
@@ -560,82 +463,22 @@ function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: Ch
 // Telegram handler
 // ============================================================================
 
+// Adapt a TelegramBot into the engine's transport surface
+function telegramEngineTransport(bot: TelegramBot): EngineTransport {
+	return {
+		postMessage: (channelId, text) => bot.postMessage(channelId, text),
+		updateMessage: (channelId, messageId, text) => bot.updateMessage(channelId, messageId, text),
+		stopCommandHint: "send /stop first",
+		createContext: (event, state) => createTelegramContext(event as TelegramEvent, bot, state),
+	};
+}
+
 const telegramHandler: IrisTelegramHandler = {
-	isRunning(channelId: string): boolean {
-		return channelStates.get(channelId)?.running ?? false;
-	},
-
-	async handleStop(channelId: string, bot: TelegramBot): Promise<void> {
-		const state = channelStates.get(channelId);
-		if (state?.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-			await bot.postMessage(channelId, "_Stopping..._");
-		} else {
-			await bot.postMessage(channelId, "_Nothing running_");
-		}
-	},
-
-	async handleCompact(channelId: string, bot: TelegramBot): Promise<void> {
-		if (telegramHandler.isRunning(channelId)) {
-			await bot.postMessage(channelId, "_Can't compact while running — send /stop first_");
-			return;
-		}
-		const state = getState(channelId);
-		const ts = await bot.postMessage(channelId, "_Compacting context..._");
-		try {
-			const result = await state.runner.compact();
-			if (result) {
-				await bot.updateMessage(channelId, ts, `_Compacted: ${result.tokensBefore.toLocaleString()} tokens summarised_`);
-			} else {
-				await bot.updateMessage(channelId, ts, "_Compaction complete_");
-			}
-		} catch (err) {
-			const errMsg = err instanceof Error ? err.message : String(err);
-			await bot.updateMessage(channelId, ts, `_Compaction failed: ${errMsg}_`);
-		}
-	},
-
-	async handleReset(channelId: string, bot: TelegramBot): Promise<void> {
-		const state = getState(channelId);
-		if (state.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-		}
-		state.runner.reset();
-		state.running = false;
-		await bot.postMessage(channelId, "_Context cleared — starting fresh_");
-	},
-
-	async handleEvent(event: TelegramEvent, bot: TelegramBot, isEvent?: boolean): Promise<void> {
-		const state = getState(event.channel);
-		state.running = true;
-		state.stopRequested = false;
-
-		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
-
-		try {
-			const ctx = createTelegramContext(event, bot, state);
-			await ctx.setTyping(true);
-			await ctx.setWorking(true);
-			const result = await state.runner.run(ctx as any, state.store);
-			await ctx.setWorking(false);
-
-			if (event.channel.startsWith("SESSION-")) {
-				const sessionId = event.channel.slice("SESSION-".length);
-				const { resolveSessionRequest } = await import("./sessions.js");
-				resolveSessionRequest(sessionId, ctx.getAccumulatedText());
-			}
-
-			if (result.stopReason === "aborted" && state.stopRequested) {
-				await bot.postMessage(event.channel, "_Stopped_");
-			}
-		} catch (err) {
-			log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
-		} finally {
-			state.running = false;
-		}
-	},
+	isRunning: (channelId) => engine.isRunning(channelId),
+	handleStop: (channelId, bot) => engine.handleStop(channelId, telegramEngineTransport(bot)),
+	handleCompact: (channelId, bot) => engine.handleCompact(channelId, telegramEngineTransport(bot)),
+	handleReset: (channelId, bot) => engine.handleReset(channelId, telegramEngineTransport(bot)),
+	handleEvent: (event, bot, isEvent) => engine.handleEvent(event, telegramEngineTransport(bot), isEvent),
 };
 
 // ============================================================================
@@ -662,7 +505,7 @@ migrateChannelDirs(workingDir);
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
 // botRef is set after bot construction below; the closure captures it by reference
 let botRef: SlackBotClass | TelegramBot | null = null;
-startApiServer(effectiveApiPort, workingDir, channelStates, () => botRef as any);
+startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => botRef as any);
 
 // Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
 const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
