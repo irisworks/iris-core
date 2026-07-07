@@ -5,14 +5,14 @@ import { join, resolve } from "path";
 import { startApiServer } from "./api.js";
 import { startBridgeServer } from "./bridge.js";
 import { downloadChannel } from "./download.js";
-import { createEngine, type ChannelState, type EngineTransport } from "./engine.js";
+import { createEngine } from "./engine.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
-import { type IrisHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent, slackPromptProfile } from "./slack.js";
-import { TelegramBot, type IrisTelegramHandler, type TelegramEvent } from "./telegram.js";
+import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from "./slack.js";
+import { TelegramBot, type IrisTelegramHandler } from "./telegram.js";
 import { ChannelStore } from "./store.js";
-import { registerPromptProfile } from "./transport/types.js";
+import { BridgeTransport } from "./transport/bridge.js";
 
 // ============================================================================
 // Config
@@ -173,312 +173,29 @@ function migrateChannelDirs(dir: string): void {
 }
 
 // ============================================================================
-// Create SlackContext adapter
-// ============================================================================
-
-// Slack recommends 4000 chars max for chat.update. We use 4000 as the split point.
-const SLACK_SPLIT_CHARS = 4000;
-
-/**
- * Split text into chunks at natural newline boundaries near maxChars.
- */
-function splitIntoChunks(text: string, maxChars: number): string[] {
-	if (text.length <= maxChars) return [text];
-	const chunks: string[] = [];
-	let remaining = text;
-	while (remaining.length > 0) {
-		if (remaining.length <= maxChars) {
-			chunks.push(remaining);
-			break;
-		}
-		const searchFrom = Math.floor(maxChars * 0.8);
-		const newlineIdx = remaining.lastIndexOf("\n", maxChars);
-		const cut = newlineIdx >= searchFrom ? newlineIdx + 1 : maxChars;
-		chunks.push(remaining.slice(0, cut).trimEnd());
-		remaining = remaining.slice(cut).trimStart();
-	}
-	return chunks;
-}
-
-function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
-	let messageTs: string | null = null;
-	const threadMessageTs: string[] = [];
-	let accumulatedText = "";
-	let isWorking = true;
-	const workingIndicator = " ...";
-	let updatePromise = Promise.resolve();
-
-	const user = slack.getUser(event.user);
-
-	// Extract event filename for status message
-	const eventFilename = isEvent ? event.text.match(/^\[EVENT:([^:]+):/)?.[1] : undefined;
-
-	return {
-		// stubBot in bridge-only mode carries transportId "bridge"
-		transportId: (slack as { transportId?: string }).transportId ?? "slack",
-		message: {
-			text: event.text,
-			rawText: event.text,
-			user: event.user,
-			userName: user?.userName,
-			channel: event.channel,
-			ts: event.ts,
-			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
-		},
-		channelName: slack.getChannel(event.channel)?.name,
-		store: state.store,
-		channels: slack.getAllChannels().map((c) => ({ id: c.id, name: c.name })),
-		users: slack.getAllUsers().map((u) => ({ id: u.id, userName: u.userName, displayName: u.displayName })),
-
-		// Accumulate text silently during streaming — thinking indicator stays visible.
-		// replaceMessage() posts the final clean result when generation is complete.
-		respond: async (text: string, shouldLog = true) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-					if (shouldLog && messageTs) {
-						slack.logBotResponse(event.channel, text, messageTs);
-					}
-				} catch (err) {
-					log.logWarning("Slack respond error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
-		},
-
-		// Called when generation is complete with the full final text.
-		// Splits into chunks and posts in order: chunk 1 replaces the thinking message,
-		// chunks 2+ are posted as thread replies below — correct reading order guaranteed.
-		replaceMessage: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					const chunks = splitIntoChunks(text, SLACK_SPLIT_CHARS);
-
-					// Replace thinking indicator with first chunk
-					if (messageTs) {
-						await slack.finalizeMessage(event.channel, messageTs, chunks[0]);
-					} else {
-						messageTs = await slack.postMessage(event.channel, chunks[0]);
-					}
-
-					// Post remaining chunks as thread replies in order
-					for (let i = 1; i < chunks.length; i++) {
-						const ts = await slack.postInThread(event.channel, messageTs!, chunks[i]);
-						threadMessageTs.push(ts);
-					}
-				} catch (err) {
-					log.logWarning("Slack replaceMessage error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
-		},
-
-		respondInThread: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					if (messageTs) {
-						const ts = await slack.postInThread(event.channel, messageTs, text);
-						threadMessageTs.push(ts);
-					}
-				} catch (err) {
-					log.logWarning("Slack respondInThread error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
-		},
-
-		setTyping: async (isTyping: boolean) => {
-			if (isTyping && !messageTs) {
-				updatePromise = updatePromise.then(async () => {
-					try {
-						if (!messageTs) {
-							const label = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
-							messageTs = await slack.postMessage(event.channel, label + workingIndicator);
-						}
-					} catch (err) {
-						log.logWarning("Slack setTyping error", err instanceof Error ? err.message : String(err));
-					}
-				});
-				await updatePromise;
-			}
-		},
-
-		uploadFile: async (filePath: string, title?: string) => {
-			await slack.uploadFile(event.channel, filePath, title);
-		},
-
-		setWorking: async (working: boolean) => {
-			// No-op — thinking indicator is managed by setTyping/replaceMessage.
-			isWorking = working;
-		},
-
-		deleteMessage: async () => {
-			updatePromise = updatePromise.then(async () => {
-				// Delete thread messages first (in reverse order)
-				for (let i = threadMessageTs.length - 1; i >= 0; i--) {
-					try {
-						await slack.deleteMessage(event.channel, threadMessageTs[i]);
-					} catch {
-						// Ignore errors deleting thread messages
-					}
-				}
-				threadMessageTs.length = 0;
-				// Then delete main message
-				if (messageTs) {
-					await slack.deleteMessage(event.channel, messageTs);
-					messageTs = null;
-				}
-			});
-			await updatePromise;
-		},
-
-		getAccumulatedText: () => accumulatedText,
-	};
-}
-
-// ============================================================================
 // Handler
 // ============================================================================
 
-// Adapt a SlackBot (or the bridge-only stub) into the engine's transport surface
-function slackEngineTransport(slack: SlackBot): EngineTransport {
-	return {
-		postMessage: (channelId, text) => slack.postMessage(channelId, text),
-		updateMessage: (channelId, messageId, text) => slack.updateMessage(channelId, messageId, text),
-		stopCommandHint: "say `stop` first",
-		createContext: (event, state, isEvent) => createSlackContext(event as SlackEvent, slack, state, isEvent),
-	};
-}
-
+// SlackBot and TelegramBot implement ChannelTransport, which is a superset of
+// the engine's transport surface — the bots plug straight into the engine.
 const handler: IrisHandler = {
 	isRunning: (channelId) => engine.isRunning(channelId),
-	handleStop: (channelId, slack) => engine.handleStop(channelId, slackEngineTransport(slack)),
-	handleCompact: (channelId, slack) => engine.handleCompact(channelId, slackEngineTransport(slack)),
-	handleReset: (channelId, slack) => engine.handleReset(channelId, slackEngineTransport(slack)),
-	handleEvent: (event, slack, isEvent) => engine.handleEvent(event, slackEngineTransport(slack), isEvent),
+	handleStop: (channelId, slack) => engine.handleStop(channelId, slack),
+	handleCompact: (channelId, slack) => engine.handleCompact(channelId, slack),
+	handleReset: (channelId, slack) => engine.handleReset(channelId, slack),
+	handleEvent: (event, slack, isEvent) => engine.handleEvent(event, slack, isEvent),
 };
-
-// ============================================================================
-// Telegram context adapter
-// ============================================================================
-
-function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: ChannelState) {
-	let messageId: string | null = null;
-	const extraMessageIds: string[] = [];
-	let accumulatedText = "";
-	let updatePromise = Promise.resolve();
-
-	return {
-		transportId: bot.transportId,
-		message: {
-			text: event.text,
-			rawText: event.text,
-			user: event.user,
-			channel: event.channel,
-			ts: event.ts,
-			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
-		},
-		channelName: bot.getChatName(event.channel),
-		store: state.store,
-		channels: bot.getAllChats(),
-		users: [],
-
-		respond: async (text: string, shouldLog = true) => {
-			updatePromise = updatePromise.then(async () => {
-				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				if (shouldLog && messageId) {
-					bot.logBotResponse(event.channel, text, messageId);
-				}
-			});
-			await updatePromise;
-		},
-
-		replaceMessage: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					if (messageId) {
-						await bot.finalizeMessage(event.channel, messageId, text);
-					} else {
-						messageId = await bot.postMessage(event.channel, text);
-					}
-				} catch (err) {
-					log.logWarning("Telegram replaceMessage error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
-		},
-
-		respondInThread: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				try {
-					const id = await bot.postInThread(event.channel, messageId ?? event.ts, text);
-					extraMessageIds.push(id);
-				} catch (err) {
-					log.logWarning("Telegram respondInThread error", err instanceof Error ? err.message : String(err));
-				}
-			});
-			await updatePromise;
-		},
-
-		setTyping: async (isTyping: boolean) => {
-			if (isTyping && !messageId) {
-				updatePromise = updatePromise.then(async () => {
-					try {
-						if (!messageId) {
-							messageId = await bot.postMessage(event.channel, "_Thinking..._");
-						}
-					} catch (err) {
-						log.logWarning("Telegram setTyping error", err instanceof Error ? err.message : String(err));
-					}
-				});
-				await updatePromise;
-			}
-		},
-
-		uploadFile: async (filePath: string, title?: string) => {
-			await bot.uploadFile(event.channel, filePath, title);
-		},
-
-		setWorking: async (_working: boolean) => {},
-
-		deleteMessage: async () => {
-			updatePromise = updatePromise.then(async () => {
-				for (let i = extraMessageIds.length - 1; i >= 0; i--) {
-					try { await bot.deleteMessage(event.channel, extraMessageIds[i]); } catch {}
-				}
-				extraMessageIds.length = 0;
-				if (messageId) {
-					await bot.deleteMessage(event.channel, messageId);
-					messageId = null;
-				}
-			});
-			await updatePromise;
-		},
-
-		getAccumulatedText: () => accumulatedText,
-	};
-}
 
 // ============================================================================
 // Telegram handler
 // ============================================================================
 
-// Adapt a TelegramBot into the engine's transport surface
-function telegramEngineTransport(bot: TelegramBot): EngineTransport {
-	return {
-		postMessage: (channelId, text) => bot.postMessage(channelId, text),
-		updateMessage: (channelId, messageId, text) => bot.updateMessage(channelId, messageId, text),
-		stopCommandHint: "send /stop first",
-		createContext: (event, state) => createTelegramContext(event as TelegramEvent, bot, state),
-	};
-}
-
 const telegramHandler: IrisTelegramHandler = {
 	isRunning: (channelId) => engine.isRunning(channelId),
-	handleStop: (channelId, bot) => engine.handleStop(channelId, telegramEngineTransport(bot)),
-	handleCompact: (channelId, bot) => engine.handleCompact(channelId, telegramEngineTransport(bot)),
-	handleReset: (channelId, bot) => engine.handleReset(channelId, telegramEngineTransport(bot)),
-	handleEvent: (event, bot, isEvent) => engine.handleEvent(event, telegramEngineTransport(bot), isEvent),
+	handleStop: (channelId, bot) => engine.handleStop(channelId, bot),
+	handleCompact: (channelId, bot) => engine.handleCompact(channelId, bot),
+	handleReset: (channelId, bot) => engine.handleReset(channelId, bot),
+	handleEvent: (event, bot, isEvent) => engine.handleEvent(event, bot, isEvent),
 };
 
 // ============================================================================
@@ -504,7 +221,7 @@ migrateChannelDirs(workingDir);
 // Start internal API server (default port 3000, always-on for sub-agent escalation)
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
 // botRef is set after bot construction below; the closure captures it by reference
-let botRef: SlackBotClass | TelegramBot | null = null;
+let botRef: SlackBotClass | TelegramBot | BridgeTransport | null = null;
 startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => botRef as any);
 
 // Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
@@ -527,39 +244,16 @@ const eventsWatcherBot = SLACK_ENABLED
 		return bot;
 	})()
 	: (() => {
-		// Bridge-only stub — used when no Slack tokens but events watcher still needs a bot.
-		// Bridge runs reuse the Slack prompt fragments (status quo before profiles existed);
-		// a bridge-specific profile is a product decision for the transport-interface work.
-		registerPromptProfile({ ...slackPromptProfile, transportId: "bridge" });
-		const stubBot = {
-			transportId: "bridge",
-			getUser: () => undefined,
-			getChannel: () => undefined,
-			getAllChannels: () => [],
-			getAllUsers: () => [],
-			postMessage: async () => Date.now().toString(),
-			updateMessage: async () => {},
-			finalizeMessage: async () => {},
-			deleteMessage: async () => {},
-			postInThread: async () => Date.now().toString(),
-			uploadFile: async () => {},
-			logBotResponse: () => {},
-			logToFile: () => {},
-			resetSessionContext: () => {},
-			enqueueEvent: (event: any) => handler.handleEvent(event, stubBot as any),
-			injectSessionMessage: async (sessionId: string, user: string, text: string) => {
-				const { registerSessionRequest } = await import("./sessions.js");
-				const channelId = `SESSION-${sessionId}`;
-				const ts = (Date.now() / 1000).toFixed(6);
-				const responsePromise = registerSessionRequest(sessionId, 90_000);
-				const slackEvent = { type: "mention" as const, channel: channelId, user, text, ts, attachments: [] };
-				handler.handleEvent(slackEvent, stubBot as any);
-				return responsePromise;
-			},
-		} as any;
-		botRef = stubBot;
+		// Bridge-only mode — no chat tokens; the events watcher and internal API
+		// drive runs. Reuses the Slack prompt fragments (status quo before profiles
+		// existed); a bridge-specific prompt is a product decision for later.
+		const bridge = new BridgeTransport({
+			promptProfile: { ...slackPromptProfile, transportId: "bridge" },
+			dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
+		});
+		botRef = bridge;
 		log.logInfo("Slack tokens not set — running in bridge-only mode");
-		return stubBot;
+		return bridge;
 	})();
 
 if (TELEGRAM_BOT_TOKEN) {
