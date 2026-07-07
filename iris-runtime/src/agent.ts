@@ -20,7 +20,13 @@ import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
-import type { ChannelInfo, MessageContext, UserInfo } from "./transport/types.js";
+import {
+	getPromptProfile,
+	type ChannelInfo,
+	type MessageContext,
+	type TransportPromptProfile,
+	type UserInfo,
+} from "./transport/types.js";
 import type { ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
 
@@ -166,7 +172,7 @@ function loadIrisSkills(channelDir: string, workspacePath: string, workingDir: s
 	return Array.from(skillMap.values());
 }
 
-function buildSystemPrompt(
+export function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
 	memory: string,
@@ -176,17 +182,10 @@ function buildSystemPrompt(
 	users: UserInfo[],
 	skills: Skill[],
 	agents: AgentRegistry = {},
+	profile: TransportPromptProfile,
 ): string {
 	const channelPath = `${workspacePath}/${channelId}`;
 	const isDocker = sandboxConfig.type === "docker";
-
-	// Format channel mappings
-	const channelMappings =
-		channels.length > 0 ? channels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
-
-	// Format user mappings
-	const userMappings =
-		users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
 
 	const envDescription = isDocker
 		? `You are running inside a Docker container (Alpine Linux).
@@ -199,23 +198,16 @@ function buildSystemPrompt(
 
 	const constitutionSection = constitution ? `\n\n${constitution}` : "";
 
-	return `You are Iris, a Slack-connected orchestrator for specialized sub-agents. Be concise. No emojis.${constitutionSection}
+	return `${profile.identityLine} Be concise. No emojis.${constitutionSection}
 
 ## Context
 - For the current date/time, use: date
 - You have access to previous conversation context including tool results from prior turns.
 - For older history beyond your context, search log.jsonl (contains user messages and your final responses, but not tool results).
 
-## Slack Formatting (mrkdwn, NOT Markdown)
-Bold: *text*, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: <url|text>
-Do NOT use **double asterisks** or [markdown](links).
+${profile.formattingSection}
 
-## Slack IDs
-Channels: ${channelMappings}
-
-Users: ${userMappings}
-
-When mentioning users, use <@username> format (e.g., <@mario>).
+${profile.directorySection(channels, users)}
 
 ## Environment
 ${envDescription}
@@ -318,7 +310,7 @@ You receive a message like:
 Immediate and one-shot events auto-delete after triggering. Periodic events persist until you delete them.
 
 ### Silent Completion
-For periodic events where there's nothing to report, respond with just \`[SILENT]\` (no other text). This deletes the status message and posts nothing to Slack. Use this to avoid spamming the channel when periodic checks find nothing actionable.
+For periodic events where there's nothing to report, respond with just \`[SILENT]\` (no other text). ${profile.silentNote} Use this to avoid spamming the channel when periodic checks find nothing actionable.
 
 ### Debouncing
 When writing programs that create immediate events (email watchers, webhook handlers, etc.), always debounce. If 50 emails arrive in a minute, don't create 50 immediate events. Instead collect events over a window and create ONE immediate event summarizing what happened, or just signal "new activity, check inbox" rather than per-item events. Or simpler: use a periodic event to check for new items every N minutes instead of immediate events.
@@ -365,7 +357,7 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 - read: Read files
 - write: Create/overwrite files
 - edit: Surgical file edits
-- attach: Share files to Slack
+- attach: ${profile.attachNote}
 
 Each tool requires a "label" parameter (shown to user).
 `;
@@ -402,7 +394,7 @@ function extractToolResultText(result: unknown): string {
 	return JSON.stringify(result);
 }
 
-function formatToolArgsForSlack(_toolName: string, args: Record<string, unknown>): string {
+function formatToolArgs(_toolName: string, args: Record<string, unknown>): string {
 	const lines: string[] = [];
 
 	for (const [key, value] of Object.entries(args)) {
@@ -515,12 +507,23 @@ function createRunner(
 		);
 	};
 
-	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
+	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills
+	// and the real transport profile — this placeholder is never sent to the LLM)
+	const placeholderProfile: TransportPromptProfile = {
+		transportId: "placeholder",
+		identityLine: "You are Iris, an orchestrator for specialized sub-agents.",
+		formattingSection: "## Formatting\nPlain text.",
+		directorySection: () => "## Channels\n(no channels loaded)",
+		silentNote: "This deletes the status message and posts nothing to the channel.",
+		attachNote: "Share files to the channel",
+		attachmentsTagName: "attachments",
+		maxMessageChars: 30000,
+	};
 	const memory = getMemory(channelDir, workingDir);
 	const constitution = loadConstitution(workspaceDir);
 	const skills = loadIrisSkills(channelDir, workspacePath, workingDir);
 	const agents = loadAgentRegistry(workspaceDir);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, constitution, sandboxConfig, [], [], skills, agents);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, constitution, sandboxConfig, [], [], skills, agents, placeholderProfile);
 
 	// Create session manager and settings manager
 	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
@@ -632,7 +635,7 @@ function createRunner(
 			// Post args + result to thread
 			const label = pending?.args ? (pending.args as { label?: string }).label : undefined;
 			const argsFormatted = pending
-				? formatToolArgsForSlack(agentEvent.toolName, pending.args as Record<string, unknown>)
+				? formatToolArgs(agentEvent.toolName, pending.args as Record<string, unknown>)
 				: "(args not found)";
 			const duration = (durationMs / 1000).toFixed(1);
 			let threadMessage = `*${agentEvent.isError ? "✗" : "✓"} ${agentEvent.toolName}*`;
@@ -727,16 +730,15 @@ function createRunner(
 		}
 	});
 
-	// Slack message limit
-	const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
-	const splitForSlack = (text: string): string[] => {
-		if (text.length <= SLACK_MAX_LENGTH) return [text];
+	// Message-length limit comes from the transport's prompt profile (maxMessageChars)
+	const splitMessage = (text: string, maxChars: number): string[] => {
+		if (text.length <= maxChars) return [text];
 		const parts: string[] = [];
 		let remaining = text;
 		let partNum = 1;
 		while (remaining.length > 0) {
-			const chunk = remaining.substring(0, SLACK_MAX_LENGTH - 50);
-			remaining = remaining.substring(SLACK_MAX_LENGTH - 50);
+			const chunk = remaining.substring(0, maxChars - 50);
+			remaining = remaining.substring(maxChars - 50);
 			const suffix = remaining.length > 0 ? `\n_(continued ${partNum}...)_` : "";
 			parts.push(chunk + suffix);
 			partNum++;
@@ -764,6 +766,12 @@ function createRunner(
 			_store: ChannelStore,
 			_pendingMessages?: PendingMessage[],
 		): Promise<{ stopReason: string; errorMessage?: string }> {
+			// Resolve the transport's prompt profile — registered by the transport module
+			const profile = getPromptProfile(ctx.transportId);
+			if (!profile) {
+				throw new Error(`No prompt profile registered for transport "${ctx.transportId}"`);
+			}
+
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
 
@@ -801,6 +809,7 @@ function createRunner(
 				ctx.users,
 				skills,
 				agents,
+				profile,
 			);
 			session.agent.state.systemPrompt = systemPrompt;
 
@@ -837,7 +846,7 @@ function createRunner(
 							await fn();
 						} catch (err) {
 							const errMsg = err instanceof Error ? err.message : String(err);
-							log.logWarning(`Slack API error (${errorContext})`, errMsg);
+							log.logWarning(`Transport API error (${errorContext})`, errMsg);
 							try {
 								await ctx.respondInThread(`_Error: ${errMsg}_`);
 							} catch {
@@ -847,7 +856,7 @@ function createRunner(
 					});
 				},
 				enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog = true): void {
-					const parts = splitForSlack(text);
+					const parts = splitMessage(text, profile.maxMessageChars);
 					for (const part of parts) {
 						this.enqueue(
 							() => (target === "main" ? ctx.respond(part, doLog) : ctx.respondInThread(part)),
@@ -895,7 +904,7 @@ function createRunner(
 			}
 
 			if (nonImagePaths.length > 0) {
-				userMessage += `\n\n<slack_attachments>\n${nonImagePaths.join("\n")}\n</slack_attachments>`;
+				userMessage += `\n\n<${profile.attachmentsTagName}>\n${nonImagePaths.join("\n")}\n</${profile.attachmentsTagName}>`;
 			}
 
 			// Debug: write context to last_prompt.jsonl

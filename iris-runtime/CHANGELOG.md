@@ -5,8 +5,11 @@
 ### Changed
 
 - Internal: shared transport types moved to `src/transport/types.ts` — `ChannelInfo`, `UserInfo`, and `MessageContext` (rename of `SlackContext`, which stays as a compat re-export alongside `TelegramContext`). Contexts now carry a `transportId` (`"slack" | "telegram" | "bridge"`), and a `TransportPromptProfile` registry is in place for the upcoming prompt de-Slacking. The engine (`agent.ts`) no longer imports transport modules. No behavior change.
+- The system prompt is now composed from the transport's `TransportPromptProfile` (identity line, formatting rules, channel/user directory, `[SILENT]`/attach notes, attachment tag name, message-split limit) instead of hardcoded Slack text. Slack prompts are byte-identical to before; bridge-only runs keep the Slack fragments. The `"Slack API error (…)"` log line is now `"Transport API error (…)"` — update any log grep that matched on it.
 
 ### Fixed
+
+- Telegram channels now receive Telegram-specific system-prompt guidance — `**bold**`/`_italic_`/backtick code per the HTML converter, chat directory, plain-URL advice — instead of Slack mrkdwn rules that rendered as literal asterisks and broken `<url|text>` links. Non-image attachments are wrapped in `<telegram_attachments>` rather than `<slack_attachments>`.
 
 - Slack channel-mode consistency pass:
   - `passthrough` channels now forward **every** message shape. Top-level channel messages without an `@iris` mention were silently dropped, and DMs on a passthrough-configured channel ID ran the LLM — both contradicting "forwarded to the endpoint, LLM never runs". Top-level forwarding honours `requireMentionForTopLevel`.
@@ -24,6 +27,7 @@
 
 ### UPGRADING
 
+- Telegram installs: the system prompt for Telegram channels changed (Telegram formatting/directory guidance, `<telegram_attachments>` tag). No configuration changes required, but the bot's message formatting on Telegram will improve/change mid-conversation after upgrade.
 - `interactive-thread` channels that relied on top-level non-mention messages being ignored (the previous, unintended behaviour) must now set `"requireMentionForTopLevel": true` in `data/channels.json`.
 - If overlapping wildcard patterns exist in `channels.json` (e.g. `"D*"` and `"DA*"`), the longest matching prefix now wins regardless of file order — review any installs that depended on entry order.
 
