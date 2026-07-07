@@ -3,7 +3,15 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, readdirSync, statS
 import { readFile } from "fs/promises";
 import { join } from "path";
 import * as log from "./log.js";
-import type { SlackBot, SlackEvent } from "./slack.js";
+import type { TransportEvent } from "./transport/types.js";
+
+/**
+ * Sink the watcher enqueues synthetic events into. main.ts wires this to a
+ * router that picks the owning transport via transport.ownsChannel().
+ */
+export interface EventSink {
+	enqueueEvent(event: TransportEvent & { type: "mention" }): boolean;
+}
 
 // ============================================================================
 // Event Types
@@ -50,13 +58,13 @@ export class EventsWatcher {
 
 	constructor(
 		private eventsDir: string,
-		private slack: SlackBot,
+		private sink: EventSink,
 	) {
 		this.startTime = Date.now();
 	}
 
 	/**
-	 * Start watching for events. Call this after SlackBot is ready.
+	 * Start watching for events. Call this after the transports are ready.
 	 */
 	start(): void {
 		// Ensure events directory exists
@@ -332,9 +340,9 @@ export class EventsWatcher {
 
 		const message = `[EVENT:${filename}:${event.type}:${scheduleInfo}] ${event.text}`;
 
-		// Create synthetic SlackEvent
-		const syntheticEvent: SlackEvent = {
-			type: "mention",
+		// Create synthetic event (mention-shaped, routed by channel id)
+		const syntheticEvent = {
+			type: "mention" as const,
 			channel: event.channelId,
 			user: "EVENT",
 			text: message,
@@ -342,7 +350,7 @@ export class EventsWatcher {
 		};
 
 		// Enqueue for processing
-		const enqueued = this.slack.enqueueEvent(syntheticEvent);
+		const enqueued = this.sink.enqueueEvent(syntheticEvent);
 
 		if (enqueued && deleteAfter) {
 			// Delete file after successful enqueue (immediate and one-shot)
@@ -378,7 +386,7 @@ export class EventsWatcher {
 /**
  * Create and start an events watcher.
  */
-export function createEventsWatcher(workspaceDir: string, slack: SlackBot, subDir?: string): EventsWatcher {
+export function createEventsWatcher(workspaceDir: string, sink: EventSink, subDir?: string): EventsWatcher {
 	const eventsDir = subDir ? join(workspaceDir, subDir, "events") : join(workspaceDir, "events");
-	return new EventsWatcher(eventsDir, slack);
+	return new EventsWatcher(eventsDir, sink);
 }
