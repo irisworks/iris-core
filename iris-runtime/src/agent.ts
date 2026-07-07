@@ -20,7 +20,7 @@ import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
-import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
+import type { ChannelInfo, MessageContext, UserInfo } from "./transport/types.js";
 import type { ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
 
@@ -35,7 +35,7 @@ export interface PendingMessage {
 
 export interface AgentRunner {
 	run(
-		ctx: SlackContext,
+		ctx: MessageContext,
 		store: ChannelStore,
 		pendingMessages?: PendingMessage[],
 	): Promise<{ stopReason: string; errorMessage?: string }>;
@@ -574,7 +574,7 @@ function createRunner(
 
 	// Mutable per-run state - event handler references this
 	const runState = {
-		ctx: null as SlackContext | null,
+		ctx: null as MessageContext | null,
 		logCtx: null as { channelId: string; userName?: string; channelName?: string } | null,
 		queue: null as {
 			enqueue(fn: () => Promise<void>, errorContext: string): void;
@@ -760,7 +760,7 @@ function createRunner(
 
 	return {
 		async run(
-			ctx: SlackContext,
+			ctx: MessageContext,
 			_store: ChannelStore,
 			_pendingMessages?: PendingMessage[],
 		): Promise<{ stopReason: string; errorMessage?: string }> {

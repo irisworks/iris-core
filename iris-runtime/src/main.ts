@@ -236,6 +236,8 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 	const eventFilename = isEvent ? event.text.match(/^\[EVENT:([^:]+):/)?.[1] : undefined;
 
 	return {
+		// stubBot in bridge-only mode carries transportId "bridge"
+		transportId: (slack as { transportId?: string }).transportId ?? "slack",
 		message: {
 			text: event.text,
 			rawText: event.text,
@@ -463,6 +465,7 @@ function createTelegramContext(event: TelegramEvent, bot: TelegramBot, state: Ch
 	let updatePromise = Promise.resolve();
 
 	return {
+		transportId: bot.transportId,
 		message: {
 			text: event.text,
 			rawText: event.text,
@@ -682,6 +685,7 @@ const eventsWatcherBot = SLACK_ENABLED
 	: (() => {
 		// Bridge-only stub — used when no Slack tokens but events watcher still needs a bot
 		const stubBot = {
+			transportId: "bridge",
 			getUser: () => undefined,
 			getChannel: () => undefined,
 			getAllChannels: () => [],
