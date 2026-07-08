@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Dispatch regression suite (`iris-runtime/test/`, run via `npm test`, wired into CI): 42 tests porting the synthetic-event harness that verified PR #37's channel-mode consistency fixes into a committed, always-run suite. Covers config resolution (wildcard precedence, unknown-mode rejection), passthrough forwarding shapes, admin commands, leads replay and queue bounds, session creation/gating for thread and interactive-thread modes, single-ack behavior (including on handler errors), and startup resume of interrupted runs. This is the safety net for the upcoming presets-over-flags dispatch rewrite — the suite must stay green (modulo the six-questions decisions) as that work lands.
+
 ### Changed
 
 - Internal: shared transport types moved to `src/transport/types.ts` — `ChannelInfo`, `UserInfo`, and `MessageContext` (rename of `SlackContext`, which stays as a compat re-export alongside `TelegramContext`). Contexts now carry a `transportId` (`"slack" | "telegram" | "bridge"`), and a `TransportPromptProfile` registry is in place for the upcoming prompt de-Slacking. The engine (`agent.ts`) no longer imports transport modules. No behavior change.
