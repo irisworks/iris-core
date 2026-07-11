@@ -58,6 +58,15 @@ cannot target a passthrough channel.
 The endpoint's response is read as JSON; the first of `response`, `text`, or
 `error` is posted back.
 
+## Queueing and overflow
+
+Each channel queues at most 5 pending messages for the LLM. This includes
+`leads` channels: under burst load, messages beyond the cap are logged with a
+warning but do not trigger a run — no notice is posted into the channel itself,
+which is often an external-facing feed. The full message text is always
+preserved in the channel's `log.jsonl`, so no lead is lost; only the automated
+response is skipped.
+
 ## Sessions
 
 `thread` and `interactive-thread` modes are built on **sessions** — durable
