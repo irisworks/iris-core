@@ -41,7 +41,9 @@ bash bootstrap.sh --setup --no-keyvault
 
 The script will:
 
-1. Install system dependencies (Docker, Node 22, jq, nginx, certbot, GitHub CLI, Terraform).
+1. Install system dependencies (Docker, Node 22, jq, GitHub CLI). nginx and
+   certbot are installed only if you configure a public domain; the Azure CLI
+   and Terraform are installed only on the Key Vault paths (Options 2 and 4).
 2. Log into GitHub (`gh auth login` — browser or device code).
 3. Ask for your LLM provider (anthropic / openai / foundry-e2 / amazon-bedrock) and API key.
 4. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
@@ -83,8 +85,9 @@ Same as Option 1, but secrets live in Azure Key Vault instead of `/iris/.env`.
 bash bootstrap.sh --setup --keyvault
 ```
 
-Additional steps over Option 1: Azure login (`az login`, skipped if the VM has a
-managed identity), then prompts for a Key Vault name (default `iris-kv-<hostname>`)
+Additional steps over Option 1: the Azure CLI and Terraform are installed,
+followed by Azure login (`az login`, skipped if the VM has a managed identity),
+then prompts for a Key Vault name (default `iris-kv-<hostname>`)
 and resource group. The script creates the vault and seeds all secrets into it.
 
 ---

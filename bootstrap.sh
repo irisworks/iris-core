@@ -164,7 +164,9 @@ if ! command -v gh &>/dev/null; then
   sudo apt-get install -y gh
 fi
 
-if ! command -v terraform &>/dev/null; then
+# Terraform only needed for the cloud profile (Key Vault path) — the zero-cloud
+# path has no Terraform-managed infrastructure
+if [[ "$NO_KEYVAULT" == false ]] && ! command -v terraform &>/dev/null; then
   log "Installing Terraform..."
   wget -qO- https://apt.releases.hashicorp.com/gpg \
     | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
@@ -175,16 +177,8 @@ fi
 
 if ! command -v jq &>/dev/null; then sudo apt-get install -y jq; fi
 
-if ! command -v nginx &>/dev/null; then
-  log "Installing nginx..."
-  sudo apt-get install -y nginx
-  sudo systemctl enable nginx
-fi
-
-if ! command -v certbot &>/dev/null; then
-  log "Installing certbot..."
-  sudo apt-get install -y certbot python3-certbot-nginx
-fi
+# nginx + certbot are installed in step 5, and only when a public domain
+# (IRIS_BASE_DOMAIN) is configured — the default path serves nothing publicly.
 
 if ! command -v iris-git &>/dev/null; then
   log "Installing iris-git wrapper..."
@@ -791,68 +785,87 @@ MODELJSON
 fi
 
 # ────────────────────────────────────────────────────────────
-# 5. DNS + NSG setup (Azure only, only if IRIS_BASE_DOMAIN set)
+# 5. Public networking (only if IRIS_BASE_DOMAIN set)
+#    nginx/certbot install + base config for any domain;
+#    DNS + NSG automation is Azure-only.
 # ────────────────────────────────────────────────────────────
-if [[ -n "$IRIS_BASE_DOMAIN" && "$NO_KEYVAULT" == false ]]; then
+if [[ -n "$IRIS_BASE_DOMAIN" ]]; then
   log_h "Public networking ($IRIS_BASE_DOMAIN)"
 
-  VM_NAME=$(curl -sf -H Metadata:true \
-    "http://169.254.169.254/metadata/instance/compute/name?api-version=2021-02-01&format=text" || echo "")
-  VM_RG=$(curl -sf -H Metadata:true \
-    "http://169.254.169.254/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text" || echo "")
-
-  if [[ -n "$VM_NAME" && -n "$VM_RG" ]]; then
-    PUBLIC_IP=$(az network public-ip list -g "$VM_RG" \
-      --query "[0].ipAddress" -o tsv 2>/dev/null || echo "")
-
-    if [[ -n "$PUBLIC_IP" ]]; then
-      log "VM: $VM_NAME ($VM_RG) — public IP: $PUBLIC_IP"
-
-      PARENT_ZONE=$(echo "$IRIS_BASE_DOMAIN" | sed 's/^[^.]*\.//')
-      DNS_PREFIX=$(echo "$IRIS_BASE_DOMAIN" | cut -d. -f1)
-      DNS_ZONE_RG=$(az network dns zone list \
-        --query "[?name=='$PARENT_ZONE'].resourceGroup | [0]" -o tsv 2>/dev/null || echo "")
-
-      if [[ -n "$DNS_ZONE_RG" ]]; then
-        log "DNS zone: $PARENT_ZONE (rg: $DNS_ZONE_RG)"
-        for record in "$DNS_PREFIX" "*.$DNS_PREFIX"; do
-          az network dns record-set a create \
-            --zone-name "$PARENT_ZONE" -g "$DNS_ZONE_RG" \
-            -n "$record" --ttl 300 2>/dev/null || true
-          az network dns record-set a remove-record \
-            --zone-name "$PARENT_ZONE" -g "$DNS_ZONE_RG" \
-            -n "$record" --ipv4-address "$PUBLIC_IP" 2>/dev/null || true
-          az network dns record-set a add-record \
-            --zone-name "$PARENT_ZONE" -g "$DNS_ZONE_RG" \
-            -n "$record" --ipv4-address "$PUBLIC_IP" 2>/dev/null
-          log "DNS: $record.$PARENT_ZONE → $PUBLIC_IP"
-        done
-      else
-        log "Warning: DNS zone '$PARENT_ZONE' not found — set DNS records manually"
-      fi
-
-      NSG_NAME=$(az network nsg list -g "$VM_RG" --query "[0].name" -o tsv 2>/dev/null || echo "")
-      if [[ -n "$NSG_NAME" ]]; then
-        for rule in "AllowHTTP:80:100" "AllowHTTPS:443:101"; do
-          rname=$(echo "$rule" | cut -d: -f1)
-          rport=$(echo "$rule" | cut -d: -f2)
-          rprio=$(echo "$rule" | cut -d: -f3)
-          existing=$(az network nsg rule show --nsg-name "$NSG_NAME" -g "$VM_RG" -n "$rname" 2>/dev/null || echo "")
-          if [[ -z "$existing" ]]; then
-            az network nsg rule create --nsg-name "$NSG_NAME" -g "$VM_RG" \
-              -n "$rname" --priority "$rprio" \
-              --destination-port-ranges "$rport" \
-              --access Allow --protocol Tcp --direction Inbound -o none
-            log "NSG: opened port $rport"
-          else
-            log "NSG: port $rport already open"
-          fi
-        done
-      fi
-    fi
+  # nginx + certbot are only needed when serving a public domain, so they are
+  # installed here rather than with the base system dependencies.
+  if ! command -v nginx &>/dev/null; then
+    log "Installing nginx..."
+    sudo apt-get install -y nginx
+    sudo systemctl enable nginx
+  fi
+  if ! command -v certbot &>/dev/null; then
+    log "Installing certbot..."
+    sudo apt-get install -y certbot python3-certbot-nginx
   fi
 
-  [[ -z "$CERTBOT_EMAIL" ]] && CERTBOT_EMAIL="admin@${PARENT_ZONE:-$IRIS_BASE_DOMAIN}"
+  PARENT_ZONE=$(echo "$IRIS_BASE_DOMAIN" | sed 's/^[^.]*\.//')
+
+  if [[ "$NO_KEYVAULT" == false ]]; then
+    VM_NAME=$(curl -sf -H Metadata:true \
+      "http://169.254.169.254/metadata/instance/compute/name?api-version=2021-02-01&format=text" || echo "")
+    VM_RG=$(curl -sf -H Metadata:true \
+      "http://169.254.169.254/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text" || echo "")
+
+    if [[ -n "$VM_NAME" && -n "$VM_RG" ]]; then
+      PUBLIC_IP=$(az network public-ip list -g "$VM_RG" \
+        --query "[0].ipAddress" -o tsv 2>/dev/null || echo "")
+
+      if [[ -n "$PUBLIC_IP" ]]; then
+        log "VM: $VM_NAME ($VM_RG) — public IP: $PUBLIC_IP"
+
+        DNS_PREFIX=$(echo "$IRIS_BASE_DOMAIN" | cut -d. -f1)
+        DNS_ZONE_RG=$(az network dns zone list \
+          --query "[?name=='$PARENT_ZONE'].resourceGroup | [0]" -o tsv 2>/dev/null || echo "")
+
+        if [[ -n "$DNS_ZONE_RG" ]]; then
+          log "DNS zone: $PARENT_ZONE (rg: $DNS_ZONE_RG)"
+          for record in "$DNS_PREFIX" "*.$DNS_PREFIX"; do
+            az network dns record-set a create \
+              --zone-name "$PARENT_ZONE" -g "$DNS_ZONE_RG" \
+              -n "$record" --ttl 300 2>/dev/null || true
+            az network dns record-set a remove-record \
+              --zone-name "$PARENT_ZONE" -g "$DNS_ZONE_RG" \
+              -n "$record" --ipv4-address "$PUBLIC_IP" 2>/dev/null || true
+            az network dns record-set a add-record \
+              --zone-name "$PARENT_ZONE" -g "$DNS_ZONE_RG" \
+              -n "$record" --ipv4-address "$PUBLIC_IP" 2>/dev/null
+            log "DNS: $record.$PARENT_ZONE → $PUBLIC_IP"
+          done
+        else
+          log "Warning: DNS zone '$PARENT_ZONE' not found — set DNS records manually"
+        fi
+
+        NSG_NAME=$(az network nsg list -g "$VM_RG" --query "[0].name" -o tsv 2>/dev/null || echo "")
+        if [[ -n "$NSG_NAME" ]]; then
+          for rule in "AllowHTTP:80:100" "AllowHTTPS:443:101"; do
+            rname=$(echo "$rule" | cut -d: -f1)
+            rport=$(echo "$rule" | cut -d: -f2)
+            rprio=$(echo "$rule" | cut -d: -f3)
+            existing=$(az network nsg rule show --nsg-name "$NSG_NAME" -g "$VM_RG" -n "$rname" 2>/dev/null || echo "")
+            if [[ -z "$existing" ]]; then
+              az network nsg rule create --nsg-name "$NSG_NAME" -g "$VM_RG" \
+                -n "$rname" --priority "$rprio" \
+                --destination-port-ranges "$rport" \
+                --access Allow --protocol Tcp --direction Inbound -o none
+              log "NSG: opened port $rport"
+            else
+              log "NSG: port $rport already open"
+            fi
+          done
+        fi
+      fi
+    fi
+  else
+    log "Note: DNS/NSG setup skipped (requires Azure CLI). Point your domain's DNS records at this machine manually."
+  fi
+
+  [[ -z "$CERTBOT_EMAIL" ]] && CERTBOT_EMAIL="admin@${PARENT_ZONE}"
 
   log "Writing base nginx config..."
   sudo tee /etc/nginx/sites-available/iris-default > /dev/null <<NGINX
@@ -867,8 +880,6 @@ NGINX
   sudo rm -f /etc/nginx/sites-enabled/default
   sudo nginx -t 2>/dev/null && sudo systemctl reload nginx
   log "nginx ready"
-elif [[ -n "$IRIS_BASE_DOMAIN" && "$NO_KEYVAULT" == true ]]; then
-  log "Note: DNS/NSG setup skipped (requires Azure CLI). Configure your domain manually."
 fi
 
 # ────────────────────────────────────────────────────────────
