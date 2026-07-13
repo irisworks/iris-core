@@ -4,6 +4,8 @@
 
 ### Changed
 
+- License changed from MIT to Apache License 2.0 (`LICENSE`, new `NOTICE` file, `package.json` license field, README/CONTRIBUTING mentions) (IRIS-109).
+
 - Internal: shared transport types moved to `src/transport/types.ts` — `ChannelInfo`, `UserInfo`, and `MessageContext` (rename of `SlackContext`, which stays as a compat re-export alongside `TelegramContext`). Contexts now carry a `transportId` (`"slack" | "telegram" | "bridge"`), and a `TransportPromptProfile` registry is in place for the upcoming prompt de-Slacking. The engine (`agent.ts`) no longer imports transport modules. No behavior change.
 - Internal: main.ts is now pure wiring — transports constructed from env (Slack if tokens, Telegram if token, Bridge always), then API/bridge/events hookup. The events watcher and the internal API route by `transport.ownsChannel(channelId)` instead of inline `tg-*` checks. One behavior fix from the routing: API endpoints that post to a channel (e.g. `POST /sessions/open`) now reach the transport that owns the channel — a `tg-*` channel goes to Telegram even when Slack is connected (previously it was always sent to the preferred bot and failed). Session endpoints keep the old preference order (Slack, then Telegram, then Bridge).
 - Internal: `ChannelTransport` interface finalized in `transport/types.ts` (start/stop, ownsChannel, getChannels/getUsers, postMessage/updateMessage, enqueueEvent, createContext, promptProfile). `SlackBot` and `TelegramBot` implement it; the context factories moved verbatim from main.ts into slack.ts/telegram.ts; the bridge-only stub bot is replaced by a real `BridgeTransport` (`transport/bridge.ts`). Adding a transport requires zero engine edits. No behavior change.
