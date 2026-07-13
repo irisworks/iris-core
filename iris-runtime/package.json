@@ -45,7 +45,7 @@
 		"iris"
 	],
 	"author": "Iris Core Contributors",
-	"license": "MIT",
+	"license": "Apache-2.0",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/irisworks/iris-core.git",
