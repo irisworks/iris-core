@@ -31,5 +31,7 @@ jobs:
           cache-dependency-path: iris-runtime/package-lock.json
       - run: npm ci
       - run: npm run build
+      - name: Dispatch regression suite
+        run: npm test
       - name: Smoke test (bridge-only boot)
         run: bash scripts/smoke.sh

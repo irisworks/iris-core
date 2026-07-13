@@ -16,6 +16,7 @@
 		"clean": "rm -rf dist",
 		"build": "tsc -p tsconfig.build.json && chmod +x dist/main.js",
 		"dev": "tsc -p tsconfig.build.json --watch",
+		"test": "node --test test/*.test.mjs",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
