@@ -14,6 +14,9 @@
  *                                          body: { channelId, text, user? }
  *   POST /escalate                       — sub-agent escalates a problem to Iris
  *                                          body: { agent, issue, context?, severity?, environment? }
+ *   GET  /secrets/:name                  — resolve a secret (env or IRIS_SECRET_BROKER_URL backend)
+ *                                          header: X-Iris-Caller (agent name; default "iris" = unrestricted)
+ *                                          sub-agents must be allow-listed in agents.json[caller].secrets
  *
  *   POST   /sessions                     — create session
  *   GET    /sessions                     — list all sessions
@@ -25,7 +28,7 @@
  *   POST   /sessions/open                — post to channel, create session, return sessionId + threadTs
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
@@ -37,6 +40,8 @@ import {
 	updateSession,
 	type Session,
 } from "./sessions.js";
+import { loadAgentRegistry } from "./bridge.js";
+import { getSecretProvider } from "./secrets.js";
 
 // Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
 export interface SessionInjector {
@@ -94,7 +99,7 @@ export function startApiServer(
 	workingDir: string,
 	channelStates: Map<string, ChannelState>,
 	getTransports: () => ApiTransport[] = () => [],
-): void {
+): Server {
 	// Channel-addressed operations route to the transport that owns the channel.
 	// Session operations use the first transport — registry order is the
 	// preference order (Slack, then Telegram, then Bridge), matching the old
@@ -133,6 +138,30 @@ export function startApiServer(
 					running: state.running,
 				}));
 				json(res, 200, { channels });
+				return;
+			}
+
+			// ── GET /secrets/:name ────────────────────────────────────────────────────
+			// X-Iris-Caller identifies the requester. "iris" (or header absent) is
+			// unrestricted; any other caller must be allow-listed in agents.json.
+			if (method === "GET" && urlParts[0] === "secrets" && urlParts.length === 2 && urlParts[1]) {
+				const secretName = urlParts[1];
+				const caller = (req.headers["x-iris-caller"] as string | undefined) || "iris";
+				if (caller !== "iris") {
+					const registry = loadAgentRegistry(workingDir);
+					const allowed = registry[caller]?.secrets ?? [];
+					if (!allowed.includes(secretName)) {
+						log.logWarning(`[api] GET /secrets/${secretName} denied for caller '${caller}'`);
+						json(res, 403, { error: `caller '${caller}' is not allow-listed for secret '${secretName}'` });
+						return;
+					}
+				}
+				const value = await getSecretProvider().get(secretName);
+				if (value === undefined) {
+					json(res, 404, { error: "secret not found" });
+					return;
+				}
+				json(res, 200, { value });
 				return;
 			}
 
@@ -502,4 +531,6 @@ export function startApiServer(
 	server.on("error", (err) => {
 		log.logWarning("[api] server error", err.message);
 	});
+
+	return server;
 }
