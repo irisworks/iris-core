@@ -159,6 +159,8 @@ export function startBridgeServer(port: number, workingDir: string): void {
 export interface AgentEntry {
 	bridge_url: string;
 	description?: string;
+	/** Secret names this agent may request via GET /secrets/:name. Omitted/empty = no access. */
+	secrets?: string[];
 }
 
 export type AgentRegistry = Record<string, AgentEntry>;
