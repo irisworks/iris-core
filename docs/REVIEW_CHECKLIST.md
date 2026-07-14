@@ -68,7 +68,7 @@ Each item below is checkable against a specific file, not aspirational.
       in `slack.ts`/`telegram.ts`), the returned object must satisfy
       `MessageContext` in `transport/types.ts` in full — in particular
       `transportId` must be stamped correctly (`"slack" | "telegram" |
-      "bridge"`), since `agent.ts` uses it to look up the prompt profile via
+      "bridge" | "web"`), since `agent.ts` uses it to look up the prompt profile via
       `getPromptProfile(ctx.transportId)` and throws if none is registered.
 - [ ] **New transport-specific prompt text lives on `TransportPromptProfile`,
       not in `agent.ts`.** `buildSystemPrompt` in `agent.ts` must stay free of

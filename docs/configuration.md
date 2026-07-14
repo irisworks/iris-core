@@ -16,6 +16,8 @@ env vars.
 | `IRIS_PROVIDER` / `IRIS_MODEL` | `anthropic` / provider default | LLM provider and model (see `data/models.json`) |
 | `IRIS_SLACK_APP_TOKEN` / `IRIS_SLACK_BOT_TOKEN` | — | Slack tokens; presence enables the Slack transport |
 | `TELEGRAM_BOT_TOKEN` | — | Telegram token; presence enables the Telegram transport |
+| `IRIS_WEBUI_PORT` | — | Presence enables the built-in web chat transport, bound to `127.0.0.1` |
+| `IRIS_WEBUI_PASSWORD` | — | Shared-secret login for the web UI. Unset = no auth gate (fine for loopback-only use; set before exposing via `serve-public`) |
 | `IRIS_ENV` | `prod` | `preview` \| `prod` |
 | `IRIS_API_PORT` / `IRIS_API_HOST` | `3000` / `127.0.0.1` | Internal HTTP API bind (always on) |
 | `IRIS_API_TOKEN` | — | When set, API requires `Authorization: Bearer <token>` (except `/health`) |
