@@ -487,4 +487,4 @@ npx tsx --watch-path src --watch src/main.ts --sandbox=docker:mom-sandbox ./data
 
 ## License
 
-MIT
+Apache License 2.0
