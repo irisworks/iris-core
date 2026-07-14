@@ -65,6 +65,14 @@ function randomToken(): string {
 	return randomBytes(24).toString("hex");
 }
 
+/**
+ * `thread`/`agent` query params end up in filesystem paths (`WEBUI-<thread>`
+ * is joined onto workingDir in resolveChannelDir) and agents.json lookups, so
+ * they're restricted to a safe id charset — no `/`, `..`, or other path
+ * metacharacters can smuggle a directory escape through `path.join`.
+ */
+const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
 export class WebTransport implements ChannelTransport {
 	readonly transportId = "web";
 	readonly promptProfile = webPromptProfile;
@@ -101,6 +109,11 @@ export class WebTransport implements ChannelTransport {
 		server.on("upgrade", (req, socket, head) => {
 			if (!this.isAuthed(req)) {
 				socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+				socket.destroy();
+				return;
+			}
+			if (!this.hasValidThreadAndAgent(req)) {
+				socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
 				socket.destroy();
 				return;
 			}
@@ -231,6 +244,16 @@ export class WebTransport implements ChannelTransport {
 		const cookie = req.headers.cookie ?? "";
 		const match = /(?:^|;\s*)iris_webui_session=([^;]+)/.exec(cookie);
 		return !!match && this.sessionTokens.has(match[1]);
+	}
+
+	/** Rejects requests before the WS handshake if `thread`/`agent` don't match SAFE_ID. */
+	private hasValidThreadAndAgent(req: IncomingMessage): boolean {
+		const url = new URL(req.url ?? "/ws", "http://localhost");
+		const thread = url.searchParams.get("thread");
+		const agent = url.searchParams.get("agent");
+		if (thread !== null && !SAFE_ID.test(thread)) return false;
+		if (agent !== null && !SAFE_ID.test(agent)) return false;
+		return true;
 	}
 
 	private handleConnection(ws: WebSocket, req: IncomingMessage): void {

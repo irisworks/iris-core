@@ -206,3 +206,30 @@ test("web transport: ?agent= for an unregistered agent returns an error frame", 
 
 	ws.close();
 });
+
+test("web transport: a path-traversal thread id is rejected before the WS handshake completes", async () => {
+	const port = 19406;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {} });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	for (const badThread of ["../../etc/passwd", "..%2f..%2fsecrets", "a/b", "..", ""]) {
+		const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=${badThread}`);
+		const rejected = await new Promise((resolve) => {
+			ws.on("open", () => resolve(false));
+			ws.on("unexpected-response", (_req, res) => resolve(res.statusCode === 400));
+			ws.on("error", () => resolve(true));
+		});
+		assert.equal(rejected, true, `expected thread=${JSON.stringify(badThread)} to be rejected`);
+	}
+
+	// A safe id still connects fine.
+	const ok = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=safe-thread_123`);
+	const opened = await new Promise((resolve) => {
+		ok.on("open", () => resolve(true));
+		ok.on("unexpected-response", () => resolve(false));
+	});
+	assert.equal(opened, true);
+	ok.close();
+});

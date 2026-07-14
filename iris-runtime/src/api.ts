@@ -28,7 +28,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { randomBytes, timingSafeEqual } from "crypto";
 import * as log from "./log.js";
 import {
 	createSession,
@@ -74,11 +74,22 @@ function bearerTokenMatches(authHeader: string | undefined, expected: string): b
 	return secretMatches(match[1], expected);
 }
 
-/** Constant-time string comparison — hashes both sides first so timingSafeEqual gets equal-length buffers. */
+/**
+ * Constant-time string comparison for secrets (tokens/passwords) already held
+ * in memory — not a storage hash. Pads both sides to a fixed-size buffer so
+ * timingSafeEqual gets equal-length inputs without hashing the secret (a bare
+ * SHA-256 of password-shaped data trips password-hashing-strength scanners,
+ * and hashing buys nothing here since we never persist or index the digest).
+ */
 export function secretMatches(presented: string, expected: string): boolean {
-	const presentedHash = createHash("sha256").update(presented).digest();
-	const expectedHash = createHash("sha256").update(expected).digest();
-	return timingSafeEqual(presentedHash, expectedHash);
+	const presentedBuf = Buffer.from(presented, "utf8");
+	const expectedBuf = Buffer.from(expected, "utf8");
+	const size = Math.max(presentedBuf.length, expectedBuf.length, 32);
+	const a = Buffer.alloc(size);
+	const b = Buffer.alloc(size);
+	presentedBuf.copy(a);
+	expectedBuf.copy(b);
+	return timingSafeEqual(a, b) && presentedBuf.length === expectedBuf.length;
 }
 
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
