@@ -14,6 +14,9 @@
  *                                          body: { channelId, text, user? }
  *   POST /escalate                       — sub-agent escalates a problem to Iris
  *                                          body: { agent, issue, context?, severity?, environment? }
+ *   GET  /secrets/:name                  — resolve a secret (env or IRIS_SECRET_BROKER_URL backend)
+ *                                          header: X-Iris-Caller (agent name; default "iris" = unrestricted)
+ *                                          sub-agents must be allow-listed in agents.json[caller].secrets
  *
  *   POST   /sessions                     — create session
  *   GET    /sessions                     — list all sessions
@@ -25,10 +28,10 @@
  *   POST   /sessions/open                — post to channel, create session, return sessionId + threadTs
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { randomBytes, timingSafeEqual } from "crypto";
 import * as log from "./log.js";
 import {
 	createSession,
@@ -37,6 +40,8 @@ import {
 	updateSession,
 	type Session,
 } from "./sessions.js";
+import { loadAgentRegistry } from "./bridge.js";
+import { getSecretProvider } from "./secrets.js";
 
 // Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
 export interface SessionInjector {
@@ -53,7 +58,7 @@ interface ChannelState {
 	running: boolean;
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+export function readBody(req: IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
 		req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -71,10 +76,25 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 function bearerTokenMatches(authHeader: string | undefined, expected: string): boolean {
 	const match = /^Bearer\s+(.+)$/i.exec(authHeader ?? "");
 	if (!match) return false;
-	// Hash both sides so timingSafeEqual gets equal-length buffers
-	const presented = createHash("sha256").update(match[1]).digest();
-	const wanted = createHash("sha256").update(expected).digest();
-	return timingSafeEqual(presented, wanted);
+	return secretMatches(match[1], expected);
+}
+
+/**
+ * Constant-time string comparison for secrets (tokens/passwords) already held
+ * in memory — not a storage hash. Pads both sides to a fixed-size buffer so
+ * timingSafeEqual gets equal-length inputs without hashing the secret (a bare
+ * SHA-256 of password-shaped data trips password-hashing-strength scanners,
+ * and hashing buys nothing here since we never persist or index the digest).
+ */
+export function secretMatches(presented: string, expected: string): boolean {
+	const presentedBuf = Buffer.from(presented, "utf8");
+	const expectedBuf = Buffer.from(expected, "utf8");
+	const size = Math.max(presentedBuf.length, expectedBuf.length, 32);
+	const a = Buffer.alloc(size);
+	const b = Buffer.alloc(size);
+	presentedBuf.copy(a);
+	expectedBuf.copy(b);
+	return timingSafeEqual(a, b) && presentedBuf.length === expectedBuf.length;
 }
 
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
@@ -94,7 +114,7 @@ export function startApiServer(
 	workingDir: string,
 	channelStates: Map<string, ChannelState>,
 	getTransports: () => ApiTransport[] = () => [],
-): void {
+): Server {
 	// Channel-addressed operations route to the transport that owns the channel.
 	// Session operations use the first transport — registry order is the
 	// preference order (Slack, then Telegram, then Bridge), matching the old
@@ -133,6 +153,30 @@ export function startApiServer(
 					running: state.running,
 				}));
 				json(res, 200, { channels });
+				return;
+			}
+
+			// ── GET /secrets/:name ────────────────────────────────────────────────────
+			// X-Iris-Caller identifies the requester. "iris" (or header absent) is
+			// unrestricted; any other caller must be allow-listed in agents.json.
+			if (method === "GET" && urlParts[0] === "secrets" && urlParts.length === 2 && urlParts[1]) {
+				const secretName = urlParts[1];
+				const caller = (req.headers["x-iris-caller"] as string | undefined) || "iris";
+				if (caller !== "iris") {
+					const registry = loadAgentRegistry(workingDir);
+					const allowed = registry[caller]?.secrets ?? [];
+					if (!allowed.includes(secretName)) {
+						log.logWarning(`[api] GET /secrets/${secretName} denied for caller '${caller}'`);
+						json(res, 403, { error: `caller '${caller}' is not allow-listed for secret '${secretName}'` });
+						return;
+					}
+				}
+				const value = await getSecretProvider().get(secretName);
+				if (value === undefined) {
+					json(res, 404, { error: "secret not found" });
+					return;
+				}
+				json(res, 200, { value });
 				return;
 			}
 
@@ -502,4 +546,6 @@ export function startApiServer(
 	server.on("error", (err) => {
 		log.logWarning("[api] server error", err.message);
 	});
+
+	return server;
 }

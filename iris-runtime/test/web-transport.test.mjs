@@ -269,6 +269,40 @@ test("web transport: POST /upload then GET /files round-trips a file, and reject
 	assert.equal(traversalDownload.status, 400);
 });
 
+test("web transport: /upload and /files reject a path-traversal channel param, not just filename", async () => {
+	const port = 19411;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	// Query-string traversal on /upload?channel=
+	const uploadTraversal = await fetch(`http://127.0.0.1:${port}/upload?channel=${encodeURIComponent("../../../tmp/pwned")}`, {
+		method: "POST",
+		headers: { "X-Filename": "note.txt" },
+		body: "nope",
+	});
+	assert.equal(uploadTraversal.status, 400);
+
+	// A channel id outside the WEBUI- namespace (e.g. targeting another
+	// transport's channel dir) must also be rejected, even without traversal
+	// characters.
+	const uploadNonWeb = await fetch(`http://127.0.0.1:${port}/upload?channel=slack-general`, {
+		method: "POST",
+		headers: { "X-Filename": "note.txt" },
+		body: "nope",
+	});
+	assert.equal(uploadNonWeb.status, 400);
+
+	// Percent-encoded slashes in the /files channel path segment decode into
+	// a traversal after the route regex has already let them through.
+	const downloadTraversal = await fetch(`http://127.0.0.1:${port}/files/${encodeURIComponent("WEBUI-t9/../../etc")}/passwd`);
+	assert.equal(downloadTraversal.status, 400);
+
+	const downloadNonWeb = await fetch(`http://127.0.0.1:${port}/files/slack-general/note.txt`);
+	assert.equal(downloadNonWeb.status, 400);
+});
+
 test("web transport: {type: command} frames call the wired engine handler, not the local engine dispatch", async () => {
 	const port = 19408;
 	const workingDir = makeWorkingDir();
@@ -311,4 +345,31 @@ test("web transport: an unknown command action gets an error frame, not a crash"
 	assert.equal(frames[0].type, "error");
 	assert.match(frames[0].message, /Unknown command/);
 	ws.close();
+});
+
+test("web transport: a path-traversal thread id is rejected before the WS handshake completes", async () => {
+	const port = 19410;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	for (const badThread of ["../../etc/passwd", "..%2f..%2fsecrets", "a/b", "..", ""]) {
+		const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=${badThread}`);
+		const rejected = await new Promise((resolve) => {
+			ws.on("open", () => resolve(false));
+			ws.on("unexpected-response", (_req, res) => resolve(res.statusCode === 400));
+			ws.on("error", () => resolve(true));
+		});
+		assert.equal(rejected, true, `expected thread=${JSON.stringify(badThread)} to be rejected`);
+	}
+
+	// A safe id still connects fine.
+	const ok = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=safe-thread_123`);
+	const opened = await new Promise((resolve) => {
+		ok.on("open", () => resolve(true));
+		ok.on("unexpected-response", () => resolve(false));
+	});
+	assert.equal(opened, true);
+	ok.close();
 });

@@ -22,6 +22,7 @@ import { join } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as log from "../log.js";
 import { loadAgentRegistry, callAgentBridge } from "../bridge.js";
+import { readBody, secretMatches } from "../api.js";
 import type { ChannelState, EngineTransport } from "../engine.js";
 import { resolveChannelDir, resolveChannelPath } from "../store.js";
 import {
@@ -73,6 +74,25 @@ function randomToken(): string {
 	return randomBytes(24).toString("hex");
 }
 
+/**
+ * `thread`/`agent` query params end up in filesystem paths (`WEBUI-<thread>`
+ * is joined onto workingDir in resolveChannelDir) and agents.json lookups, so
+ * they're restricted to a safe id charset — no `/`, `..`, or other path
+ * metacharacters can smuggle a directory escape through `path.join`.
+ */
+const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * The `channel` param on /upload and /files must both stay within the
+ * SAFE_ID charset (no traversal metacharacters) AND be scoped to a
+ * WEBUI-owned channel — otherwise a browser client could read/write
+ * attachments under an arbitrary Slack/Telegram channel dir by charset-valid
+ * id alone (e.g. `channel=slack-general`), not just escape workingDir.
+ */
+function isValidWebChannelId(channelId: string): boolean {
+	return channelId.startsWith("WEBUI-") && SAFE_ID.test(channelId.slice("WEBUI-".length));
+}
+
 export class WebTransport implements ChannelTransport {
 	readonly transportId = "web";
 	readonly promptProfile = webPromptProfile;
@@ -111,6 +131,11 @@ export class WebTransport implements ChannelTransport {
 		server.on("upgrade", (req, socket, head) => {
 			if (!this.isAuthed(req)) {
 				socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+				socket.destroy();
+				return;
+			}
+			if (!this.hasValidThreadAndAgent(req)) {
+				socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
 				socket.destroy();
 				return;
 			}
@@ -244,6 +269,16 @@ export class WebTransport implements ChannelTransport {
 		return !!match && this.sessionTokens.has(match[1]);
 	}
 
+	/** Rejects requests before the WS handshake if `thread`/`agent` don't match SAFE_ID. */
+	private hasValidThreadAndAgent(req: IncomingMessage): boolean {
+		const url = new URL(req.url ?? "/ws", "http://localhost");
+		const thread = url.searchParams.get("thread");
+		const agent = url.searchParams.get("agent");
+		if (thread !== null && !SAFE_ID.test(thread)) return false;
+		if (agent !== null && !SAFE_ID.test(agent)) return false;
+		return true;
+	}
+
 	private handleConnection(ws: WebSocket, req: IncomingMessage): void {
 		const url = new URL(req.url ?? "/ws", "http://localhost");
 		const threadId = url.searchParams.get("thread") || randomToken();
@@ -359,11 +394,16 @@ export class WebTransport implements ChannelTransport {
 		res.end("not found");
 	}
 
-	/** filename must not contain path separators — reject anything that could escape the channel dir. */
+	/**
+	 * `channelId` must be a WEBUI-owned id (isValidWebChannelId) and `filename`
+	 * must not contain path separators — otherwise either can flow unsanitized
+	 * into resolveChannelDir/join and escape workingDir or reach another
+	 * transport's channel dir.
+	 */
 	private handleFileDownload(res: ServerResponse, channelId: string, filename: string): void {
-		if (filename.includes("/") || filename.includes("..")) {
+		if (!isValidWebChannelId(channelId) || filename.includes("/") || filename.includes("..")) {
 			res.writeHead(400, { "Content-Type": "text/plain" });
-			res.end("invalid filename");
+			res.end("invalid channel or filename");
 			return;
 		}
 		const channelDir = resolveChannelDir(this.workingDir, channelId);
@@ -382,9 +422,9 @@ export class WebTransport implements ChannelTransport {
 		const channelId = url.searchParams.get("channel");
 		const filenameHeader = req.headers["x-filename"];
 		const filename = Array.isArray(filenameHeader) ? filenameHeader[0] : filenameHeader;
-		if (!channelId || !filename || filename.includes("/") || filename.includes("..")) {
+		if (!channelId || !isValidWebChannelId(channelId) || !filename || filename.includes("/") || filename.includes("..")) {
 			res.writeHead(400, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ error: "channel query param and X-Filename header (no path separators) are required" }));
+			res.end(JSON.stringify({ error: "channel query param (WEBUI-<safe-id>) and X-Filename header (no path separators) are required" }));
 			return;
 		}
 		const chunks: Buffer[] = [];
@@ -400,31 +440,27 @@ export class WebTransport implements ChannelTransport {
 		});
 	}
 
-	private handleLogin(req: IncomingMessage, res: ServerResponse): void {
-		const chunks: Buffer[] = [];
-		req.on("data", (c: Buffer) => chunks.push(c));
-		req.on("end", () => {
-			let body: { password?: string };
-			try {
-				body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-			} catch {
-				res.writeHead(400, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: "invalid JSON" }));
-				return;
-			}
-			if (this.password && body.password !== this.password) {
-				res.writeHead(401, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: "wrong password" }));
-				return;
-			}
-			const token = randomToken();
-			this.sessionTokens.add(token);
-			res.writeHead(200, {
-				"Content-Type": "application/json",
-				"Set-Cookie": `iris_webui_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
-			});
-			res.end(JSON.stringify({ ok: true }));
+	private async handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		let body: { password?: string };
+		try {
+			body = JSON.parse(await readBody(req));
+		} catch {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "invalid JSON" }));
+			return;
+		}
+		if (this.password && !secretMatches(body.password ?? "", this.password)) {
+			res.writeHead(401, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "wrong password" }));
+			return;
+		}
+		const token = randomToken();
+		this.sessionTokens.add(token);
+		res.writeHead(200, {
+			"Content-Type": "application/json",
+			"Set-Cookie": `iris_webui_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
 		});
+		res.end(JSON.stringify({ ok: true }));
 	}
 }
 

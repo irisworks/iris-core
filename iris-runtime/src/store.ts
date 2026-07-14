@@ -15,7 +15,7 @@ function isVirtualChannel(channelId: string): boolean {
 		channelId.startsWith("BRIDGE-") ||
 		channelId.startsWith("ESCALATE-") ||
 		channelId.startsWith("SELFHEAL-") ||
-		channelId.startsWith("WEBUI")
+		channelId.startsWith("WEBUI-")
 	);
 }
 
