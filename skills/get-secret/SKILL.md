@@ -35,6 +35,15 @@ Sub-agents must be allow-listed for a secret name in `agents.json`:
 
 Omitted or empty `secrets` = no access — least privilege by default.
 
+**This is best-effort today, not a hard boundary.** `X-Iris-Caller` is
+self-reported, and every agent container shares the same `IRIS_API_TOKEN` —
+so a caller holding that token could claim `X-Iris-Caller: iris` and skip the
+allow-list. It's meaningful hygiene while every agent runs co-located under
+`--sandbox=host` with no isolation between them, but it doesn't defend against
+a compromised sub-agent. Becoming a real security boundary requires per-service
+unique tokens so caller identity comes from which token authenticated, not
+from a header the caller sets itself.
+
 Server-side resolution order (in `iris-runtime/src/secrets.ts`):
 
 1. Env var (name with hyphens → underscores, e.g. `APIFY-API-KEY` → `APIFY_API_KEY`)

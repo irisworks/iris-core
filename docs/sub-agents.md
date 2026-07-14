@@ -47,6 +47,17 @@ Omitted or empty `secrets` = no access. Iris herself (not a sub-agent) is
 unrestricted. See [get-secret](skills.md) and [Configuration](configuration.md) for
 the resolution backends.
 
+**This allow-list is best-effort, not a hard security boundary today.** Caller
+identity comes from the self-reported `X-Iris-Caller` header, while
+authentication is a single `IRIS_API_TOKEN` shared across every agent
+container. Any caller holding that token can set `X-Iris-Caller: iris` and
+bypass the allow-list entirely. With every sub-agent co-located on one VM under
+`--sandbox=host` today, there's no isolation between agents for the allow-list
+to defend against anyway, so this is reasonable as hygiene/audit-trail. It
+stops being sufficient once agents run as separately isolated services — at
+that point `caller` needs to be derived from *which token authenticated*
+(per-service unique tokens), not from a self-reported header.
+
 Scaffolds for new sub-agents live in `agents/`; the `spawn-agent` skill automates
 provisioning (two containers per agent: preview and prod).
 
