@@ -17,10 +17,13 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { randomBytes } from "crypto";
+import { createReadStream, existsSync, mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as log from "../log.js";
 import { loadAgentRegistry, callAgentBridge } from "../bridge.js";
-import type { ChannelState } from "../engine.js";
+import type { ChannelState, EngineTransport } from "../engine.js";
+import { resolveChannelDir, resolveChannelPath } from "../store.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
@@ -37,6 +40,12 @@ export interface WebTransportOptions {
 	workingDir: string;
 	/** Dispatch an event into the engine (wired in main.ts to engine.handleEvent) */
 	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void;
+	/** Admin actions, wired in main.ts to engine.handleStop/handleCompact/handleReset */
+	commands: {
+		stop: (channelId: string, transport: EngineTransport) => Promise<void>;
+		compact: (channelId: string, transport: EngineTransport) => Promise<void>;
+		reset: (channelId: string, transport: EngineTransport) => Promise<void>;
+	};
 }
 
 const webPromptProfile: TransportPromptProfile = {
@@ -71,6 +80,7 @@ export class WebTransport implements ChannelTransport {
 
 	private readonly workingDir: string;
 	private readonly dispatch: WebTransportOptions["dispatch"];
+	private readonly commands: WebTransportOptions["commands"];
 	private readonly port: number;
 	private readonly password: string | undefined;
 	private readonly sessionTokens = new Set<string>();
@@ -82,6 +92,7 @@ export class WebTransport implements ChannelTransport {
 	constructor(options: WebTransportOptions) {
 		this.workingDir = options.workingDir;
 		this.dispatch = options.dispatch;
+		this.commands = options.commands;
 		this.port = options.port;
 		this.password = process.env.IRIS_WEBUI_PASSWORD || undefined;
 		registerPromptProfile(this.promptProfile);
@@ -180,9 +191,10 @@ export class WebTransport implements ChannelTransport {
 				}
 			},
 			uploadFile: async (filePath: string, title?: string) => {
+				const filename = filePath.split("/").pop() ?? filePath;
 				this.broadcast(event.channel, {
 					type: "file",
-					url: `/files/${encodeURIComponent(event.channel)}/${encodeURIComponent(filePath.split("/").pop() ?? filePath)}`,
+					url: `/files/${encodeURIComponent(event.channel)}/${encodeURIComponent(filename)}`,
 					title,
 				});
 			},
@@ -256,12 +268,26 @@ export class WebTransport implements ChannelTransport {
 	}
 
 	private async handleInboundMessage(channelId: string, targetAgent: string | undefined, raw: string): Promise<void> {
-		let body: { type?: string; text?: string };
+		let body: { type?: string; text?: string; action?: string; attachments?: Array<{ local: string }> };
 		try {
 			body = JSON.parse(raw);
 		} catch {
 			return;
 		}
+
+		if (body.type === "command") {
+			// Admin actions as explicit commands, not parsed chat text — the web UI
+			// has real buttons, unlike Slack's admin channel mode.
+			const handlers = { stop: this.commands.stop, compact: this.commands.compact, reset: this.commands.reset };
+			const handler = body.action ? handlers[body.action as keyof typeof handlers] : undefined;
+			if (!handler) {
+				this.broadcast(channelId, { type: "error", message: `Unknown command '${body.action}'` });
+				return;
+			}
+			await handler(channelId, this);
+			return;
+		}
+
 		if (body.type !== "message" || !body.text) return;
 
 		if (targetAgent) {
@@ -287,7 +313,7 @@ export class WebTransport implements ChannelTransport {
 		}
 
 		const ts = (Date.now() / 1000).toFixed(6);
-		this.enqueueEvent({ channel: channelId, user: "web", text: body.text, ts, attachments: [] });
+		this.enqueueEvent({ channel: channelId, user: "web", text: body.text, ts, attachments: body.attachments ?? [] });
 	}
 
 	private handleHttp(req: IncomingMessage, res: ServerResponse): void {
@@ -304,8 +330,74 @@ export class WebTransport implements ChannelTransport {
 			return;
 		}
 
+		if (!this.isAuthed(req)) {
+			res.writeHead(401, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "unauthorized" }));
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/agents") {
+			const registry = loadAgentRegistry(this.workingDir);
+			const agents = Object.entries(registry).map(([name, entry]) => ({ name, description: entry.description }));
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ agents }));
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/upload") {
+			this.handleUpload(req, res, url);
+			return;
+		}
+
+		const filesMatch = /^\/files\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+		if (req.method === "GET" && filesMatch) {
+			this.handleFileDownload(res, decodeURIComponent(filesMatch[1]), decodeURIComponent(filesMatch[2]));
+			return;
+		}
+
 		res.writeHead(404, { "Content-Type": "text/plain" });
 		res.end("not found");
+	}
+
+	/** filename must not contain path separators — reject anything that could escape the channel dir. */
+	private handleFileDownload(res: ServerResponse, channelId: string, filename: string): void {
+		if (filename.includes("/") || filename.includes("..")) {
+			res.writeHead(400, { "Content-Type": "text/plain" });
+			res.end("invalid filename");
+			return;
+		}
+		const channelDir = resolveChannelDir(this.workingDir, channelId);
+		const candidates = [join(channelDir, "attachments", filename), join(channelDir, filename)];
+		const path = candidates.find((p) => existsSync(p));
+		if (!path) {
+			res.writeHead(404, { "Content-Type": "text/plain" });
+			res.end("not found");
+			return;
+		}
+		res.writeHead(200, { "Content-Type": "application/octet-stream" });
+		createReadStream(path).pipe(res);
+	}
+
+	private handleUpload(req: IncomingMessage, res: ServerResponse, url: URL): void {
+		const channelId = url.searchParams.get("channel");
+		const filenameHeader = req.headers["x-filename"];
+		const filename = Array.isArray(filenameHeader) ? filenameHeader[0] : filenameHeader;
+		if (!channelId || !filename || filename.includes("/") || filename.includes("..")) {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "channel query param and X-Filename header (no path separators) are required" }));
+			return;
+		}
+		const chunks: Buffer[] = [];
+		req.on("data", (c: Buffer) => chunks.push(c));
+		req.on("end", () => {
+			const attachmentsDir = join(resolveChannelDir(this.workingDir, channelId), "attachments");
+			mkdirSync(attachmentsDir, { recursive: true });
+			const safeName = `${Date.now()}_${filename}`;
+			writeFileSync(join(attachmentsDir, safeName), Buffer.concat(chunks));
+			const local = join(resolveChannelPath(channelId), "attachments", safeName);
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ local }));
+		});
 	}
 
 	private handleLogin(req: IncomingMessage, res: ServerResponse): void {
@@ -336,10 +428,13 @@ export class WebTransport implements ChannelTransport {
 	}
 }
 
-// Bare functional test page — not the reference UI (IRIS-113 builds that
-// against the WS protocol this module exposes). Just enough to prove the
-// transport end to end: login, one thread, message list, thinking indicator,
-// tool events as plain text lines, final text.
+// Reference v1 page (IRIS-113): login, thread sidebar (localStorage-backed,
+// no server-side "list my threads" endpoint — see docs/web-ui.md for why),
+// agent picker, tool-call cards fed by the onToolEvent-derived "tool" frame,
+// file attachments, and admin buttons wired to the "command" frame. Plain
+// HTML/CSS/JS on purpose — no bundler, no framework (see IRIS-113's v1 scope
+// decision). History doesn't hydrate on reconnect/refresh: Iris's own memory
+// (context.jsonl) is untouched, only the browser's visual replay is skipped.
 function renderPage(): string {
 	return `<!doctype html>
 <html>
@@ -347,73 +442,264 @@ function renderPage(): string {
 <meta charset="utf-8">
 <title>Iris</title>
 <style>
-body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
-#log { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; min-height: 300px; white-space: pre-wrap; }
-.tool { color: #666; font-size: 0.9em; }
-.err { color: #b00; }
-form { display: flex; gap: 0.5rem; margin-top: 1rem; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; height: 100vh; display: flex; flex-direction: column; }
+#login { max-width: 320px; margin: 4rem auto; display: flex; gap: 0.5rem; }
+#app { display: none; flex: 1; min-height: 0; }
+#sidebar { width: 240px; border-right: 1px solid #ddd; display: flex; flex-direction: column; padding: 0.75rem; gap: 0.5rem; }
+#threadList { flex: 1; overflow-y: auto; }
+.thread { padding: 0.4rem 0.5rem; border-radius: 6px; cursor: pointer; font-size: 0.9em; }
+.thread:hover { background: #f0f0f0; }
+.thread.active { background: #e0e8ff; font-weight: 600; }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#toolbar { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem; border-bottom: 1px solid #ddd; }
+#threadLabel { font-weight: 600; flex: 1; }
+#adminButtons { display: flex; gap: 0.4rem; }
+#log { flex: 1; overflow-y: auto; padding: 1rem; }
+.msg { white-space: pre-wrap; margin-bottom: 0.75rem; }
+.msg.thinking { color: #888; font-style: italic; }
+.you { color: #333; font-weight: 600; margin-bottom: 0.75rem; }
+.aux { color: #888; font-size: 0.85em; margin-bottom: 0.5rem; }
+.err { color: #b00; margin-bottom: 0.75rem; }
+details.tool { color: #555; font-size: 0.85em; margin-bottom: 0.5rem; }
+details.tool pre { white-space: pre-wrap; background: #f7f7f7; padding: 0.5rem; border-radius: 6px; }
+.file a { color: #06c; }
+form#form { display: flex; gap: 0.5rem; padding: 0.75rem; border-top: 1px solid #ddd; }
 input[type=text] { flex: 1; padding: 0.5rem; }
+button { cursor: pointer; }
 </style>
 </head>
 <body>
-<h1>Iris</h1>
 <div id="login">
   <input type="password" id="password" placeholder="Password">
   <button id="loginBtn">Log in</button>
 </div>
-<div id="chat" style="display:none">
-  <div id="log"></div>
-  <form id="form">
-    <input type="text" id="text" placeholder="Message Iris...">
-    <button type="submit">Send</button>
-  </form>
+<div id="app">
+  <div id="sidebar">
+    <select id="agentPicker"><option value="">Iris</option></select>
+    <button id="newThreadBtn">+ New thread</button>
+    <div id="threadList"></div>
+  </div>
+  <div id="main">
+    <div id="toolbar">
+      <div id="threadLabel"></div>
+      <div id="adminButtons">
+        <button id="stopBtn">Stop</button>
+        <button id="compactBtn">Compact</button>
+        <button id="resetBtn">Reset</button>
+      </div>
+    </div>
+    <div id="log"></div>
+    <form id="form">
+      <input type="file" id="fileInput">
+      <input type="text" id="text" placeholder="Message...">
+      <button type="submit">Send</button>
+    </form>
+  </div>
 </div>
 <script>
-const logEl = document.getElementById("log");
-function line(cls, text) {
-  const d = document.createElement("div");
-  if (cls) d.className = cls;
-  d.textContent = text;
-  logEl.appendChild(d);
-  logEl.scrollTop = logEl.scrollHeight;
+var ws = null;
+var threads = JSON.parse(localStorage.getItem("iris_threads") || "[]");
+var currentId = localStorage.getItem("iris_current_thread") || null;
+var pendingEls = {};
+var toolEls = {};
+
+function saveThreads() {
+  localStorage.setItem("iris_threads", JSON.stringify(threads));
+  if (currentId) localStorage.setItem("iris_current_thread", currentId);
 }
 
-function connect() {
-  document.getElementById("login").style.display = "none";
-  document.getElementById("chat").style.display = "block";
-  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?thread=default");
-  const pending = {};
-  ws.onmessage = (ev) => {
-    const f = JSON.parse(ev.data);
-    if (f.type === "thinking") { pending[f.id] = line("", "Iris is thinking..."); }
-    else if (f.type === "tool") {
-      line("tool", (f.phase === "start" ? "→ " : (f.isError ? "✗ " : "✓ ")) + f.toolName + (f.label ? ": " + f.label : "") + (f.durationMs ? " (" + (f.durationMs/1000).toFixed(1) + "s)" : ""));
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function scrollDown() {
+  var l = document.getElementById("log");
+  l.scrollTop = l.scrollHeight;
+}
+
+function renderSidebar() {
+  var list = document.getElementById("threadList");
+  list.innerHTML = "";
+  threads.forEach(function (t) {
+    var item = el("div", "thread" + (t.id === currentId ? " active" : ""), (t.agent ? "[" + t.agent + "] " : "") + t.label);
+    item.onclick = function () { switchThread(t.id); };
+    list.appendChild(item);
+  });
+}
+
+function currentChannelId() {
+  return "WEBUI-" + currentId;
+}
+
+function switchThread(id) {
+  currentId = id;
+  saveThreads();
+  renderSidebar();
+  document.getElementById("log").innerHTML = "";
+  pendingEls = {};
+  toolEls = {};
+  var t = threads.find(function (x) { return x.id === id; });
+  document.getElementById("threadLabel").textContent = t ? ((t.agent ? "[" + t.agent + "] " : "") + t.label) : "";
+  document.getElementById("adminButtons").style.display = (t && t.agent) ? "none" : "flex";
+  connect(id, t ? t.agent : undefined);
+}
+
+function newThread() {
+  var agent = document.getElementById("agentPicker").value || undefined;
+  var id = "t" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  threads.push({ id: id, label: agent || "Iris", agent: agent });
+  switchThread(id);
+}
+
+function loadAgents() {
+  fetch("/agents").then(function (r) { return r.json(); }).then(function (data) {
+    var sel = document.getElementById("agentPicker");
+    sel.innerHTML = "<option value=''>Iris</option>";
+    (data.agents || []).forEach(function (a) {
+      var opt = document.createElement("option");
+      opt.value = a.name;
+      opt.textContent = a.name + (a.description ? " — " + a.description : "");
+      sel.appendChild(opt);
+    });
+  });
+}
+
+function messageEl(id) {
+  var e = pendingEls[id];
+  if (!e) {
+    e = el("div", "msg");
+    document.getElementById("log").appendChild(e);
+    pendingEls[id] = e;
+  }
+  return e;
+}
+
+function toolEl(id) {
+  var d = toolEls[id];
+  if (!d) {
+    d = document.createElement("details");
+    d.className = "tool";
+    d.appendChild(document.createElement("summary"));
+    d.appendChild(document.createElement("pre"));
+    document.getElementById("log").appendChild(d);
+    toolEls[id] = d;
+  }
+  return d;
+}
+
+function handleFrame(f) {
+  if (f.type === "thinking") {
+    var e = messageEl(f.id);
+    e.textContent = "Iris is thinking...";
+    e.className = "msg thinking";
+  } else if (f.type === "tool") {
+    var d = toolEl(f.id);
+    var summary = d.querySelector("summary");
+    var pre = d.querySelector("pre");
+    var label = (f.phase === "start" ? "→ " : (f.isError ? "✗ " : "✓ ")) + f.toolName + (f.label ? ": " + f.label : "") + (f.durationMs ? " (" + (f.durationMs / 1000).toFixed(1) + "s)" : "");
+    summary.textContent = label;
+    if (f.phase === "end") {
+      pre.textContent = (f.args ? "Args: " + JSON.stringify(f.args, null, 2) + "\\n\\n" : "") + (f.result || "");
     }
-    else if (f.type === "final") { line("", f.text); }
-    else if (f.type === "update") { line("", f.text); }
-    else if (f.type === "thread") { line("tool", f.text); }
-    else if (f.type === "error") { line("err", "Error: " + f.message); }
-  };
-  document.getElementById("form").onsubmit = (e) => {
-    e.preventDefault();
-    const input = document.getElementById("text");
-    if (!input.value) return;
-    line("", "You: " + input.value);
-    ws.send(JSON.stringify({ type: "message", text: input.value }));
+  } else if (f.type === "final") {
+    var fe = messageEl(f.id);
+    fe.textContent = f.text;
+    fe.className = "msg final";
+  } else if (f.type === "update") {
+    var ue = messageEl(f.id);
+    ue.textContent = f.text;
+    ue.className = "msg update";
+  } else if (f.type === "thread") {
+    document.getElementById("log").appendChild(el("div", "aux", f.text));
+  } else if (f.type === "file") {
+    var fd = el("div", "file");
+    var a = document.createElement("a");
+    a.href = f.url;
+    a.textContent = f.title || f.url;
+    a.target = "_blank";
+    fd.appendChild(a);
+    document.getElementById("log").appendChild(fd);
+  } else if (f.type === "error") {
+    document.getElementById("log").appendChild(el("div", "err", "Error: " + f.message));
+  }
+  scrollDown();
+}
+
+function connect(threadId, agent) {
+  if (ws) { ws.close(); ws = null; }
+  var url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?thread=" + encodeURIComponent(threadId);
+  if (agent) url += "&agent=" + encodeURIComponent(agent);
+  ws = new WebSocket(url);
+  ws.onmessage = function (ev) { handleFrame(JSON.parse(ev.data)); };
+}
+
+function uploadFile(file, channelId) {
+  return fetch("/upload?channel=" + encodeURIComponent(channelId), {
+    method: "POST",
+    headers: { "X-Filename": file.name },
+    body: file,
+  }).then(function (res) {
+    if (!res.ok) throw new Error("upload failed");
+    return res.json();
+  }).then(function (body) { return body.local; });
+}
+
+document.getElementById("form").onsubmit = function (e) {
+  e.preventDefault();
+  var input = document.getElementById("text");
+  var fileInput = document.getElementById("fileInput");
+  var text = input.value;
+  if (!text && !fileInput.files.length) return;
+  var send = function (attachments) {
+    document.getElementById("log").appendChild(el("div", "you", "You: " + text));
+    scrollDown();
+    ws.send(JSON.stringify({ type: "message", text: text, attachments: attachments }));
     input.value = "";
   };
-}
-
-document.getElementById("loginBtn").onclick = async () => {
-  const password = document.getElementById("password").value;
-  const res = await fetch("/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
-  if (res.ok) connect(); else alert("Wrong password");
+  if (fileInput.files.length) {
+    uploadFile(fileInput.files[0], currentChannelId()).then(function (local) {
+      fileInput.value = "";
+      send([{ local: local }]);
+    });
+  } else {
+    send([]);
+  }
 };
 
-// If no auth is configured, the server accepts the WS upgrade regardless —
-// try connecting straight away.
-fetch("/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((res) => {
-  if (res.ok) connect();
+document.getElementById("newThreadBtn").onclick = newThread;
+document.getElementById("stopBtn").onclick = function () { ws.send(JSON.stringify({ type: "command", action: "stop" })); };
+document.getElementById("compactBtn").onclick = function () { ws.send(JSON.stringify({ type: "command", action: "compact" })); };
+document.getElementById("resetBtn").onclick = function () {
+  ws.send(JSON.stringify({ type: "command", action: "reset" }));
+  document.getElementById("log").innerHTML = "";
+  pendingEls = {};
+  toolEls = {};
+};
+
+function startApp() {
+  document.getElementById("login").style.display = "none";
+  document.getElementById("app").style.display = "flex";
+  loadAgents();
+  if (threads.length === 0) threads.push({ id: "default", label: "Iris" });
+  if (!currentId || !threads.find(function (t) { return t.id === currentId; })) currentId = threads[0].id;
+  renderSidebar();
+  switchThread(currentId);
+}
+
+document.getElementById("loginBtn").onclick = function () {
+  var password = document.getElementById("password").value;
+  fetch("/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: password }) })
+    .then(function (res) { if (res.ok) startApp(); else alert("Wrong password"); });
+};
+
+// If no auth is configured, the server accepts an empty login regardless —
+// try it straight away so the login screen never shows for unauthed installs.
+fetch("/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then(function (res) {
+  if (res.ok) startApp();
 });
 </script>
 </body>

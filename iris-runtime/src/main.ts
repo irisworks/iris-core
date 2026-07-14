@@ -258,6 +258,11 @@ const webTransport = webuiPort > 0
 		port: webuiPort,
 		workingDir,
 		dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
+		commands: {
+			stop: (channelId, transport) => engine.handleStop(channelId, transport),
+			compact: (channelId, transport) => engine.handleCompact(channelId, transport),
+			reset: (channelId, transport) => engine.handleReset(channelId, transport),
+		},
 	})
 	: null;
 if (webTransport) transports.push(webTransport);
