@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Bootstrap no longer installs Terraform, nginx, or certbot unconditionally. Terraform is installed only on the Key Vault (cloud-profile) path; nginx and certbot are installed only when a public domain (`IRIS_BASE_DOMAIN`) is configured — the zero-cloud quickstart (`--setup --no-keyvault`, no domain) now pulls in just Docker, Node, jq, and the GitHub CLI. As part of this, an install with a public domain but no Key Vault now also gets nginx installed with the base config written (previously the domain was noted but nginx was left unconfigured); DNS + NSG automation remains Azure-only.
 - License changed from MIT to Apache License 2.0 (`LICENSE`, new `NOTICE` file, `package.json` license field, README/CONTRIBUTING mentions) (IRIS-109).
 
 - Internal: shared transport types moved to `src/transport/types.ts` — `ChannelInfo`, `UserInfo`, and `MessageContext` (rename of `SlackContext`, which stays as a compat re-export alongside `TelegramContext`). Contexts now carry a `transportId` (`"slack" | "telegram" | "bridge"`), and a `TransportPromptProfile` registry is in place for the upcoming prompt de-Slacking. The engine (`agent.ts`) no longer imports transport modules. No behavior change.
