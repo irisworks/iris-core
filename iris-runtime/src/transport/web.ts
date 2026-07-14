@@ -20,6 +20,7 @@ import { randomBytes } from "crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as log from "../log.js";
 import { loadAgentRegistry, callAgentBridge } from "../bridge.js";
+import { readBody, secretMatches } from "../api.js";
 import type { ChannelState } from "../engine.js";
 import {
 	registerPromptProfile,
@@ -308,31 +309,27 @@ export class WebTransport implements ChannelTransport {
 		res.end("not found");
 	}
 
-	private handleLogin(req: IncomingMessage, res: ServerResponse): void {
-		const chunks: Buffer[] = [];
-		req.on("data", (c: Buffer) => chunks.push(c));
-		req.on("end", () => {
-			let body: { password?: string };
-			try {
-				body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-			} catch {
-				res.writeHead(400, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: "invalid JSON" }));
-				return;
-			}
-			if (this.password && body.password !== this.password) {
-				res.writeHead(401, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: "wrong password" }));
-				return;
-			}
-			const token = randomToken();
-			this.sessionTokens.add(token);
-			res.writeHead(200, {
-				"Content-Type": "application/json",
-				"Set-Cookie": `iris_webui_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
-			});
-			res.end(JSON.stringify({ ok: true }));
+	private async handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
+		let body: { password?: string };
+		try {
+			body = JSON.parse(await readBody(req));
+		} catch {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "invalid JSON" }));
+			return;
+		}
+		if (this.password && !secretMatches(body.password ?? "", this.password)) {
+			res.writeHead(401, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "wrong password" }));
+			return;
+		}
+		const token = randomToken();
+		this.sessionTokens.add(token);
+		res.writeHead(200, {
+			"Content-Type": "application/json",
+			"Set-Cookie": `iris_webui_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
 		});
+		res.end(JSON.stringify({ ok: true }));
 	}
 }
 

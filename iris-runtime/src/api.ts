@@ -53,7 +53,7 @@ interface ChannelState {
 	running: boolean;
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+export function readBody(req: IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
 		req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -71,10 +71,14 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 function bearerTokenMatches(authHeader: string | undefined, expected: string): boolean {
 	const match = /^Bearer\s+(.+)$/i.exec(authHeader ?? "");
 	if (!match) return false;
-	// Hash both sides so timingSafeEqual gets equal-length buffers
-	const presented = createHash("sha256").update(match[1]).digest();
-	const wanted = createHash("sha256").update(expected).digest();
-	return timingSafeEqual(presented, wanted);
+	return secretMatches(match[1], expected);
+}
+
+/** Constant-time string comparison — hashes both sides first so timingSafeEqual gets equal-length buffers. */
+export function secretMatches(presented: string, expected: string): boolean {
+	const presentedHash = createHash("sha256").update(presented).digest();
+	const expectedHash = createHash("sha256").update(expected).digest();
+	return timingSafeEqual(presentedHash, expectedHash);
 }
 
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
