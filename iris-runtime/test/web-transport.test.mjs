@@ -28,6 +28,17 @@ function makeWorkingDir(agents = {}) {
 	return workingDir;
 }
 
+/** No-op stand-ins for engine.handleStop/handleCompact/handleReset, recording calls. */
+function makeCommands() {
+	const calls = [];
+	return {
+		calls,
+		stop: async (channelId) => { calls.push(["stop", channelId]); },
+		compact: async (channelId) => { calls.push(["compact", channelId]); },
+		reset: async (channelId) => { calls.push(["reset", channelId]); },
+	};
+}
+
 /** Collects every frame the socket receives, parsed from JSON. */
 function collectFrames(ws) {
 	const frames = [];
@@ -62,6 +73,7 @@ test("web transport: full message lifecycle (thinking -> tool -> final)", async 
 				await ctx.replaceMessage("done: " + event.text);
 			})();
 		},
+		commands: makeCommands(),
 	});
 	transport.start();
 	closers.push(() => transport.stop());
@@ -88,7 +100,7 @@ test("web transport: full message lifecycle (thinking -> tool -> final)", async 
 test("web transport: postMessage/updateMessage broadcast to the channel's connections", async () => {
 	const port = 19402;
 	const workingDir = makeWorkingDir();
-	const transport = new WebTransport({ port, workingDir, dispatch: () => {} });
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
 	transport.start();
 	closers.push(() => transport.stop());
 
@@ -111,7 +123,7 @@ test("web transport: WS upgrade is rejected without a valid cookie when a passwo
 	process.env.IRIS_WEBUI_PASSWORD = "secret123";
 	const port = 19403;
 	const workingDir = makeWorkingDir();
-	const transport = new WebTransport({ port, workingDir, dispatch: () => {} });
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
 	transport.start();
 	closers.push(() => transport.stop());
 
@@ -165,6 +177,7 @@ test("web transport: ?agent= routes through the HTTP bridge, not the local engin
 		dispatch: () => {
 			localDispatchCalled = true;
 		},
+		commands: makeCommands(),
 	});
 	transport.start();
 	closers.push(() => transport.stop());
@@ -189,7 +202,7 @@ test("web transport: ?agent= routes through the HTTP bridge, not the local engin
 test("web transport: ?agent= for an unregistered agent returns an error frame", async () => {
 	const port = 19405;
 	const workingDir = makeWorkingDir();
-	const transport = new WebTransport({ port, workingDir, dispatch: () => {} });
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
 	transport.start();
 	closers.push(() => transport.stop());
 
@@ -207,10 +220,137 @@ test("web transport: ?agent= for an unregistered agent returns an error frame", 
 	ws.close();
 });
 
-test("web transport: a path-traversal thread id is rejected before the WS handshake completes", async () => {
+test("web transport: GET /agents lists agents.json without leaking bridge_url/secrets", async () => {
 	const port = 19406;
+	const workingDir = makeWorkingDir({
+		newsletter: { bridge_url: "http://127.0.0.1:9999", description: "Sends newsletters", secrets: ["SENDGRID_API_KEY"] },
+	});
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const res = await fetch(`http://127.0.0.1:${port}/agents`);
+	assert.equal(res.status, 200);
+	const body = await res.json();
+	assert.deepEqual(body.agents, [{ name: "newsletter", description: "Sends newsletters" }]);
+	assert.equal(JSON.stringify(body).includes("bridge_url"), false);
+	assert.equal(JSON.stringify(body).includes("SENDGRID"), false);
+});
+
+test("web transport: POST /upload then GET /files round-trips a file, and rejects path traversal", async () => {
+	const port = 19407;
 	const workingDir = makeWorkingDir();
-	const transport = new WebTransport({ port, workingDir, dispatch: () => {} });
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const uploadRes = await fetch(`http://127.0.0.1:${port}/upload?channel=WEBUI-t9`, {
+		method: "POST",
+		headers: { "X-Filename": "note.txt" },
+		body: "hello file",
+	});
+	assert.equal(uploadRes.status, 200);
+	const { local } = await uploadRes.json();
+	assert.match(local, /^WEBUI-t9[/\\]attachments[/\\]\d+_note\.txt$/);
+
+	const filename = local.split(/[/\\]/).pop();
+	const downloadRes = await fetch(`http://127.0.0.1:${port}/files/WEBUI-t9/${filename}`);
+	assert.equal(downloadRes.status, 200);
+	assert.equal(await downloadRes.text(), "hello file");
+
+	const traversalRes = await fetch(`http://127.0.0.1:${port}/upload?channel=WEBUI-t9`, {
+		method: "POST",
+		headers: { "X-Filename": "../../etc/passwd" },
+		body: "nope",
+	});
+	assert.equal(traversalRes.status, 400);
+
+	const traversalDownload = await fetch(`http://127.0.0.1:${port}/files/WEBUI-t9/..%2F..%2Fetc%2Fpasswd`);
+	assert.equal(traversalDownload.status, 400);
+});
+
+test("web transport: /upload and /files reject a path-traversal channel param, not just filename", async () => {
+	const port = 19411;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	// Query-string traversal on /upload?channel=
+	const uploadTraversal = await fetch(`http://127.0.0.1:${port}/upload?channel=${encodeURIComponent("../../../tmp/pwned")}`, {
+		method: "POST",
+		headers: { "X-Filename": "note.txt" },
+		body: "nope",
+	});
+	assert.equal(uploadTraversal.status, 400);
+
+	// A channel id outside the WEBUI- namespace (e.g. targeting another
+	// transport's channel dir) must also be rejected, even without traversal
+	// characters.
+	const uploadNonWeb = await fetch(`http://127.0.0.1:${port}/upload?channel=slack-general`, {
+		method: "POST",
+		headers: { "X-Filename": "note.txt" },
+		body: "nope",
+	});
+	assert.equal(uploadNonWeb.status, 400);
+
+	// Percent-encoded slashes in the /files channel path segment decode into
+	// a traversal after the route regex has already let them through.
+	const downloadTraversal = await fetch(`http://127.0.0.1:${port}/files/${encodeURIComponent("WEBUI-t9/../../etc")}/passwd`);
+	assert.equal(downloadTraversal.status, 400);
+
+	const downloadNonWeb = await fetch(`http://127.0.0.1:${port}/files/slack-general/note.txt`);
+	assert.equal(downloadNonWeb.status, 400);
+});
+
+test("web transport: {type: command} frames call the wired engine handler, not the local engine dispatch", async () => {
+	const port = 19408;
+	const workingDir = makeWorkingDir();
+	const commands = makeCommands();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=t4`);
+	await new Promise((resolve) => ws.on("open", resolve));
+
+	ws.send(JSON.stringify({ type: "command", action: "stop" }));
+	ws.send(JSON.stringify({ type: "command", action: "compact" }));
+	ws.send(JSON.stringify({ type: "command", action: "reset" }));
+	await settle(50);
+
+	assert.deepEqual(commands.calls, [
+		["stop", "WEBUI-t4"],
+		["compact", "WEBUI-t4"],
+		["reset", "WEBUI-t4"],
+	]);
+	ws.close();
+});
+
+test("web transport: an unknown command action gets an error frame, not a crash", async () => {
+	const port = 19409;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=t5`);
+	const frames = collectFrames(ws);
+	await new Promise((resolve) => ws.on("open", resolve));
+
+	ws.send(JSON.stringify({ type: "command", action: "launch-nukes" }));
+	await settle(50);
+
+	assert.equal(frames.length, 1);
+	assert.equal(frames[0].type, "error");
+	assert.match(frames[0].message, /Unknown command/);
+	ws.close();
+});
+
+test("web transport: a path-traversal thread id is rejected before the WS handshake completes", async () => {
+	const port = 19410;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
 	transport.start();
 	closers.push(() => transport.stop());
 
