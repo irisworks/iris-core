@@ -18,7 +18,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { randomBytes } from "crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as log from "../log.js";
 import { loadAgentRegistry, callAgentBridge } from "../bridge.js";
@@ -91,6 +91,21 @@ const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
  */
 function isValidWebChannelId(channelId: string): boolean {
 	return channelId.startsWith("WEBUI-") && SAFE_ID.test(channelId.slice("WEBUI-".length));
+}
+
+/**
+ * Resolves `segments` onto `baseDir` and verifies the result stays inside
+ * it, rather than trusting the caller's own blacklist of "/"/".." in each
+ * segment — the authoritative guard for any path built from request data
+ * (filenames, channel ids), since resolve() collapses traversal sequences
+ * predictably regardless of what the untrusted segment looks like going in.
+ * Returns undefined if the join would escape baseDir.
+ */
+function safeJoin(baseDir: string, ...segments: string[]): string | undefined {
+	const base = resolve(baseDir);
+	const target = resolve(base, ...segments);
+	if (target !== base && !target.startsWith(base + sep)) return undefined;
+	return target;
 }
 
 export class WebTransport implements ChannelTransport {
@@ -395,10 +410,11 @@ export class WebTransport implements ChannelTransport {
 	}
 
 	/**
-	 * `channelId` must be a WEBUI-owned id (isValidWebChannelId) and `filename`
-	 * must not contain path separators — otherwise either can flow unsanitized
-	 * into resolveChannelDir/join and escape workingDir or reach another
-	 * transport's channel dir.
+	 * `channelId` must be a WEBUI-owned id (isValidWebChannelId) and every
+	 * candidate read path is built through safeJoin, which verifies the
+	 * resolved path stays inside the channel dir — the authoritative guard,
+	 * not just the "/"/".." blacklist on `filename` (kept as an early
+	 * fast-fail for the common case).
 	 */
 	private handleFileDownload(res: ServerResponse, channelId: string, filename: string): void {
 		if (!isValidWebChannelId(channelId) || filename.includes("/") || filename.includes("..")) {
@@ -407,7 +423,9 @@ export class WebTransport implements ChannelTransport {
 			return;
 		}
 		const channelDir = resolveChannelDir(this.workingDir, channelId);
-		const candidates = [join(channelDir, "attachments", filename), join(channelDir, filename)];
+		const candidates = [safeJoin(channelDir, "attachments", filename), safeJoin(channelDir, filename)].filter(
+			(p): p is string => p !== undefined,
+		);
 		const path = candidates.find((p) => existsSync(p));
 		if (!path) {
 			res.writeHead(404, { "Content-Type": "text/plain" });
@@ -433,7 +451,13 @@ export class WebTransport implements ChannelTransport {
 			const attachmentsDir = join(resolveChannelDir(this.workingDir, channelId), "attachments");
 			mkdirSync(attachmentsDir, { recursive: true });
 			const safeName = `${Date.now()}_${filename}`;
-			writeFileSync(join(attachmentsDir, safeName), Buffer.concat(chunks));
+			const target = safeJoin(attachmentsDir, safeName);
+			if (!target) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "invalid filename" }));
+				return;
+			}
+			writeFileSync(target, Buffer.concat(chunks));
 			const local = join(resolveChannelPath(channelId), "attachments", safeName);
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({ local }));
