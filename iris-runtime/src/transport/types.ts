@@ -37,7 +37,7 @@ export interface TransportEvent {
  * message chunking; the engine never splits text itself.
  */
 export interface MessageContext {
-	/** Which transport produced this context: "slack" | "telegram" | "bridge" */
+	/** Which transport produced this context: "slack" | "telegram" | "bridge" | "web" */
 	transportId: string;
 	message: {
 		text: string;
@@ -59,6 +59,26 @@ export interface MessageContext {
 	setWorking: (working: boolean) => Promise<void>;
 	deleteMessage: () => Promise<void>;
 	getAccumulatedText: () => string;
+	/**
+	 * Optional structured tool-call event, fired alongside the flattened
+	 * `respond(...)` text transports already receive for tool_execution_start/end.
+	 * Slack/Telegram/Bridge don't implement this (mrkdwn/plain-text transports
+	 * have nothing better to do with structure than flatten it); a transport
+	 * that can render live-updating cards (e.g. a web UI) implements it to get
+	 * the raw event instead of a pre-formatted string.
+	 */
+	onToolEvent?: (event: ToolEvent) => void;
+}
+
+export interface ToolEvent {
+	id: string;
+	toolName: string;
+	label?: string;
+	args?: unknown;
+	result?: string;
+	isError?: boolean;
+	durationMs?: number;
+	phase: "start" | "end";
 }
 
 /**

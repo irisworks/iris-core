@@ -615,6 +615,13 @@ function createRunner(
 			});
 
 			log.logToolStart(logCtx, agentEvent.toolName, label, agentEvent.args as Record<string, unknown>);
+			ctx.onToolEvent?.({
+				id: agentEvent.toolCallId,
+				toolName: agentEvent.toolName,
+				label,
+				args: agentEvent.args,
+				phase: "start",
+			});
 			if (!isSessionChannel) {
 				queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
 			}
@@ -645,6 +652,16 @@ function createRunner(
 			threadMessage += `*Result:*\n\`\`\`\n${resultStr}\n\`\`\``;
 
 			queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+			ctx.onToolEvent?.({
+				id: agentEvent.toolCallId,
+				toolName: agentEvent.toolName,
+				label,
+				args: pending?.args,
+				result: resultStr,
+				isError: agentEvent.isError,
+				durationMs,
+				phase: "end",
+			});
 
 			if (agentEvent.isError && !isSessionChannel) {
 				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");

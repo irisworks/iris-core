@@ -5,6 +5,7 @@
 		"SETUP",
 		"configuration",
 		"channel-modes",
+		"web-ui",
 		"skills",
 		"sub-agents",
 		"overlay",

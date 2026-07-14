@@ -13,6 +13,7 @@ import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from 
 import { TelegramBot, type IrisTelegramHandler } from "./telegram.js";
 import { ChannelStore } from "./store.js";
 import { BridgeTransport } from "./transport/bridge.js";
+import { WebTransport } from "./transport/web.js";
 import type { ChannelTransport, TransportEvent } from "./transport/types.js";
 
 // ============================================================================
@@ -249,6 +250,18 @@ const bridge = new BridgeTransport({
 });
 transports.push(bridge);
 
+// Web UI is optional — set IRIS_WEBUI_PORT to enable. Off by default, zero
+// cost for chat-only installs.
+const webuiPort = parseInt(process.env.IRIS_WEBUI_PORT ?? "0", 10);
+const webTransport = webuiPort > 0
+	? new WebTransport({
+		port: webuiPort,
+		workingDir,
+		dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
+	})
+	: null;
+if (webTransport) transports.push(webTransport);
+
 // ============================================================================
 // Wiring — API server, bridge server, transport startup, events watchers
 // ============================================================================
@@ -267,6 +280,12 @@ if (slackBot) {
 	slackBot.start();
 } else {
 	log.logInfo("Slack tokens not set — running in bridge-only mode");
+}
+
+if (webTransport) {
+	webTransport.start();
+	process.on("SIGINT", () => { webTransport.stop(); });
+	process.on("SIGTERM", () => { webTransport.stop(); });
 }
 
 if (tgBot) {
