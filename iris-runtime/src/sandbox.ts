@@ -13,7 +13,7 @@ export function parseSandboxArg(value: string): SandboxConfig {
 	if (value.startsWith("docker:")) {
 		const container = value.slice("docker:".length);
 		if (!container) {
-			console.error("Error: docker sandbox requires container name (e.g., docker:mom-sandbox)");
+			console.error("Error: docker sandbox requires container name (e.g., docker:iris-sandbox)");
 			process.exit(1);
 		}
 		return { type: "docker", container };
@@ -76,7 +76,7 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 		}
 	} catch {
 		console.error(`Error: Container '${config.container}' does not exist.`);
-		console.error("Create it with: ./docker.sh create <data-dir>");
+		console.error(`Create it with: docker run -d --name ${config.container} -v <data-dir>:/workspace alpine:latest tail -f /dev/null`);
 		process.exit(1);
 	}
 

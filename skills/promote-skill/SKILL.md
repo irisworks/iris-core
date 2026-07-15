@@ -48,7 +48,7 @@ echo "[promote-skill] Promoting $SKILL to $AGENT prod..."
 # Pull latest from GitHub in prod's symlinked skills dir
 git -C "$REPO_DIR" pull --ff-only origin main
 
-# pi-mom's ResourceLoader auto-reloads SKILL.md files — no container restart needed
+# iris-runtime's ResourceLoader auto-reloads SKILL.md files — no container restart needed
 # for SKILL.md-only changes. But if this skill has TypeScript extensions, restart:
 PROD_CONTAINER="iris-${AGENT}-prod"
 if docker inspect "$PROD_CONTAINER" &>/dev/null; then
@@ -62,7 +62,7 @@ echo "[promote-skill] Done. Skill '$SKILL' is live in $AGENT prod."
 
 ## Notes
 
-- SKILL.md changes hot-reload automatically (pi-mom's ResourceLoader)
+- SKILL.md changes hot-reload automatically (iris-runtime's ResourceLoader)
 - TypeScript extension changes require a container restart (systemd or `docker restart`)
 - If a promoted skill breaks prod, roll back: revert the commit + `git pull` on VM
 - Promotion history is in git log: `git log agents/<name>/skills/<skill>/`

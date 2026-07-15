@@ -31,7 +31,7 @@ interface LogMessage {
 /**
  * Sync user messages from log.jsonl to SessionManager.
  *
- * This ensures that messages logged while mom wasn't running (channel chatter,
+ * This ensures that messages logged while Iris wasn't running (channel chatter,
  * backfilled messages, messages while busy) are added to the LLM context.
  *
  * @param sessionManager - The SessionManager to sync to

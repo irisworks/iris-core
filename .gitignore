@@ -39,7 +39,7 @@ __pycache__/
 Thumbs.db
 terraform/terraform.tfstate.*.backup
 
-# pi-mom runtime data — not committed (symlinks to repo assets are committed)
+# Iris runtime data — not committed (symlinks to repo assets are committed)
 # data/models.json IS committed (no secrets — keys come from env vars)
 data/sessions/
 data/events/

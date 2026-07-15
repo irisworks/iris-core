@@ -12,9 +12,12 @@ set -euo pipefail
 
 echo "[start-all] $(date) — Starting Iris agents..."
 
-# Resync secrets from Azure Key Vault before starting agents.
+# Resync secrets from Azure Key Vault before starting agents (Key Vault
+# profile only — zero-cloud installs keep secrets in /iris/.env, nothing to sync).
 # Ensures every agent container gets fresh credentials on each restart.
-bash /iris/data/skills/get-secret/sync-secrets
+if [ -n "${IRIS_KEY_VAULT:-}" ] || grep -q '^IRIS_KEY_VAULT=.' /iris/.env 2>/dev/null; then
+	bash /iris/data/skills/get-secret/sync-secrets
+fi
 
 # Shared Docker network for inter-agent communication.
 # Remove this line if your agents are fully isolated from each other.

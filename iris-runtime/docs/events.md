@@ -1,12 +1,12 @@
 # Events System
 
-The events system allows mom to be triggered by scheduled or immediate events. Events are JSON files in the `workspace/events/` directory. The harness watches this directory and executes events when they become due.
+The events system allows Iris to be triggered by scheduled or immediate events. Events are JSON files in the `workspace/events/` directory. The harness watches this directory and executes events when they become due.
 
 ## Event Types
 
 ### Immediate
 
-Executes as soon as the harness discovers the file. Used by programs mom writes to signal external events (webhooks, file changes, API callbacks, etc.).
+Executes as soon as the harness discovers the file. Used by programs Iris writes to signal external events (webhooks, file changes, API callbacks, etc.).
 
 ```json
 {
@@ -47,7 +47,7 @@ Executes repeatedly on a cron schedule. Used for recurring tasks like daily summ
 }
 ```
 
-The `schedule` field uses standard cron syntax. The `timezone` field uses IANA timezone names. The file persists until explicitly deleted by mom or the program that created it.
+The `schedule` field uses standard cron syntax. The `timezone` field uses IANA timezone names. The file persists until explicitly deleted by Iris or the program that created it.
 
 #### Cron Format
 
@@ -109,15 +109,15 @@ If the agent errors while processing an event:
 
 ## Queue Integration
 
-Events integrate with the existing `ChannelQueue` in `SlackBot`:
+Events integrate with the per-channel queue of the transport that owns the channel:
 
-- New method: `SlackBot.enqueueEvent(event: SlackEvent)` — always queues, no "already working" rejection
+- `ChannelTransport.enqueueEvent(event: TransportEvent)` — always queues, no "already working" rejection
 - Maximum 5 events can be queued per channel. If queue is full, discard and log to console.
-- User @mom mentions retain current behavior: rejected with "Already working" message if agent is busy
+- User `@iris` mentions retain current behavior: rejected with "Already working" message if agent is busy
 
 When an event triggers:
-1. Create a synthetic `SlackEvent` with formatted message
-2. Call `slack.enqueueEvent(event)`
+1. Create a synthetic `TransportEvent` with formatted message
+2. Call `transport.enqueueEvent(event)` on the transport that owns the channel
 3. Event waits in queue if agent is busy, processed when idle
 
 ## Event Execution
@@ -130,15 +130,15 @@ When an event is dequeued and executes:
    - For one-shot: `[EVENT:dentist.json:one-shot:2025-12-15T09:00:00+01:00] Remind Mario`
    - For periodic: `[EVENT:daily-inbox.json:periodic:0 9 * * 1-5] Check inbox`
 3. After execution:
-   - If response is `[SILENT]`: delete status message, post nothing to Slack
+   - If response is `[SILENT]`: delete status message, post nothing to the channel
    - Immediate and one-shot: delete the event file
    - Periodic: keep the file, event will trigger again on schedule
 
 ## Silent Completion
 
-For periodic events that check for activity (inbox, notifications, etc.), mom may find nothing to report. To avoid spamming the channel, mom can respond with just `[SILENT]`. This deletes the "Starting event..." status message and posts nothing to Slack.
+For periodic events that check for activity (inbox, notifications, etc.), Iris may find nothing to report. To avoid spamming the channel, Iris can respond with just `[SILENT]`. This deletes the "Starting event..." status message and posts nothing to the channel.
 
-Example: A periodic event checks for new emails every 15 minutes. If there are no new emails, mom responds `[SILENT]`. If there are new emails, mom posts a summary.
+Example: A periodic event checks for new emails every 15 minutes. If there are no new emails, Iris responds `[SILENT]`. If there are new emails, Iris posts a summary.
 
 ## File Naming
 
@@ -154,9 +154,9 @@ The filename is used as an identifier for tracking timers and in the event messa
 ### Files
 
 - `src/events.ts` — Event parsing, timer management, fs watching
-- `src/slack.ts` — Add `enqueueEvent()` method and `size()` to `ChannelQueue`
-- `src/main.ts` — Initialize events watcher on startup
-- `src/agent.ts` — Update system prompt with events documentation
+- `src/transport/types.ts` — `ChannelTransport.enqueueEvent()` implemented by each transport
+- `src/main.ts` — Initialize events watcher on startup; routes by `transport.ownsChannel(channelId)`
+- `src/agent.ts` — System prompt includes the events documentation below
 
 ### Key Components
 
@@ -184,7 +184,7 @@ interface PeriodicEvent {
   timezone: string; // IANA timezone
 }
 
-type MomEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
+type IrisEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
 
 class EventsWatcher {
   private timers: Map<string, NodeJS.Timeout> = new Map();
@@ -193,7 +193,7 @@ class EventsWatcher {
   
   constructor(
     private eventsDir: string,
-    private slack: SlackBot,
+    private sink: EventSink,
     private onError: (filename: string, error: Error) => void
   ) {
     this.startTime = Date.now();
@@ -204,7 +204,7 @@ class EventsWatcher {
   
   private handleFile(filename: string): void { /* parse, schedule */ }
   private handleDelete(filename: string): void { /* cancel timer/cron */ }
-  private execute(filename: string, event: MomEvent): void { /* enqueue */ }
+  private execute(filename: string, event: IrisEvent): void { /* enqueue */ }
 }
 ```
 
@@ -214,7 +214,7 @@ class EventsWatcher {
 
 ## System Prompt Section
 
-The following should be added to mom's system prompt:
+The following is included in Iris's system prompt:
 
 ```markdown
 ## Events

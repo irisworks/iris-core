@@ -12,7 +12,7 @@ Protocol for writing new skills. Follow this every time you add a capability.
 1. **Identify the need** — what action are you trying to take that you can't do yet?
 2. **Write the SKILL.md** — in `skills/<skill-name>/SKILL.md`
 3. **Commit to GitHub** — before using the skill
-4. **Test in pi-mom** — invoke the skill once with a safe test case
+4. **Test it** — invoke the skill once with a safe test case
 5. **Update README** — add the skill to the capabilities table
 
 ## SKILL.md template
@@ -65,6 +65,6 @@ EOF
 # 2. Commit
 github-commit "skills/slack-notify/SKILL.md" "feat: add slack-notify skill"
 
-# 3. Test (pi-mom reloads skills automatically)
+# 3. Test (iris-runtime reloads skills automatically)
 slack-notify "#iris-dev" "test message from iris"
 ```
