@@ -13,6 +13,16 @@
 #   bridge_port    = 4100
 # }
 #
+# output "my_agent_api_token" {
+#   value     = module.my_agent.api_token
+#   sensitive = true
+# }
+#
+# After apply, run `terraform output -raw my_agent_api_token` and copy the
+# value into this agent's `token` field in agents.json — that's what lets
+# Iris's API derive caller identity from the authenticating token instead of
+# the self-reported X-Iris-Caller header (IRIS-120).
+#
 # ── Firecracker agent (public / untrusted use) ───────────────
 # Each microVM gets its own Linux kernel + isolated filesystem.
 # The VM boots in ~125ms; Iris sends bash commands via HTTP.

@@ -11,6 +11,20 @@ locals {
 }
 
 # ─────────────────────────────────────────────
+# Per-agent API token
+# Unique per container so the secrets allow-list in agents.json can derive
+# caller identity from which token authenticated, instead of trusting the
+# self-reported X-Iris-Caller header (IRIS-120). Overrides the shared
+# IRIS_API_TOKEN from .env for this container only — add the same value to
+# this agent's entry in agents.json (`token` field) so Iris's API recognizes
+# it.
+# ─────────────────────────────────────────────
+resource "random_password" "api_token" {
+  length  = 32
+  special = false
+}
+
+# ─────────────────────────────────────────────
 # Build iris-runtime Docker image from source
 # ─────────────────────────────────────────────
 resource "null_resource" "build_image" {
@@ -75,6 +89,7 @@ resource "null_resource" "agent" {
         -e AGENT_NAME=${var.agent_name} \
         -e IRIS_KEY_VAULT=${var.key_vault_name} \
         -e IRIS_API_URL=${var.iris_api_url} \
+        -e IRIS_API_TOKEN=${random_password.api_token.result} \
         ${var.slack_app_token != "" ? "-e IRIS_SLACK_APP_TOKEN=${var.slack_app_token}" : ""} \
         ${var.slack_bot_token != "" ? "-e IRIS_SLACK_BOT_TOKEN=${var.slack_bot_token}" : ""} \
         ${var.bridge_port > 0 ? "-e IRIS_BRIDGE_PORT=${var.bridge_port} -p 127.0.0.1:${var.bridge_port}:${var.bridge_port}" : ""} \
