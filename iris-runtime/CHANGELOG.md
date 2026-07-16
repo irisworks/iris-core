@@ -29,6 +29,8 @@
 
 - Bridge HTTP error responses no longer echo internal error details (code scanning alert #5). A failed event-file write now returns a generic `Failed to write event.` (500) and a failed/timed-out wait for the sub-agent returns `Bridge request failed.` (504), instead of the raw exception message (which could include filesystem paths). Full details are still logged on the sub-agent side (`[bridge] Failed to write event file: …` / `[bridge] Request failed: …`); check the sub-agent's logs when diagnosing bridge errors.
 
+- Internal API error responses no longer echo internal error details (code scanning alert #12). `PATCH /sessions/:id`, `POST /sessions/:id/message`, and the top-level request handler in `iris-runtime/src/api.ts` now return stable generic messages (`"session not found"` / `"session message failed"` / `"internal server error"`) instead of the raw exception message, which could include filesystem paths or other internals. Full details are still logged via `log.logWarning`; check `journalctl -u iris` when diagnosing API errors.
+
 - Telegram channels now receive Telegram-specific system-prompt guidance — `**bold**`/`_italic_`/backtick code per the HTML converter, chat directory, plain-URL advice — instead of Slack mrkdwn rules that rendered as literal asterisks and broken `<url|text>` links. Non-image attachments are wrapped in `<telegram_attachments>` rather than `<slack_attachments>`.
 
 - Slack channel-mode consistency pass:

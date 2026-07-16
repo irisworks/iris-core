@@ -416,7 +416,9 @@ export function startApiServer(
 				try {
 					updated = updateSession(workingDir, sessionId, body);
 				} catch (err) {
-					json(res, 404, { error: err instanceof Error ? err.message : String(err) });
+					const msg = err instanceof Error ? err.message : String(err);
+					log.logWarning(`[api] PATCH /sessions/${sessionId} failed: ${msg}`);
+					json(res, 404, { error: "session not found" });
 					return;
 				}
 				log.logInfo(`[api] PATCH /sessions/${sessionId}`);
@@ -455,7 +457,7 @@ export function startApiServer(
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					log.logWarning(`[api] Session message failed: ${msg}`);
-					json(res, 504, { error: msg });
+					json(res, 504, { error: "session message failed" });
 				}
 				return;
 			}
@@ -555,7 +557,7 @@ export function startApiServer(
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning("[api] request error", msg);
-			json(res, 500, { error: msg });
+			json(res, 500, { error: "internal server error" });
 		}
 	});
 
