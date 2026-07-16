@@ -124,7 +124,7 @@ export function startBridgeServer(port: number, workingDir: string): void {
 			pendingRequests.delete(requestId);
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] Failed to write event file: ${msg}`);
-			jsonResponse(res, 500, { error: `Failed to write event: ${msg}` });
+			jsonResponse(res, 500, { error: "Failed to write event." });
 			return;
 		}
 
@@ -136,7 +136,7 @@ export function startBridgeServer(port: number, workingDir: string): void {
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] Request failed: ${msg}`);
-			jsonResponse(res, 504, { error: msg });
+			jsonResponse(res, 504, { error: "Bridge request failed." });
 		}
 	});
 
