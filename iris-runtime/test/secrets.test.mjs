@@ -1,4 +1,6 @@
-// GET /secrets/:name — agent-scoped secret resolution (IRIS-111).
+// GET /secrets/:name — agent-scoped secret resolution (IRIS-111), caller
+// identity derived from the authenticating token rather than the
+// self-reported X-Iris-Caller header (IRIS-120).
 // Drives the real compiled startApiServer against the env backend; no broker
 // involved (IRIS_SECRET_BROKER_URL unset in this suite).
 
@@ -33,7 +35,7 @@ after(() => {
 	for (const server of servers) server.close();
 });
 
-test("secrets: env backend resolves a caller-less request as unrestricted iris", async () => {
+test("secrets: no IRIS_API_TOKEN configured resolves every request as unrestricted iris", async () => {
 	process.env.IRIS_API_TOKEN = "";
 	process.env.TEST_SECRET_ONE = "hello-world";
 	const workingDir = makeWorkingDir();
@@ -50,44 +52,11 @@ test("secrets: unknown secret returns 404", async () => {
 	assert.equal(res.status, 404);
 });
 
-test("secrets: sub-agent without an allow-list entry is denied", async () => {
-	const res = await fetch(`${BASE}/secrets/TEST-SECRET-ONE`, {
-		headers: { "X-Iris-Caller": "unlisted-agent" },
-	});
-	assert.equal(res.status, 403);
-});
-
-test("secrets: sub-agent allow-listed for the exact name is granted", async () => {
-	const workingDir = makeWorkingDir({
-		"listed-agent": { bridge_url: "http://127.0.0.1:4999", secrets: ["TEST-SECRET-ONE"] },
-	});
-	startServer(PORT + 1, workingDir);
-
-	const res = await fetch(`http://127.0.0.1:${PORT + 1}/secrets/TEST-SECRET-ONE`, {
-		headers: { "X-Iris-Caller": "listed-agent" },
-	});
-	assert.equal(res.status, 200);
-	const body = await res.json();
-	assert.equal(body.value, "hello-world");
-});
-
-test("secrets: sub-agent allow-listed for a different name is still denied", async () => {
-	const workingDir = makeWorkingDir({
-		"listed-agent": { bridge_url: "http://127.0.0.1:4999", secrets: ["SOME-OTHER-SECRET"] },
-	});
-	startServer(PORT + 2, workingDir);
-
-	const res = await fetch(`http://127.0.0.1:${PORT + 2}/secrets/TEST-SECRET-ONE`, {
-		headers: { "X-Iris-Caller": "listed-agent" },
-	});
-	assert.equal(res.status, 403);
-});
-
 test("secrets: requires bearer auth when IRIS_API_TOKEN is set", async () => {
 	process.env.IRIS_API_TOKEN = "test-token-123";
 	const workingDir = makeWorkingDir();
-	startServer(PORT + 3, workingDir);
-	const base = `http://127.0.0.1:${PORT + 3}`;
+	startServer(PORT + 1, workingDir);
+	const base = `http://127.0.0.1:${PORT + 1}`;
 
 	const unauthed = await fetch(`${base}/secrets/TEST-SECRET-ONE`);
 	assert.equal(unauthed.status, 401);
@@ -100,6 +69,87 @@ test("secrets: requires bearer auth when IRIS_API_TOKEN is set", async () => {
 	// /health never requires auth
 	const health = await fetch(`${base}/health`);
 	assert.equal(health.status, 200);
+
+	delete process.env.IRIS_API_TOKEN;
+});
+
+test("secrets: caller is derived from the agent's own token, not X-Iris-Caller", async () => {
+	process.env.IRIS_API_TOKEN = "shared-iris-token";
+	const workingDir = makeWorkingDir({
+		"listed-agent": {
+			bridge_url: "http://127.0.0.1:4999",
+			secrets: ["TEST-SECRET-ONE"],
+			token: "listed-agent-token",
+		},
+	});
+	startServer(PORT + 2, workingDir);
+	const base = `http://127.0.0.1:${PORT + 2}`;
+
+	// Authenticating with the agent's own token grants what it's allow-listed for.
+	const granted = await fetch(`${base}/secrets/TEST-SECRET-ONE`, {
+		headers: { Authorization: "Bearer listed-agent-token" },
+	});
+	assert.equal(granted.status, 200);
+
+	// Same token, a name it isn't allow-listed for.
+	const denied = await fetch(`${base}/secrets/SOME-OTHER-SECRET`, {
+		headers: { Authorization: "Bearer listed-agent-token" },
+	});
+	assert.equal(denied.status, 403);
+
+	delete process.env.IRIS_API_TOKEN;
+});
+
+test("secrets: X-Iris-Caller can no longer be used to impersonate another caller", async () => {
+	process.env.IRIS_API_TOKEN = "shared-iris-token";
+	const workingDir = makeWorkingDir({
+		"listed-agent": {
+			bridge_url: "http://127.0.0.1:4999",
+			secrets: ["TEST-SECRET-ONE"],
+			token: "listed-agent-token",
+		},
+	});
+	startServer(PORT + 3, workingDir);
+	const base = `http://127.0.0.1:${PORT + 3}`;
+
+	// Holder of the shared IRIS_API_TOKEN claims X-Iris-Caller: iris (the old
+	// bypass) — must still resolve from the token (unrestricted "iris" is
+	// correct here anyway, but the header must not be what grants it).
+	const spoofed = await fetch(`${base}/secrets/UNLISTED-SECRET`, {
+		headers: {
+			Authorization: "Bearer shared-iris-token",
+			"X-Iris-Caller": "listed-agent",
+		},
+	});
+	// "iris" (from the token) is unrestricted, so this 404s (secret doesn't
+	// exist) rather than 403 (which the header alone would have produced
+	// under the old caller resolution).
+	assert.equal(spoofed.status, 404);
+
+	// An unrecognized token cannot claim to be any caller via the header.
+	const unauthorized = await fetch(`${base}/secrets/TEST-SECRET-ONE`, {
+		headers: {
+			Authorization: "Bearer not-a-real-token",
+			"X-Iris-Caller": "listed-agent",
+		},
+	});
+	assert.equal(unauthorized.status, 401);
+
+	delete process.env.IRIS_API_TOKEN;
+});
+
+test("secrets: agent entry without its own token falls back to the shared token as unrestricted iris", async () => {
+	process.env.IRIS_API_TOKEN = "shared-iris-token";
+	const workingDir = makeWorkingDir({
+		"no-token-agent": { bridge_url: "http://127.0.0.1:4999", secrets: ["SOME-OTHER-SECRET"] },
+	});
+	startServer(PORT + 4, workingDir);
+	const base = `http://127.0.0.1:${PORT + 4}`;
+
+	const res = await fetch(`${base}/secrets/TEST-SECRET-ONE`, {
+		headers: { Authorization: "Bearer shared-iris-token" },
+	});
+	assert.equal(res.status, 200);
 
 	delete process.env.IRIS_API_TOKEN;
 });

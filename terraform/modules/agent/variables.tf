@@ -59,3 +59,9 @@ variable "bridge_port" {
   type        = number
   default     = 0
 }
+
+variable "unique_api_token" {
+  description = "Provision a unique per-agent IRIS_API_TOKEN (module output `api_token`) instead of the shared token from .env. Opt-in: enabling it 401s this agent's API calls until the output value is registered as the agent's `token` field in agents.json (IRIS-120)."
+  type        = bool
+  default     = false
+}

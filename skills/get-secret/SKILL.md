@@ -18,31 +18,39 @@ Returns the secret value on stdout. Never logs it.
 ## How it works
 
 This is a thin client for Iris's internal `GET /secrets/:name` route — it doesn't
-resolve secrets itself. It sends `X-Iris-Caller: $AGENT_NAME` (default `iris` when
-unset, which is unrestricted) and hits `IRIS_API_URL` (set automatically in
-sub-agent containers) or `127.0.0.1:$IRIS_API_PORT` on Iris's own host.
+resolve secrets itself. It authenticates with `IRIS_API_TOKEN` and hits
+`IRIS_API_URL` (set automatically in sub-agent containers) or
+`127.0.0.1:$IRIS_API_PORT` on Iris's own host.
 
-Sub-agents must be allow-listed for a secret name in `agents.json`:
+Sub-agents must be allow-listed for a secret name in `agents.json`, with a
+per-agent `token` so the API can tell them apart:
 
 ```json
 {
   "newsletter": {
     "bridge_url": "http://172.18.0.2:4000",
-    "secrets": ["SENDGRID_API_KEY"]
+    "secrets": ["SENDGRID_API_KEY"],
+    "token": "<value from terraform/modules/agent's api_token output>"
   }
 }
 ```
 
 Omitted or empty `secrets` = no access — least privilege by default.
 
-**This is best-effort today, not a hard boundary.** `X-Iris-Caller` is
-self-reported, and every agent container shares the same `IRIS_API_TOKEN` —
-so a caller holding that token could claim `X-Iris-Caller: iris` and skip the
-allow-list. It's meaningful hygiene while every agent runs co-located under
-`--sandbox=host` with no isolation between them, but it doesn't defend against
-a compromised sub-agent. Becoming a real security boundary requires per-service
-unique tokens so caller identity comes from which token authenticated, not
-from a header the caller sets itself.
+**Caller identity comes from which token authenticated the request, not from
+a self-reported header.** With `unique_api_token = true` on its module block,
+`terraform/modules/agent` provisions a unique `IRIS_API_TOKEN` for that agent
+container (overriding the shared one from `.env`, exposed as the module's
+`api_token` output); register that value as the agent's `token` in
+`agents.json` and the API identifies the caller by matching the presented
+bearer token, not by trusting anything the caller claims about itself. A
+caller holding only its own per-agent token cannot impersonate another agent
+or the unrestricted `iris` caller — including a compromised sub-agent. With
+the flag off (the default) — or for an agent entry with no `token` set — the
+agent authenticates with the shared `IRIS_API_TOKEN`, which is always treated
+as unrestricted `iris`; give every agent that needs the allow-list enforced
+its own token, copying it into `agents.json` in the same change (the agent's
+API calls are 401 until it's registered).
 
 Server-side resolution order (in `iris-runtime/src/secrets.ts`):
 

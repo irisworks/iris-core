@@ -15,7 +15,9 @@
  *   POST /escalate                       — sub-agent escalates a problem to Iris
  *                                          body: { agent, issue, context?, severity?, environment? }
  *   GET  /secrets/:name                  — resolve a secret (env or IRIS_SECRET_BROKER_URL backend)
- *                                          header: X-Iris-Caller (agent name; default "iris" = unrestricted)
+ *                                          caller is derived from which token authenticated the
+ *                                          request (the shared IRIS_API_TOKEN = "iris", unrestricted;
+ *                                          an agents.json[name].token match = that agent's identity)
  *                                          sub-agents must be allow-listed in agents.json[caller].secrets
  *
  *   POST   /sessions                     — create session
@@ -40,7 +42,7 @@ import {
 	updateSession,
 	type Session,
 } from "./sessions.js";
-import { loadAgentRegistry } from "./bridge.js";
+import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { getSecretProvider } from "./secrets.js";
 
 // Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
@@ -73,10 +75,33 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 	res.end(payload);
 }
 
-function bearerTokenMatches(authHeader: string | undefined, expected: string): boolean {
-	const match = /^Bearer\s+(.+)$/i.exec(authHeader ?? "");
-	if (!match) return false;
-	return secretMatches(match[1], expected);
+/**
+ * Identifies the caller from *which token authenticated*, not from the
+ * self-reported X-Iris-Caller header (IRIS-120) — a caller holding only its
+ * own per-agent token can no longer claim to be another agent (or "iris").
+ *
+ * - Presented token matches the shared IRIS_API_TOKEN → "iris" (unrestricted).
+ * - Presented token matches an agent's own `token` in agents.json → that agent.
+ * - No match → null (unauthenticated).
+ * - No IRIS_API_TOKEN configured at all (local loopback-only dev) → "iris",
+ *   same permissive default as before per-agent tokens existed.
+ */
+export function resolveCaller(
+	authHeader: string | undefined,
+	apiToken: string,
+	registry: AgentRegistry,
+): string | null {
+	if (!apiToken) return "iris";
+	const header = authHeader ?? "";
+	const prefix = /^Bearer\s+/i.exec(header);
+	if (!prefix) return null;
+	const presented = header.slice(prefix[0].length);
+	if (!presented) return null;
+	if (secretMatches(presented, apiToken)) return "iris";
+	for (const [name, entry] of Object.entries(registry)) {
+		if (entry.token && secretMatches(presented, entry.token)) return name;
+	}
+	return null;
 }
 
 /**
@@ -141,7 +166,11 @@ export function startApiServer(
 			}
 
 			// ── Auth (all endpoints except /health when IRIS_API_TOKEN is set) ─────
-			if (apiToken && !bearerTokenMatches(req.headers.authorization, apiToken)) {
+			// Caller identity is derived from *which token authenticated*, not from
+			// the self-reported X-Iris-Caller header (IRIS-120) — see resolveCaller.
+			const agentRegistry = loadAgentRegistry(workingDir);
+			const caller = resolveCaller(req.headers.authorization, apiToken, agentRegistry);
+			if (caller === null) {
 				json(res, 401, { error: "unauthorized" });
 				return;
 			}
@@ -157,14 +186,12 @@ export function startApiServer(
 			}
 
 			// ── GET /secrets/:name ────────────────────────────────────────────────────
-			// X-Iris-Caller identifies the requester. "iris" (or header absent) is
-			// unrestricted; any other caller must be allow-listed in agents.json.
+			// caller comes from the authenticated token (see resolveCaller above);
+			// "iris" is unrestricted, any other caller must be allow-listed in agents.json.
 			if (method === "GET" && urlParts[0] === "secrets" && urlParts.length === 2 && urlParts[1]) {
 				const secretName = urlParts[1];
-				const caller = (req.headers["x-iris-caller"] as string | undefined) || "iris";
 				if (caller !== "iris") {
-					const registry = loadAgentRegistry(workingDir);
-					const allowed = registry[caller]?.secrets ?? [];
+					const allowed = agentRegistry[caller]?.secrets ?? [];
 					if (!allowed.includes(secretName)) {
 						log.logWarning(`[api] GET /secrets/${secretName} denied for caller '${caller}'`);
 						json(res, 403, { error: `caller '${caller}' is not allow-listed for secret '${secretName}'` });

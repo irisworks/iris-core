@@ -161,6 +161,14 @@ export interface AgentEntry {
 	description?: string;
 	/** Secret names this agent may request via GET /secrets/:name. Omitted/empty = no access. */
 	secrets?: string[];
+	/**
+	 * Per-agent IRIS_API_TOKEN (see terraform/modules/agent's `api_token` output).
+	 * When set, a request authenticating with this token is identified as this
+	 * agent for the secrets allow-list, regardless of X-Iris-Caller. Omitted =
+	 * this agent can only authenticate with the shared IRIS_API_TOKEN, which is
+	 * always treated as the unrestricted "iris" caller.
+	 */
+	token?: string;
 }
 
 export type AgentRegistry = Record<string, AgentEntry>;
