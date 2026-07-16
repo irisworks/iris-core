@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-CONTAINER_NAME="mom-sandbox"
+CONTAINER_NAME="iris-dev-sandbox"
 DATA_DIR="$(pwd)/data"
 
 # Create data directory if it doesn't exist
@@ -25,6 +25,6 @@ else
         tail -f /dev/null
 fi
 
-# Run mom with tsx watch mode
-echo "Starting mom in dev mode..."
+# Run iris-runtime in tsx watch mode
+echo "Starting iris-runtime in dev mode..."
 npx tsx --watch-path src --watch src/main.ts --sandbox=docker:$CONTAINER_NAME ./data
