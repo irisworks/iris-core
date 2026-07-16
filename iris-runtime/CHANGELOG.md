@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- Bridge HTTP error responses no longer echo internal error details (code scanning alert #5). A failed event-file write now returns a generic `Failed to write event.` (500) and a failed/timed-out wait for the sub-agent returns `Bridge request failed.` (504), instead of the raw exception message (which could include filesystem paths). Full details are still logged on the sub-agent side (`[bridge] Failed to write event file: …` / `[bridge] Request failed: …`); check the sub-agent's logs when diagnosing bridge errors.
+
 - Telegram channels now receive Telegram-specific system-prompt guidance — `**bold**`/`_italic_`/backtick code per the HTML converter, chat directory, plain-URL advice — instead of Slack mrkdwn rules that rendered as literal asterisks and broken `<url|text>` links. Non-image attachments are wrapped in `<telegram_attachments>` rather than `<slack_attachments>`.
 
 - Slack channel-mode consistency pass:
