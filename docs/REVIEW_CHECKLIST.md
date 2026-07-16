@@ -133,3 +133,10 @@ above instead:
   don't manually grep for committed secrets, but do still apply the "secrets
   never land in a log" invariant above, which gitleaks can't see (it's about
   runtime behavior, not committed content).
+- **Static analysis** — `.github/workflows/codeql.yml` runs CodeQL on every PR
+  and push to `main`, plus a weekly schedule (catches newly-added query-pack
+  rules against code no PR touched). Scheduled runs have no originating PR, so
+  GitHub's Copilot Autofix opens a standalone `alert-autofix-N` PR against
+  `main` for each finding — review these like any other PR (correctness of the
+  fix, plus the changelog/docs-guard requirement above), not as noise to wave
+  through.
