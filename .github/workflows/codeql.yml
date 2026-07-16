@@ -1,0 +1,39 @@
+name: CodeQL
+
+# Primary coverage is PR/push (dev + review + build time), so findings are
+# tied to the change that introduced them. The weekly schedule is kept for a
+# different purpose: catching newly-added CodeQL query-pack rules that match
+# against code nobody has touched — the tradeoff is that those runs produce
+# alerts with no PR to attach to, which is why alert-autofix-1/5/12 landed as
+# standalone PRs. Migrated off GitHub's "default setup" to this checked-in
+# workflow so the schedule/triggers are visible and versioned here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, python]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
