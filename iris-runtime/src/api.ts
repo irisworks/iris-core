@@ -92,9 +92,11 @@ export function resolveCaller(
 	registry: AgentRegistry,
 ): string | null {
 	if (!apiToken) return "iris";
-	const match = /^Bearer\s+(.+)$/i.exec(authHeader ?? "");
-	if (!match) return null;
-	const presented = match[1];
+	const header = authHeader ?? "";
+	const prefix = /^Bearer\s+/i.exec(header);
+	if (!prefix) return null;
+	const presented = header.slice(prefix[0].length);
+	if (!presented) return null;
 	if (secretMatches(presented, apiToken)) return "iris";
 	for (const [name, entry] of Object.entries(registry)) {
 		if (entry.token && secretMatches(presented, entry.token)) return name;
