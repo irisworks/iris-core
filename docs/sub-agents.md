@@ -49,15 +49,23 @@ unrestricted. See [get-secret](skills.md) and [Configuration](configuration.md) 
 the resolution backends.
 
 **Caller identity comes from which token authenticated the request, not from a
-self-reported header.** `terraform/modules/agent` provisions each agent
-container its own `IRIS_API_TOKEN` (overriding the shared one from `.env`);
-register that value as the agent's `token` above and the API matches the
-presented bearer token to derive `caller`, so a caller holding only its own
-per-agent token cannot claim to be another agent or the unrestricted `iris`
-caller — including a compromised sub-agent. An agent entry with no `token` set
-falls back to authenticating with the shared `IRIS_API_TOKEN`, which is always
-treated as unrestricted `iris`; give every agent that needs the allow-list
-enforced its own `token`.
+self-reported header.** Set `unique_api_token = true` on an agent's
+`terraform/modules/agent` module block and its container gets its own
+`IRIS_API_TOKEN` (overriding the shared one from `.env`, exposed as the
+module's `api_token` output); register that value as the agent's `token` above
+and the API matches the presented bearer token to derive `caller`, so a caller
+holding only its own per-agent token cannot claim to be another agent or the
+unrestricted `iris` caller — including a compromised sub-agent. Enable it
+agent-by-agent: once the flag is on, that agent's API calls return 401 until
+its `token` is registered in `agents.json`, so copy the token in as part of
+the same change. With the flag off (the default) — or for an agent entry with
+no `token` set — the agent authenticates with the shared `IRIS_API_TOKEN`,
+which is always treated as unrestricted `iris`; give every agent that needs
+the allow-list enforced its own token.
+
+Treat `agents.json` as a secrets file once `token` fields are in it: keep file
+permissions tight and never commit it to version control (the token values are
+random strings that secret scanners won't reliably flag).
 
 Scaffolds for new sub-agents live in `agents/`; the `spawn-agent` skill automates
 provisioning (two containers per agent: preview and prod).

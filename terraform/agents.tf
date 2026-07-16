@@ -7,10 +7,11 @@
 # module "my_agent" {
 #   source = "./modules/agent"
 #
-#   agent_name     = "my-agent"
-#   key_vault_name = var.key_vault_name
-#   iris_api_url   = "http://172.18.0.1:3000"
-#   bridge_port    = 4100
+#   agent_name       = "my-agent"
+#   key_vault_name   = var.key_vault_name
+#   iris_api_url     = "http://172.18.0.1:3000"
+#   bridge_port      = 4100
+#   unique_api_token = true   # opt-in per-agent token (IRIS-120), see below
 # }
 #
 # output "my_agent_api_token" {
@@ -18,10 +19,15 @@
 #   sensitive = true
 # }
 #
-# After apply, run `terraform output -raw my_agent_api_token` and copy the
-# value into this agent's `token` field in agents.json — that's what lets
-# Iris's API derive caller identity from the authenticating token instead of
-# the self-reported X-Iris-Caller header (IRIS-120).
+# With `unique_api_token = true`, the container gets its own IRIS_API_TOKEN
+# instead of the shared one from .env — that's what lets Iris's API derive
+# caller identity from the authenticating token instead of the self-reported
+# X-Iris-Caller header (IRIS-120). The agent's API calls are 401 until the
+# token is registered, so after apply, run
+# `terraform output -raw my_agent_api_token` and copy the value into this
+# agent's `token` field in agents.json as part of the same change. Left off
+# (the default), the agent keeps using the shared token and resolves as
+# unrestricted "iris", same as before.
 #
 # ── Firecracker agent (public / untrusted use) ───────────────
 # Each microVM gets its own Linux kernel + isolated filesystem.
