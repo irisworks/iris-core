@@ -38,6 +38,14 @@ sudo systemctl start iris
 | Jailer fails to chroot | `irisjailer` user missing | `sudo groupadd -g 10000 irisjailer; sudo useradd -u 10000 -g 10000 -r -s /usr/sbin/nologin irisjailer` |
 | rootfs missing | Build script not run | `sudo bash scripts/build-firecracker-rootfs.sh` |
 
+## Inspecting the last prompt
+
+Each channel directory in the workspace (`<workspace>/slack/<channel>`, `<workspace>/telegram/<channel>`, or `<workspace>/SESSION-...` for virtual channels) contains a `last_prompt.jsonl` with the exact context of the most recent run — system prompt, message history, the new user message, and the image attachment count. It is written asynchronously on a best-effort basis (a failed write logs a warning and never fails the run) and is stored as compact JSON, so pretty-print it when reading:
+
+```bash
+jq . <workspace>/slack/<channel>/last_prompt.jsonl | less
+```
+
 ## Firecracker VM reset
 
 ```bash
