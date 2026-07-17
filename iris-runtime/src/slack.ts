@@ -61,13 +61,41 @@ function renderPayloadTemplate(node: unknown, vars: Record<string, string>): unk
 }
 
 /**
+ * Length of text as Slack counts it. Slack HTML-escapes &, < and > (to &amp;,
+ * &lt;, &gt;) before enforcing its message-length limits, so a reply heavy on
+ * code blocks or comparison operators can be rejected as msg_too_long even
+ * when the raw string is under the limit (#61). All length budgeting must use
+ * this, not String.length.
+ */
+export function slackEscapedLength(text: string): number {
+	let length = text.length;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code === 38) length += 4; // & -> &amp;
+		else if (code === 60 || code === 62) length += 3; // < / > -> &lt; / &gt;
+	}
+	return length;
+}
+
+/** Longest prefix of text whose escaped length stays within maxLength. */
+function escapedPrefixLength(text: string, maxLength: number): number {
+	let length = 0;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		length += code === 38 ? 5 : code === 60 || code === 62 ? 4 : 1;
+		if (length > maxLength) return i;
+	}
+	return text.length;
+}
+
+/**
  * Truncate text to fit within Slack's message limit.
  * If truncated, adds "\n\n[message truncated]" at the end.
  */
 function truncateForSlack(text: string): string {
-	if (text.length <= SLACK_MAX_LENGTH) return text;
+	if (slackEscapedLength(text) <= SLACK_MAX_LENGTH) return text;
 	const suffix = "\n\n[message truncated]";
-	return text.slice(0, SLACK_MAX_LENGTH - suffix.length) + suffix;
+	return text.slice(0, escapedPrefixLength(text, SLACK_MAX_LENGTH - suffix.length)) + suffix;
 }
 
 // ============================================================================
@@ -720,6 +748,26 @@ export class SlackBot implements ChannelTransport {
 			filename: fileName,
 			title: fileName,
 		});
+	}
+
+	/**
+	 * Upload raw text content as a file. Fallback delivery path for replies
+	 * Slack refuses to accept as messages (e.g. msg_too_long, #61).
+	 */
+	async uploadTextFile(channel: string, content: string, fileName: string, threadTs?: string): Promise<void> {
+		if (this.isVirtualChannel(channel)) return;
+		let channelId = channel;
+		let thread = threadTs;
+		if (channel.startsWith("SESSION-")) {
+			const route = this.sessionRoutes.get(channel);
+			if (!route) return;
+			channelId = route.channel;
+			thread = route.threadTs;
+		}
+		const args = { channel_id: channelId, content, filename: fileName, title: fileName };
+		await (thread
+			? this.webClient.files.uploadV2({ ...args, thread_ts: thread })
+			: this.webClient.files.uploadV2(args));
 	}
 
 	/**
@@ -1393,25 +1441,41 @@ export class SlackBot implements ChannelTransport {
 // Slack recommends 4000 chars max for chat.update. We use 4000 as the split point.
 const SLACK_SPLIT_CHARS = 4000;
 
+// Floor for the msg_too_long re-split retry: below this, give up on message
+// delivery and fall back to attaching the reply as a file.
+const MIN_SPLIT_CHARS = 1000;
+
 /**
  * Split text into chunks at natural newline boundaries near maxChars.
+ * Budgets on the escaped length (see slackEscapedLength) — what Slack
+ * actually enforces its limits against.
  */
-function splitIntoChunks(text: string, maxChars: number): string[] {
-	if (text.length <= maxChars) return [text];
+export function splitIntoChunks(text: string, maxChars: number): string[] {
+	if (slackEscapedLength(text) <= maxChars) return [text];
 	const chunks: string[] = [];
 	let remaining = text;
 	while (remaining.length > 0) {
-		if (remaining.length <= maxChars) {
+		if (slackEscapedLength(remaining) <= maxChars) {
 			chunks.push(remaining);
 			break;
 		}
-		const searchFrom = Math.floor(maxChars * 0.8);
-		const newlineIdx = remaining.lastIndexOf("\n", maxChars);
-		const cut = newlineIdx >= searchFrom ? newlineIdx + 1 : maxChars;
-		chunks.push(remaining.slice(0, cut).trimEnd());
+		const hardCut = Math.max(1, escapedPrefixLength(remaining, maxChars));
+		const searchFrom = Math.floor(hardCut * 0.8);
+		const newlineIdx = remaining.lastIndexOf("\n", hardCut);
+		const cut = newlineIdx >= searchFrom ? newlineIdx + 1 : hardCut;
+		const chunk = remaining.slice(0, cut).trimEnd();
+		if (chunk) chunks.push(chunk);
 		remaining = remaining.slice(cut).trimStart();
 	}
 	return chunks;
+}
+
+/** Whether a Slack WebClient error is the platform msg_too_long rejection. */
+function isMsgTooLong(err: unknown): boolean {
+	return (
+		(err as { data?: { error?: string } } | undefined)?.data?.error === "msg_too_long" ||
+		(err instanceof Error && err.message.includes("msg_too_long"))
+	);
 }
 
 export function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
@@ -1426,6 +1490,60 @@ export function createSlackContext(event: SlackEvent, slack: SlackBot, state: Ch
 
 	// Extract event filename for status message
 	const eventFilename = isEvent ? event.text.match(/^\[EVENT:([^:]+):/)?.[1] : undefined;
+
+	// Post the final reply: chunk 1 replaces the thinking message, chunks 2+ go
+	// to its thread. If Slack rejects a chunk with msg_too_long anyway (its
+	// limit accounting has surprised us before — see slackEscapedLength), the
+	// already-posted thread chunks are removed and everything is re-posted at
+	// half the chunk size, down to MIN_SPLIT_CHARS.
+	const postFinalReply = async (text: string, splitChars: number): Promise<void> => {
+		try {
+			const chunks = splitIntoChunks(text, splitChars);
+			if (messageTs) {
+				await slack.finalizeMessage(event.channel, messageTs, chunks[0]);
+			} else {
+				messageTs = await slack.postMessage(event.channel, chunks[0]);
+			}
+			for (let i = 1; i < chunks.length; i++) {
+				const ts = await slack.postInThread(event.channel, messageTs!, chunks[i]);
+				threadMessageTs.push(ts);
+			}
+		} catch (err) {
+			if (!isMsgTooLong(err) || splitChars <= MIN_SPLIT_CHARS) throw err;
+			const nextSplit = Math.floor(splitChars / 2);
+			log.logWarning(`[${event.channel}] Slack rejected reply chunk (msg_too_long) — re-splitting at ${nextSplit} chars`);
+			for (const ts of threadMessageTs.splice(0)) {
+				try {
+					await slack.deleteMessage(event.channel, ts);
+				} catch {}
+			}
+			await postFinalReply(text, nextSplit);
+		}
+	};
+
+	// Last-resort delivery: never strand the user on the thinking placeholder.
+	// Attach the full reply as a file and replace the placeholder with a short
+	// notice saying what happened (#61 — failures used to be log-only).
+	const deliverAsFileFallback = async (text: string, cause: unknown): Promise<void> => {
+		const reason = cause instanceof Error ? cause.message : String(cause);
+		let notice: string;
+		try {
+			await slack.uploadTextFile(event.channel, text, "iris-reply.md", messageTs ?? undefined);
+			notice = `_Slack rejected this reply as a message (${reason}) — attached it as a file instead._`;
+		} catch (uploadErr) {
+			log.logWarning("Slack fallback upload error", uploadErr instanceof Error ? uploadErr.message : String(uploadErr));
+			notice = `_Failed to post the reply (${reason}). See the runtime log for details._`;
+		}
+		try {
+			if (messageTs) {
+				await slack.finalizeMessage(event.channel, messageTs, notice);
+			} else {
+				messageTs = await slack.postMessage(event.channel, notice);
+			}
+		} catch (noticeErr) {
+			log.logWarning("Slack fallback notice error", noticeErr instanceof Error ? noticeErr.message : String(noticeErr));
+		}
+	};
 
 	return {
 		// stubBot in bridge-only mode carries transportId "bridge"
@@ -1463,25 +1581,15 @@ export function createSlackContext(event: SlackEvent, slack: SlackBot, state: Ch
 		// Called when generation is complete with the full final text.
 		// Splits into chunks and posts in order: chunk 1 replaces the thinking message,
 		// chunks 2+ are posted as thread replies below — correct reading order guaranteed.
+		// On failure the reply is delivered as a file with a visible notice — never
+		// a silent log entry with the thinking placeholder left behind.
 		replaceMessage: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
 				try {
-					const chunks = splitIntoChunks(text, SLACK_SPLIT_CHARS);
-
-					// Replace thinking indicator with first chunk
-					if (messageTs) {
-						await slack.finalizeMessage(event.channel, messageTs, chunks[0]);
-					} else {
-						messageTs = await slack.postMessage(event.channel, chunks[0]);
-					}
-
-					// Post remaining chunks as thread replies in order
-					for (let i = 1; i < chunks.length; i++) {
-						const ts = await slack.postInThread(event.channel, messageTs!, chunks[i]);
-						threadMessageTs.push(ts);
-					}
+					await postFinalReply(text, SLACK_SPLIT_CHARS);
 				} catch (err) {
 					log.logWarning("Slack replaceMessage error", err instanceof Error ? err.message : String(err));
+					await deliverAsFileFallback(text, err);
 				}
 			});
 			await updatePromise;
