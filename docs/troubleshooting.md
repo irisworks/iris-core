@@ -28,6 +28,7 @@ sudo systemctl start iris
 | Slack messages ignored | Wrong channel mode | Check `data/channels.json` — default mode needs an `@iris` mention outside DMs |
 | Telegram bot silent | Bot not claimed | Send the claim token printed at startup — see [Setup](SETUP.md#telegram-setup) |
 | `Timed out waiting for LLM response` | Provider rate limits | Retries are automatic; tune `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_TIMEOUT_SECS` |
+| Slack reply arrives as an `iris-reply.md` file with an error notice | Slack rejected the message (`msg_too_long`) even after automatic re-splitting — usually extremely formatting-dense content (Slack counts `&`, `<`, `>` as their escaped entities) | The full reply is in the attached file; lower `IRIS_SLACK_MAX_CHARS` if it recurs |
 | Every reply is `Error: Connection error` | LLM endpoint hostname doesn't resolve (e.g. malformed Foundry `baseUrl` in `models.json`) | Check `getent hosts <host>` for the `baseUrl` host; re-run `bootstrap.sh --setup` with the bare Foundry account name |
 | API returns 401 | `IRIS_API_TOKEN` set | Send `Authorization: Bearer <token>` |
 | `@agentname` reply is `Bridge request failed.` (504) or `Failed to write event.` (500) | Sub-agent didn't answer within 60s, or its events dir isn't writable | Bridge responses are deliberately generic — the detailed error is in the **sub-agent's** logs (`journalctl` / container logs, `[bridge]` lines) |
