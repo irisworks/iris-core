@@ -1,6 +1,7 @@
 # Iris
 
-**An AI operator that never clocks out.** Message it on Slack or Telegram and it
+**An AI operator that never clocks out.** Message it on Slack, Telegram, or its
+built-in web UI and it
 runs commands, writes its own skills on the fly, provisions infrastructure, and
 spins up a fleet of specialized sub-agents — each one optionally sealed inside
 its own Firecracker microVM — to get the work done.
@@ -16,6 +17,7 @@ AI teammate — no cloud account, no Kubernetes, no vendor lock-in required.
 - **Fleet, not chatbot** — spins up specialized sub-agents on demand, each talking over an HTTP bridge
 - **Defense in depth, opt-in** — Docker by default; flip a flag and every sub-agent runs in its own Firecracker microVM with a hardware KVM boundary
 - **Provider-agnostic** — Anthropic, OpenAI, Azure AI Foundry, or AWS Bedrock, switchable via env vars
+- **Three transports, one engine** — Slack, Telegram, and an optional built-in web UI (thread sidebar, live tool-call cards, attachments); adding a transport requires zero engine edits
 - **Resilient** — LLM retry with backoff, automatic context compaction, self-healing escalation
 - **Durable by design** — GitHub is the source of truth; the machine itself is cattle, not a pet
 - **Zero cloud dependencies to start** — secrets in `/iris/.env`, sub-agents in Docker; Azure Key Vault and Terraform are opt-in hardening, not requirements
@@ -50,8 +52,11 @@ Already cloned? `bash bootstrap.sh --setup --no-keyvault` does the same without 
 
 - **Slack:** `@iris <anything>` in a channel, or DM her directly. Attachments work both ways.
 - **Telegram:** message your claimed bot; groups and topic threads supported.
+- **Web UI:** set `IRIS_WEBUI_PORT` and open it in a browser — thread sidebar,
+  agent picker, live tool-call cards, file attachments, and Stop/Compact/Reset
+  buttons. Off by default; see [docs/web-ui.md](docs/web-ui.md).
 - **Control commands:** `stop`, `compact`, `reset` in an admin-mode Slack DM;
-  `/stop`, `/compact`, `/reset` on Telegram.
+  `/stop`, `/compact`, `/reset` on Telegram; buttons in the web UI.
 
 ## Channel Modes
 
@@ -105,6 +110,8 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 | `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
+| `IRIS_WEBUI_PORT` / `IRIS_WEBUI_PASSWORD` | — (off) / — | Enable the built-in web UI on this port; shared-secret login (set it before exposing beyond loopback) |
+| `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | External secret broker for `GET /secrets/:name` (Vault, Infisical, or any HTTP service speaking the contract); default backend is env vars, then Key Vault if `IRIS_KEY_VAULT` is set |
 | `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | Identity injected into the constitution |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |
@@ -151,6 +158,10 @@ live in `agents/`.
 The runtime exposes an internal HTTP API (default `127.0.0.1:3000`) for events,
 escalations, and session management — create sessions, inject messages, read
 history, reset context. Endpoint list in [`iris-runtime/src/engine/api.ts`](iris-runtime/src/engine/api.ts).
+
+Secrets are agent-scoped: sub-agents resolve them via `GET /secrets/:name` and
+must be allow-listed per secret in their `agents.json` entry (`"secrets": [...]`);
+caller identity comes from the authenticating API token, not a self-reported header.
 
 ## Company-Specific Extensions (Overlay)
 
@@ -199,7 +210,7 @@ iris-core/
 ├── agents/               # sub-agent scaffolds
 ├── scripts/              # Firecracker VM lifecycle
 ├── data/                 # CONSTITUTION.md, MEMORY.md, models.json.template — LLM provider config
-├── docs/                 # SETUP.md, RELEASING.md
+├── docs/                 # rendered docs site — setup, configuration, channel modes, web UI, ...
 └── terraform/            # optional profile — dynamic Azure resources
 ```
 
