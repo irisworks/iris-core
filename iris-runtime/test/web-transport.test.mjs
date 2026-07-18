@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
-import { WebTransport } from "../dist/transport/web.js";
+import { WebTransport } from "../dist/transports/web/web.js";
 
 const closers = [];
 after(() => {

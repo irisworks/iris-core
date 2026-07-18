@@ -153,10 +153,10 @@ The filename is used as an identifier for tracking timers and in the event messa
 
 ### Files
 
-- `src/events.ts` — Event parsing, timer management, fs watching
+- `src/engine/events.ts` — Event parsing, timer management, fs watching
 - `src/transport/types.ts` — `ChannelTransport.enqueueEvent()` implemented by each transport
 - `src/main.ts` — Initialize events watcher on startup; routes by `transport.ownsChannel(channelId)`
-- `src/agent.ts` — System prompt includes the events documentation below
+- `src/engine/agent.ts` — System prompt includes the events documentation below
 
 ### Key Components
 

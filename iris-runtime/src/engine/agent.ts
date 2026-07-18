@@ -26,7 +26,7 @@ import {
 	type MessageContext,
 	type TransportPromptProfile,
 	type UserInfo,
-} from "./transport/types.js";
+} from "../transport/types.js";
 import type { ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
 

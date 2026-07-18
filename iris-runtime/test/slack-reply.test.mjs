@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createSlackContext, slackEscapedLength, splitIntoChunks } from "../dist/slack.js";
+import { createSlackContext, slackEscapedLength, splitIntoChunks } from "../dist/transports/slack/slack.js";
 
 const msgTooLong = () =>
 	Object.assign(new Error("An API error occurred: msg_too_long"), {

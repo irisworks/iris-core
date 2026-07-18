@@ -46,17 +46,18 @@ a throwaway Docker sandbox container.
 ## Source layout
 
 - `src/main.ts` — entry point; pure wiring: constructs transports from env, hooks up API/bridge/events
-- `src/engine.ts` — per-channel run dispatch and stop/compact/reset handling, shared by all transports
-- `src/agent.ts` — the agent loop: LLM calls, retry/backoff, tool execution, context compaction
-- `src/transport/` — `ChannelTransport` interface (`types.ts`), bridge and web implementations
-- `src/slack.ts` / `src/telegram.ts` — Slack (Socket Mode) and Telegram transports
-- `src/api.ts` — internal HTTP API: sessions, events, escalations, agent-scoped secrets
-- `src/bridge.ts` — sub-agent HTTP bridge (`@agentname` routing via `agents.json`)
-- `src/events.ts` — event files (immediate / one-shot / periodic) → see [`docs/events.md`](docs/events.md)
-- `src/context.ts` / `src/store.ts` / `src/sessions.ts` — LLM context, channel persistence, session registry
-- `src/sandbox.ts` / `src/vm-manager.ts` — host/Docker/Firecracker execution backends
-- `src/secrets.ts` — pluggable secret resolution (env, Key Vault, broker)
-- `src/tools/` — tool implementations (bash, read, write, edit, attach)
+- `src/transport/types.ts` — the shared `ChannelTransport` contract; the engine imports only this, never a concrete transport
+- `src/engine/` — transport-agnostic core:
+  - `index.ts` — per-channel run dispatch and stop/compact/reset handling, shared by all transports
+  - `agent.ts` — the agent loop: LLM calls, retry/backoff, tool execution, context compaction
+  - `api.ts` — internal HTTP API: sessions, events, escalations, agent-scoped secrets
+  - `bridge.ts` — sub-agent HTTP bridge (`@agentname` routing via `agents.json`)
+  - `events.ts` — event files (immediate / one-shot / periodic) → see [`docs/events.md`](docs/events.md)
+  - `context.ts` / `store.ts` / `sessions.ts` — LLM context, channel persistence, session registry
+  - `sandbox.ts` / `vm-manager.ts` — host/Docker/Firecracker execution backends
+  - `secrets.ts` — pluggable secret resolution (env, Key Vault, broker)
+  - `tools/` — tool implementations (bash, read, write, edit, attach)
+- `src/transports/` — concrete `ChannelTransport` implementations, one directory each: `slack/`, `telegram/`, `bridge/`, `web/`
 
 ## Runtime docs
 

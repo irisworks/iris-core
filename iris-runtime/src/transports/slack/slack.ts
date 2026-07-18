@@ -3,10 +3,10 @@ import { WebClient } from "@slack/web-api";
 import { execFileSync } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
-import * as log from "./log.js";
-import { createSession, findByThread, loadSessions, registerSessionRequest } from "./sessions.js";
-import { resolveChannelDir, type Attachment, type ChannelStore } from "./store.js";
-import type { ChannelState } from "./engine.js";
+import * as log from "../../engine/log.js";
+import { createSession, findByThread, loadSessions, registerSessionRequest } from "../../engine/sessions.js";
+import { resolveChannelDir, type Attachment, type ChannelStore } from "../../engine/store.js";
+import type { ChannelState } from "../../engine/index.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
@@ -15,7 +15,7 @@ import {
 	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
-} from "./transport/types.js";
+} from "../../transport/types.js";
 
 // Slack message text limit (safely under the actual 40K limit); IRIS_SLACK_MAX_CHARS overrides
 const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
@@ -126,8 +126,8 @@ export interface SlackChannel {
 }
 
 // Shared transport types — moved to transport/types.ts; re-exported for compat
-export type { ChannelInfo, UserInfo } from "./transport/types.js";
-export type { MessageContext as SlackContext } from "./transport/types.js";
+export type { ChannelInfo, UserInfo } from "../../transport/types.js";
+export type { MessageContext as SlackContext } from "../../transport/types.js";
 
 // ============================================================================
 // Prompt profile
@@ -686,7 +686,7 @@ export class SlackBot implements ChannelTransport {
 	async finalizeMessage(channel: string, ts: string, text: string): Promise<void> {
 		if (channel.startsWith("WEBUI") || channel.startsWith("ESCALATE-") || channel.startsWith("SELFHEAL-")) return;
 		if (channel.startsWith("BRIDGE-")) {
-			const { resolveBridgeRequest } = await import("./bridge.js");
+			const { resolveBridgeRequest } = await import("../../engine/bridge.js");
 			const requestId = channel.slice("BRIDGE-".length);
 			resolveBridgeRequest(requestId, text);
 			return;

@@ -3,7 +3,7 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, readdirSync, statS
 import { readFile } from "fs/promises";
 import { join } from "path";
 import * as log from "./log.js";
-import type { TransportEvent } from "./transport/types.js";
+import type { TransportEvent } from "../transport/types.js";
 
 /**
  * Sink the watcher enqueues synthetic events into. main.ts wires this to a

@@ -8,7 +8,7 @@
 
 // Engine-owned per-channel state; type-only import so this module stays runtime-free
 // of engine dependencies (the engine imports this module at runtime, not vice versa).
-import type { ChannelState } from "../engine.js";
+import type { ChannelState } from "../engine/index.js";
 
 export interface ChannelInfo {
 	id: string;
