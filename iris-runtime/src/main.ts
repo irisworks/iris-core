@@ -12,7 +12,7 @@ import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./engine/s
 import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from "./transports/slack/slack.js";
 import { TelegramBot, type IrisTelegramHandler } from "./transports/telegram/telegram.js";
 import { ChannelStore } from "./engine/store.js";
-import { BridgeTransport } from "./transports/bridge/bridge.js";
+import { BridgeTransport } from "./transports/bridge/bridge-transport.js";
 import { WebTransport } from "./transports/web/web.js";
 import type { ChannelTransport, TransportEvent } from "./transport/types.js";
 
