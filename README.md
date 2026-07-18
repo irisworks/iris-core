@@ -1,20 +1,24 @@
 # Iris
 
-Iris is an always-on AI orchestrator. It runs on any Linux machine — a laptop, VPS,
-or cloud VM — listens on **Slack and/or Telegram**, and does real work: it runs
-commands, writes and hot-reloads its own skills, provisions infrastructure, and
-manages a fleet of specialized sub-agents, each optionally isolated in its own
-Firecracker microVM.
+**An AI operator that never clocks out.** Message it on Slack or Telegram and it
+runs commands, writes its own skills on the fly, provisions infrastructure, and
+spins up a fleet of specialized sub-agents — each one optionally sealed inside
+its own Firecracker microVM — to get the work done.
 
-The default install has **zero cloud dependencies**: secrets in `/iris/.env`,
-sub-agents in Docker. Azure Key Vault, Terraform, and Firecracker isolation are
-opt-in profiles for production hardening.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/irisworks/iris-core/actions/workflows/ci.yml/badge.svg)](https://github.com/irisworks/iris-core/actions/workflows/ci.yml)
+[![Runtime version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Firisworks%2Firis-core%2Fmain%2Firis-runtime%2Fpackage.json&query=%24.version&label=runtime)](iris-runtime/CHANGELOG.md)
 
+One `curl | bash` on any Linux box turns it into a self-hosted, self-healing
+AI teammate — no cloud account, no Kubernetes, no vendor lock-in required.
+
+- **Self-extending** — Iris writes and hot-reloads her own skills; no redeploy to teach her something new
+- **Fleet, not chatbot** — spins up specialized sub-agents on demand, each talking over an HTTP bridge
+- **Defense in depth, opt-in** — Docker by default; flip a flag and every sub-agent runs in its own Firecracker microVM with a hardware KVM boundary
 - **Provider-agnostic** — Anthropic, OpenAI, Azure AI Foundry, or AWS Bedrock, switchable via env vars
-- **Skills** — plain directories with a `SKILL.md`; hot-reload without restart; Iris can write her own
-- **Sub-agents** — spawned in Docker containers or Firecracker microVMs, talking over an HTTP bridge
 - **Resilient** — LLM retry with backoff, automatic context compaction, self-healing escalation
-- **Durable** — GitHub is the source of truth; the machine is disposable and rebuildable from this repo
+- **Durable by design** — GitHub is the source of truth; the machine itself is cattle, not a pet
+- **Zero cloud dependencies to start** — secrets in `/iris/.env`, sub-agents in Docker; Azure Key Vault and Terraform are opt-in hardening, not requirements
 
 ## Quickstart
 

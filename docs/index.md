@@ -5,21 +5,22 @@ description: An always-on AI orchestrator that runs commands, writes its own ski
 
 # What is Iris?
 
-Iris is an always-on AI orchestrator. It runs on any Linux machine — a laptop, VPS,
-or cloud VM — listens on **Slack and/or Telegram**, and does real work: it runs
-commands, writes and hot-reloads its own skills, provisions infrastructure, and
-manages a fleet of specialized sub-agents, each optionally isolated in its own
-Firecracker microVM.
+**An AI operator that never clocks out.** Message it on Slack or Telegram and it
+runs commands, writes its own skills on the fly, provisions infrastructure, and
+spins up a fleet of specialized sub-agents — each one optionally sealed inside
+its own Firecracker microVM — to get the work done.
 
-The default install has **zero cloud dependencies**: secrets in `/iris/.env`,
-sub-agents in Docker. Azure Key Vault, Terraform, and Firecracker isolation are
-opt-in profiles for production hardening.
+It runs on any Linux machine — a laptop, VPS, or cloud VM. The default install
+has **zero cloud dependencies**: secrets in `/iris/.env`, sub-agents in Docker.
+Azure Key Vault, Terraform, and Firecracker isolation are opt-in profiles for
+production hardening.
 
 ## Highlights
 
+- **Self-extending** — Iris writes and hot-reloads her own skills; no redeploy to teach her something new
+- **Fleet, not chatbot** — spins up specialized sub-agents on demand, each talking over an HTTP bridge
+- **Defense in depth, opt-in** — Docker by default; flip a flag and every sub-agent runs in its own Firecracker microVM with a hardware KVM boundary
 - **Provider-agnostic** — Anthropic, OpenAI, Azure AI Foundry, or AWS Bedrock, switchable via env vars
-- **Skills** — plain directories with a `SKILL.md`; hot-reload without restart; Iris can write her own
-- **Sub-agents** — spawned in Docker containers or Firecracker microVMs, talking over an HTTP bridge
 - **Resilient** — LLM retry with backoff, automatic context compaction, self-healing escalation
 - **Durable** — GitHub is the source of truth; the machine is disposable and rebuildable from the repo
 
