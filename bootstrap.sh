@@ -984,8 +984,8 @@ else
 fi
 
 mkdir -p "$IRIS_DIR/data"
-ln -sfn "$REPO_DIR/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
-ln -sfn "$REPO_DIR/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
+ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
+ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 
 if [[ -n "$GENERATED_MODELS_JSON" && -f "$GENERATED_MODELS_JSON" ]]; then

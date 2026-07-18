@@ -39,8 +39,8 @@ shape how Iris behaves.
 You (Slack or Telegram)
 └── Iris  (any Linux machine, systemd service)
     ├── iris-runtime          the TypeScript engine
-    ├── CONSTITUTION.md       read-only operator rules, injected every prompt
-    ├── MEMORY.md             mutable global memory
+    ├── data/CONSTITUTION.md  read-only operator rules, injected every prompt
+    ├── data/MEMORY.md        mutable global memory
     ├── skills/               hot-reloaded capabilities
     └── sub-agents            Docker containers or Firecracker microVMs,
                               reached via an internal HTTP bridge
