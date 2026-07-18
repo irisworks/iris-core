@@ -20,11 +20,11 @@ import { randomBytes } from "crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "fs";
 import { join, resolve, sep } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
-import * as log from "../log.js";
-import { loadAgentRegistry, callAgentBridge } from "../bridge.js";
-import { readBody, secretMatches } from "../api.js";
-import type { ChannelState, EngineTransport } from "../engine.js";
-import { resolveChannelDir, resolveChannelPath } from "../store.js";
+import * as log from "../../engine/log.js";
+import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
+import { readBody, secretMatches } from "../../engine/api.js";
+import type { ChannelState, EngineTransport } from "../../engine/index.js";
+import { resolveChannelDir, resolveChannelPath } from "../../engine/store.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
@@ -34,7 +34,7 @@ import {
 	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
-} from "./types.js";
+} from "../../transport/types.js";
 
 export interface WebTransportOptions {
 	port: number;
@@ -254,7 +254,7 @@ export class WebTransport implements ChannelTransport {
 	// ==========================================================================
 
 	async injectSessionMessage(sessionId: string, user: string, text: string): Promise<string> {
-		const { registerSessionRequest } = await import("../sessions.js");
+		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
 		const ts = (Date.now() / 1000).toFixed(6);
 		const responsePromise = registerSessionRequest(sessionId, 90_000);

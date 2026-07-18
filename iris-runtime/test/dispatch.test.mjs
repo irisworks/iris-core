@@ -12,8 +12,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { createSession, loadSessions } from "../dist/sessions.js";
-import { resolveChannelDir } from "../dist/store.js";
+import { createSession, loadSessions } from "../dist/engine/sessions.js";
+import { resolveChannelDir } from "../dist/engine/store.js";
 import { fillQueue, makeBot, settle } from "./helpers.mjs";
 
 // ============================================================================

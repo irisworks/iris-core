@@ -26,7 +26,7 @@ import {
 	type MessageContext,
 	type TransportPromptProfile,
 	type UserInfo,
-} from "./transport/types.js";
+} from "../transport/types.js";
 import type { ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
 
@@ -924,14 +924,30 @@ function createRunner(
 				userMessage += `\n\n<${profile.attachmentsTagName}>\n${nonImagePaths.join("\n")}\n</${profile.attachmentsTagName}>`;
 			}
 
-			// Debug: write context to last_prompt.jsonl
+			// Debug: write context to last_prompt.jsonl. Nothing in the request path reads
+			// this back — it's a post-hoc inspection aid, so keep it entirely off the hot
+			// path: the stringify (which blocks the event loop and scales with history size)
+			// and the disk write are deferred until after the LLM call is issued, and
+			// failures are non-fatal. Snapshot the messages array so the deferred stringify
+			// captures pre-run history even if the run appends to it first.
 			const debugContext = {
 				systemPrompt,
-				messages: session.messages,
+				messages: session.messages.slice(),
 				newUserMessage: userMessage,
 				imageAttachmentCount: imageAttachments.length,
 			};
-			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
+			setImmediate(() => {
+				try {
+					writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext)).catch((err) => {
+						log.logWarning("Failed to write last_prompt.jsonl", err instanceof Error ? err.message : String(err));
+					});
+				} catch (err) {
+					log.logWarning(
+						"Failed to serialize last_prompt.jsonl",
+						err instanceof Error ? err.message : String(err),
+					);
+				}
+			});
 
 			// Pre-run auto-compaction: if the estimated context exceeds IRIS_COMPACT_THRESHOLD
 			// (default 60%) of the model window, compact down toward IRIS_COMPACT_TARGET

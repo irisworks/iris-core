@@ -150,7 +150,7 @@ live in `agents/`.
 
 The runtime exposes an internal HTTP API (default `127.0.0.1:3000`) for events,
 escalations, and session management — create sessions, inject messages, read
-history, reset context. Endpoint list in [`iris-runtime/src/api.ts`](iris-runtime/src/api.ts).
+history, reset context. Endpoint list in [`iris-runtime/src/engine/api.ts`](iris-runtime/src/engine/api.ts).
 
 ## Company-Specific Extensions (Overlay)
 
@@ -194,13 +194,11 @@ If `start` silently does nothing, rebuild first:
 iris-core/
 ├── install.sh            # curl-able one-command installer (clone + bootstrap)
 ├── bootstrap.sh          # interactive install / full rebuild
-├── CONSTITUTION.md       # operator rules — injected read-only into every prompt
-├── MEMORY.md             # Iris's mutable global memory
 ├── iris-runtime/         # @iris-core/runtime — the TypeScript engine
 ├── skills/               # platform skills (hot-reloaded)
 ├── agents/               # sub-agent scaffolds
 ├── scripts/              # Firecracker VM lifecycle
-├── data/                 # models.json.template — LLM provider config
+├── data/                 # CONSTITUTION.md, MEMORY.md, models.json.template — LLM provider config
 ├── docs/                 # SETUP.md, RELEASING.md
 └── terraform/            # optional profile — dynamic Azure resources
 ```

@@ -8,8 +8,8 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SlackBot } from "../dist/slack.js";
-import { ChannelStore } from "../dist/store.js";
+import { SlackBot } from "../dist/transports/slack/slack.js";
+import { ChannelStore } from "../dist/engine/store.js";
 
 /** Wait for queued microtask/timeout work (ChannelQueue, fire-and-forget forwards). */
 export function settle(ms = 25) {

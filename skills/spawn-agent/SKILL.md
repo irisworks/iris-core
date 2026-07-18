@@ -78,7 +78,7 @@ curl -s http://localhost:<bridge_port>/health  # if bridge enabled
 
 ### Step 7 — Update Iris MEMORY.md
 
-Add the new agent to the sub-agents table in `/iris/repo/MEMORY.md`.
+Add the new agent to the sub-agents table in `/iris/repo/data/MEMORY.md`.
 
 ## Notes
 

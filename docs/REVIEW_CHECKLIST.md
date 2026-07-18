@@ -15,17 +15,17 @@ Check these before reading line-by-line. Failing any of these means redirect the
 correctly-implemented wrong approach still needs to be rejected.
 
 - [ ] **Engine stays transport-agnostic.** Does this PR add any Slack- or
-      Telegram-specific code, types, or string literals to `src/agent.ts` or
-      `src/engine.ts`? Both should only reference `transport/types.ts` shapes
+      Telegram-specific code, types, or string literals to `src/engine/agent.ts` or
+      `src/engine/index.ts`? Both should only reference `transport/types.ts` shapes
       (`MessageContext`, `TransportEvent`, `ChannelTransport`,
       `TransportPromptProfile`). A new "if transport === slack" branch in either
-      file is the wrong layer — it belongs in `slack.ts`/`telegram.ts` or on the
+      file is the wrong layer — it belongs in `slack.ts`/`telegram.ts` (`src/transports/`) or on the
       transport's `TransportPromptProfile`.
 - [ ] **Does this duplicate `ChannelTransport`?** A new transport (or a
       transport-shaped helper) should implement the interface in
       `transport/types.ts` and plug into `createEngine`'s dispatch — not grow a
       parallel bespoke integration path bolted onto `main.ts`.
-- [ ] **Does this duplicate per-channel state?** `engine.ts`'s
+- [ ] **Does this duplicate per-channel state?** `src/engine/index.ts`'s
       `channelStates: Map<string, ChannelState>` (via `getState`/`getOrCreateRunner`)
       is the one place run/store/stop state lives. A PR that adds its own
       channel-keyed `Map` for similar bookkeeping should instead extend
@@ -38,7 +38,7 @@ correctly-implemented wrong approach still needs to be rejected.
       already has a near-identical counterpart elsewhere in the file (a second
       near-copy of a handler, a second copy of a chunking/splitting function), a
       shared helper is very likely already there or should be — this is
-      literally the bug class Phase 2 exists to kill (see `engine.ts`'s
+      literally the bug class Phase 2 exists to kill (see `src/engine/index.ts`'s
       history: it replaced two duplicated Slack/Telegram handlers).
 - [ ] **Stacked-PR check.** If the PR branches off another open PR, confirm it's
       a real functional dependency (the diff needs types/functions the base PR
@@ -50,7 +50,7 @@ correctly-implemented wrong approach still needs to be rejected.
 Each item below is checkable against a specific file, not aspirational.
 
 - [ ] **Slack envelopes ack exactly once.** Every `socketClient.on("app_mention"
-      | "message", ...)` handler in `src/slack.ts` must call `ack()` exactly
+      | "message", ...)` handler in `src/transports/slack/slack.ts` must call `ack()` exactly
       once per invocation, including on the error path. The existing pattern is
       `let acked = false` + `ackOnce()` wrapper + `try/catch/finally { ackOnce()
       }` (see `setupEventHandlers()` around line 787). A new handler or an edit
@@ -59,7 +59,7 @@ Each item below is checkable against a specific file, not aspirational.
 - [ ] **Channel directory resolution goes through `resolveChannelDir`/
       `resolveChannelPath`.** Nothing should hand-build a channel's on-disk path
       (`workingDir + channelId`, `slack/${id}`, etc.) — always call
-      `resolveChannelDir(workingDir, channelId)` (`src/store.ts`). It encodes the
+      `resolveChannelDir(workingDir, channelId)` (`src/engine/store.ts`). It encodes the
       Slack/Telegram/virtual-channel (`SESSION-`, `BRIDGE-`, `ESCALATE-`,
       `SELFHEAL-`, `WEBUI`) split; a hand-built path silently drifts from it the
       next time that split changes.
@@ -71,10 +71,10 @@ Each item below is checkable against a specific file, not aspirational.
       "bridge" | "web"`), since `agent.ts` uses it to look up the prompt profile via
       `getPromptProfile(ctx.transportId)` and throws if none is registered.
 - [ ] **New transport-specific prompt text lives on `TransportPromptProfile`,
-      not in `agent.ts`.** `buildSystemPrompt` in `agent.ts` must stay free of
+      not in `agent.ts`.** `buildSystemPrompt` in `src/engine/agent.ts` must stay free of
       hardcoded Slack/Telegram strings — formatting rules, identity lines,
       attachment tag names, etc. all come from the `profile` parameter. `grep
-      -ri slack src/agent.ts` should return nothing (this was IRIS-49's
+      -ri slack src/engine/agent.ts` should return nothing (this was IRIS-49's
       acceptance bar and should stay true).
 - [ ] **Wildcard channel config resolves through one path.** Any new
       per-channel setting in `channels.json` must be read via
@@ -92,12 +92,12 @@ Each item below is checkable against a specific file, not aspirational.
       `loadChannelModes()`, that test must still pass.
 - [ ] **API endpoints requiring auth check `IRIS_API_TOKEN` via
       `bearerTokenMatches`.** Any new endpoint in `startApiServer`
-      (`src/api.ts`) other than `GET /health` is gated by the existing
+      (`src/engine/api.ts`) other than `GET /health` is gated by the existing
       `apiToken && !bearerTokenMatches(...)` check near the top of the request
       handler — don't add a second, parallel auth check, and don't add an
       endpoint before that gate.
 - [ ] **Secrets never land in a channel/session log or a passthrough error
-      path.** `resolvePassthroughKey` (`slack.ts`) resolves via
+      path.** `resolvePassthroughKey` (`src/transports/slack/slack.ts`) resolves via
       `PASSTHROUGH_API_KEY` or the `get-secret` skill and must never write the
       resolved value into `log.jsonl`, `last_prompt.jsonl`, or a posted Slack/
       Telegram message. If a PR adds a new secret-bearing config field, check it
