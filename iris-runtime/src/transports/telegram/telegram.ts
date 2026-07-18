@@ -1,10 +1,10 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
-import * as log from "./log.js";
-import { registerSessionRequest, resolveSessionRequest } from "./sessions.js";
-import { resolveChannelDir, resolveChannelPath, type Attachment } from "./store.js";
+import * as log from "../../engine/log.js";
+import { registerSessionRequest, resolveSessionRequest } from "../../engine/sessions.js";
+import { resolveChannelDir, resolveChannelPath, type Attachment } from "../../engine/store.js";
 import { TelegramClaimManager } from "./telegram-claim.js";
-import type { ChannelState } from "./engine.js";
+import type { ChannelState } from "../../engine/index.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
@@ -13,7 +13,7 @@ import {
 	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
-} from "./transport/types.js";
+} from "../../transport/types.js";
 
 // ============================================================================
 // Constants
@@ -108,7 +108,7 @@ export interface TelegramEvent {
 }
 
 // Shared transport types — moved to transport/types.ts; re-exported for compat
-export type { MessageContext as TelegramContext } from "./transport/types.js";
+export type { MessageContext as TelegramContext } from "../../transport/types.js";
 
 // ============================================================================
 // Prompt profile

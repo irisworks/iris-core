@@ -2,18 +2,18 @@
 
 import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
 import { join, resolve } from "path";
-import { startApiServer, type SessionInjector } from "./api.js";
-import { startBridgeServer } from "./bridge.js";
-import { downloadChannel } from "./download.js";
-import { createEngine } from "./engine.js";
-import { createEventsWatcher } from "./events.js";
-import * as log from "./log.js";
-import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
-import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from "./slack.js";
-import { TelegramBot, type IrisTelegramHandler } from "./telegram.js";
-import { ChannelStore } from "./store.js";
-import { BridgeTransport } from "./transport/bridge.js";
-import { WebTransport } from "./transport/web.js";
+import { startApiServer, type SessionInjector } from "./engine/api.js";
+import { startBridgeServer } from "./engine/bridge.js";
+import { downloadChannel } from "./transports/slack/download.js";
+import { createEngine } from "./engine/index.js";
+import { createEventsWatcher } from "./engine/events.js";
+import * as log from "./engine/log.js";
+import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./engine/sandbox.js";
+import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from "./transports/slack/slack.js";
+import { TelegramBot, type IrisTelegramHandler } from "./transports/telegram/telegram.js";
+import { ChannelStore } from "./engine/store.js";
+import { BridgeTransport } from "./transports/bridge/bridge.js";
+import { WebTransport } from "./transports/web/web.js";
 import type { ChannelTransport, TransportEvent } from "./transport/types.js";
 
 // ============================================================================

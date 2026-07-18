@@ -9,7 +9,7 @@ import { test, after } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startApiServer } from "../dist/api.js";
+import { startApiServer } from "../dist/engine/api.js";
 
 const PORT = 18337;
 const BASE = `http://127.0.0.1:${PORT}`;

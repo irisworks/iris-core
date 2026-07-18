@@ -12,7 +12,7 @@ import { getOrCreateRunner, type AgentRunner } from "./agent.js";
 import * as log from "./log.js";
 import type { SandboxConfig } from "./sandbox.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
-import type { MessageContext, TransportEvent } from "./transport/types.js";
+import type { MessageContext, TransportEvent } from "../transport/types.js";
 
 export interface ChannelState {
 	running: boolean;

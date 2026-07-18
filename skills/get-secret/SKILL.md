@@ -52,7 +52,7 @@ as unrestricted `iris`; give every agent that needs the allow-list enforced
 its own token, copying it into `agents.json` in the same change (the agent's
 API calls are 401 until it's registered).
 
-Server-side resolution order (in `iris-runtime/src/secrets.ts`):
+Server-side resolution order (in `iris-runtime/src/engine/secrets.ts`):
 
 1. Env var (name with hyphens → underscores, e.g. `APIFY-API-KEY` → `APIFY_API_KEY`)
 2. Azure Key Vault, if `IRIS_KEY_VAULT` is set and the secret wasn't in env

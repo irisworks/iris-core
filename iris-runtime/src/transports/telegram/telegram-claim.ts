@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { randomBytes } from "crypto";
 import { join } from "path";
-import * as log from "./log.js";
+import * as log from "../../engine/log.js";
 
 // ============================================================================
 // Types

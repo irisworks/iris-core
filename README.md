@@ -146,7 +146,7 @@ live in `agents/`.
 
 The runtime exposes an internal HTTP API (default `127.0.0.1:3000`) for events,
 escalations, and session management — create sessions, inject messages, read
-history, reset context. Endpoint list in [`iris-runtime/src/api.ts`](iris-runtime/src/api.ts).
+history, reset context. Endpoint list in [`iris-runtime/src/engine/api.ts`](iris-runtime/src/engine/api.ts).
 
 ## Company-Specific Extensions (Overlay)
 

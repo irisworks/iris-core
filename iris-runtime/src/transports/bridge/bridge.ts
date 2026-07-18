@@ -6,7 +6,7 @@
 // are consumed by session requests (POST /sessions/:id/message).
 // ============================================================================
 
-import type { ChannelState } from "../engine.js";
+import type { ChannelState } from "../../engine/index.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
@@ -15,7 +15,7 @@ import {
 	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
-} from "./types.js";
+} from "../../transport/types.js";
 
 export interface BridgeTransportOptions {
 	/** Prompt fragments for bridge runs (currently the Slack fragments, status quo) */
@@ -95,7 +95,7 @@ export class BridgeTransport implements ChannelTransport {
 	// ==========================================================================
 
 	async injectSessionMessage(sessionId: string, user: string, text: string): Promise<string> {
-		const { registerSessionRequest } = await import("../sessions.js");
+		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
 		const ts = (Date.now() / 1000).toFixed(6);
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
