@@ -192,6 +192,20 @@ via the internal session API (`api.ts`) — `BridgeTransport` implements it
 because sub-agent escalation depends on it; a chat-only transport that never
 backs a session can skip it.
 
+**Caveat:** the "register before Bridge" rule above is not consistently
+followed by the shipped transports today — `WebTransport` is pushed *after*
+`BridgeTransport` in `main.ts` even though Bridge's `ownsChannel` is a
+catch-all (`!channelId.startsWith("tg-")`) that also matches `WEBUI-*`
+channel IDs. In practice this hasn't bitten Web because it never goes
+through the shared `transports.find(t => t.ownsChannel(id))` lookup (its
+messages travel over its own WebSocket connection, not the events-file
+watcher or channel-addressed API routes) — but a channel-addressed API call
+or synthetic event against a `WEBUI-*` channel would resolve to Bridge's
+no-op `postMessage` instead of Web's real one. Don't copy Web's position in
+the array as precedent; follow the stated rule (register before Bridge) and
+verify with a synthetic event or a channel-addressed API call against your
+new transport's channel IDs, not just a live chat message.
+
 ## Channel-mode dispatch is opt-in, not part of the contract
 
 The six named [channel modes](channel-modes.md) (`dm`/`admin`/`thread`/
