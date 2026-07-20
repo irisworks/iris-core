@@ -9,6 +9,7 @@ its own Firecracker microVM — to get the work done.
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/irisworks/iris-core/actions/workflows/ci.yml/badge.svg)](https://github.com/irisworks/iris-core/actions/workflows/ci.yml)
 [![Runtime version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Firisworks%2Firis-core%2Fmain%2Firis-runtime%2Fpackage.json&query=%24.version&label=runtime)](iris-runtime/CHANGELOG.md)
+[![Docs](https://img.shields.io/badge/docs-irisflow.dev-blue)](https://irisflow.dev/docs)
 
 One `curl | bash` on any Linux box turns it into a self-hosted, self-healing
 AI teammate — no cloud account, no Kubernetes, no vendor lock-in required.
