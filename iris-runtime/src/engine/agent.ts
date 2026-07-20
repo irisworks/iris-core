@@ -20,6 +20,7 @@ import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
+import { getSecretProvider } from "./secrets.js";
 import {
 	getPromptProfile,
 	type ChannelInfo,
@@ -498,6 +499,11 @@ function createRunner(
 	const getApiKey = async (): Promise<string> => {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
 		if (auth.ok && auth.apiKey) return auth.apiKey;
+		// Secrets provider (store/broker in store/proxy modes; env-backed
+		// otherwise) — this is what keeps the LLM key working once it no longer
+		// lives in .env/process.env.
+		const brokered = await getSecretProvider().get(`${provider.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`);
+		if (brokered) return brokered;
 		// Fallback env var: FOUNDRY_E2_KEY, ANTHROPIC_API_KEY, etc.
 		const envFallback = process.env[`${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`];
 		if (envFallback) return envFallback;

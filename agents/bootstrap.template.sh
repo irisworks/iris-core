@@ -20,7 +20,7 @@
 # Prerequisites:
 #   - iris-runtime image built: docker build -t iris-runtime:local ./iris-runtime
 #   - /iris/.env populated (by bootstrap.sh --setup)
-#   - /iris/.secrets.env populated (by sync-secrets)
+#   - /iris/.secrets.env populated (by sync-secrets) — legacy, env mode only
 
 set -euo pipefail
 
@@ -29,7 +29,10 @@ AGENT_NAME="<your-agent>"           # e.g. "helpdesk", "ops", "support"
 CONTAINER_NAME="iris-${AGENT_NAME}"
 
 # ── Load secrets ──────────────────────────────────────────
-# Secrets live in /iris/.secrets.env (populated by sync-secrets).
+# DEPRECATED: /iris/.secrets.env only exists on env-mode installs. With
+# IRIS_SECRETS_MODE=store/proxy, secrets are fetched at use time via the
+# get-secret skill (parent API allow-list) instead of being sourced here —
+# see docs/secrets.md.
 source /iris/.secrets.env 2>/dev/null || true
 
 # ── Read provider / model from shared .env ────────────────

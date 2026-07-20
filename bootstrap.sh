@@ -53,6 +53,8 @@ FC_GUEST_IP="172.20.1.2"
 IRIS_PROVIDER="${IRIS_PROVIDER:-}"
 IRIS_MODEL="${IRIS_MODEL:-}"
 IRIS_ENV="${IRIS_ENV:-prod}"
+SECRETS_MODE="${IRIS_SECRETS_MODE:-env}"   # env | store | proxy (see docs/secrets.md)
+IRIS_BROKER_PORT="${IRIS_BROKER_PORT:-9099}"
 IRIS_BASE_DOMAIN="${IRIS_BASE_DOMAIN:-}"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-}"
@@ -110,9 +112,15 @@ for arg in "$@"; do
     --firecracker)  FIRECRACKER_MODE=true ;;
     --pool)         FIRECRACKER_SANDBOX="pool" ;;
     --static)       FIRECRACKER_SANDBOX="static" ;;
+    --secrets-mode=*) SECRETS_MODE="${arg#--secrets-mode=}" ;;
     *) die "Unknown argument: $arg" ;;
   esac
 done
+
+case "$SECRETS_MODE" in
+  env|store|proxy) ;;
+  *) die "--secrets-mode must be env, store, or proxy (got '$SECRETS_MODE')" ;;
+esac
 
 # In setup mode, if neither --keyvault nor --no-keyvault was passed,
 # ask the user which storage method they want.
@@ -997,6 +1005,20 @@ elif [[ -f "$REPO_DIR/data/models.json.template" ]]; then
   log "Warning: using models.json.template — edit $IRIS_DIR/data/models.json to configure your provider"
 fi
 
+# Secrets-mode tokens: preserved across re-runs (read back from the existing
+# .env), generated once otherwise. Env mode gets neither — default installs
+# keep today's loopback-trust behavior byte for byte.
+IRIS_API_TOKEN="${IRIS_API_TOKEN:-}"
+BROKER_TOKEN="${BROKER_TOKEN:-}"
+if [[ "$SECRETS_MODE" != "env" ]]; then
+  if [[ -f "$IRIS_DIR/.env" ]]; then
+    [[ -z "$IRIS_API_TOKEN" ]] && IRIS_API_TOKEN=$(grep -m1 '^IRIS_API_TOKEN=' "$IRIS_DIR/.env" | cut -d= -f2- || true)
+    [[ -z "$BROKER_TOKEN" ]] && BROKER_TOKEN=$(grep -m1 '^IRIS_SECRET_BROKER_TOKEN=' "$IRIS_DIR/.env" | cut -d= -f2- || true)
+  fi
+  [[ -z "$IRIS_API_TOKEN" ]] && IRIS_API_TOKEN=$(openssl rand -hex 24)
+  [[ -z "$BROKER_TOKEN" ]] && BROKER_TOKEN=$(openssl rand -hex 24)
+fi
+
 # Write /iris/.env
 log "Writing /iris/.env..."
 e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
@@ -1029,6 +1051,19 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "IRIS_BASE_DOMAIN=$(e "${IRIS_BASE_DOMAIN:-}")"
   echo "CERTBOT_EMAIL=$(e "${CERTBOT_EMAIL:-}")"
   echo "GIT_USER_EMAIL=$(e "${GIT_USER_EMAIL:-iris@example.com}")"
+  echo ""
+  echo "IRIS_SECRETS_MODE=$(e "$SECRETS_MODE")"
+  if [[ "$SECRETS_MODE" == "store" ]]; then
+    echo "IRIS_SECRET_KEY_FILE=${IRIS_DIR}/secret.key"
+    echo "IRIS_SECRET_STORE_FILE=${IRIS_DIR}/secrets.json.enc"
+  fi
+  if [[ "$SECRETS_MODE" == "proxy" ]]; then
+    echo "IRIS_SECRET_BROKER_URL=http://127.0.0.1:${IRIS_BROKER_PORT}"
+    echo "IRIS_SECRET_BROKER_TOKEN=$(e "$BROKER_TOKEN")"
+  fi
+  if [[ "$SECRETS_MODE" != "env" ]]; then
+    echo "IRIS_API_TOKEN=$(e "$IRIS_API_TOKEN")"
+  fi
 } | sudo tee "$IRIS_DIR/.env" > /dev/null
 sudo chmod 600 "$IRIS_DIR/.env"
 log "✓ /iris/.env written"
@@ -1042,6 +1077,102 @@ cd "$RUNTIME_DIR"
 npm install --prefer-offline 2>&1 | tail -3
 npm run build 2>&1 | tail -5
 cd - > /dev/null
+
+# ────────────────────────────────────────────────────────────
+# 9b. Secrets mode (store / proxy) — encrypted store, broker daemon, CLI,
+#     .env migration. Skipped entirely in env mode (the default).
+#     See docs/secrets.md.
+# ────────────────────────────────────────────────────────────
+if [[ "$SECRETS_MODE" != "env" ]]; then
+  log_h "Setting up secrets mode: $SECRETS_MODE"
+
+  # iris-secret CLI wrapper — same dotenv preload as the runtime so it reads
+  # the store/broker config from /iris/.env.
+  sudo tee /usr/local/bin/iris-secret > /dev/null << WRAPPER
+#!/usr/bin/env bash
+export DOTENV_CONFIG_PATH=${IRIS_DIR}/.env
+exec "$(which node)" --require "$REPO_DIR/iris-runtime/node_modules/dotenv/config" "$REPO_DIR/iris-runtime/dist/cli/iris-secret.js" "\$@"
+WRAPPER
+  sudo chmod 755 /usr/local/bin/iris-secret
+
+  if [[ "$SECRETS_MODE" == "store" ]]; then
+    # Key + store live with the runtime user. Same-uid agents can technically
+    # read the key — store mode stops accidental leakage, proxy mode adds the
+    # uid boundary (docs/secrets.md threat model).
+    if [[ ! -f "$IRIS_DIR/secret.key" ]]; then
+      openssl rand -hex 32 | sudo tee "$IRIS_DIR/secret.key" > /dev/null
+      sudo chown "$TARGET_USER" "$IRIS_DIR/secret.key"
+      sudo chmod 600 "$IRIS_DIR/secret.key"
+      log "✓ generated $IRIS_DIR/secret.key"
+    fi
+  else
+    # Proxy mode: dedicated system user owns the key/store; the agent and the
+    # runtime can only reach secrets through the broker's HTTP API.
+    if ! id iris-broker &>/dev/null; then
+      sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin iris-broker
+      log "✓ created system user iris-broker"
+    fi
+    sudo mkdir -p "$IRIS_DIR/broker"
+    if [[ ! -f "$IRIS_DIR/broker/secret.key" ]]; then
+      openssl rand -hex 32 | sudo tee "$IRIS_DIR/broker/secret.key" > /dev/null
+      log "✓ generated $IRIS_DIR/broker/secret.key"
+    fi
+    sudo tee "$IRIS_DIR/broker/broker.env" > /dev/null << BROKERENV
+IRIS_BROKER_PORT=${IRIS_BROKER_PORT}
+IRIS_SECRET_BROKER_TOKEN=${BROKER_TOKEN}
+IRIS_SECRET_KEY_FILE=${IRIS_DIR}/broker/secret.key
+IRIS_SECRET_STORE_FILE=${IRIS_DIR}/broker/secrets.json.enc
+IRIS_BROKER_SERVICES_FILE=${IRIS_DIR}/broker/services.json
+BROKERENV
+    sudo chown -R iris-broker:iris-broker "$IRIS_DIR/broker"
+    sudo chmod 700 "$IRIS_DIR/broker"
+    sudo chmod 600 "$IRIS_DIR/broker/secret.key" "$IRIS_DIR/broker/broker.env"
+
+    sudo tee /etc/systemd/system/iris-broker.service > /dev/null << UNIT
+[Unit]
+Description=Iris Credential Broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iris-broker
+EnvironmentFile=${IRIS_DIR}/broker/broker.env
+ExecStart=$(which node) $REPO_DIR/iris-runtime/dist/broker/main.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=${IRIS_DIR}/broker
+SyslogIdentifier=iris-broker
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload
+    sudo systemctl enable iris-broker
+    sudo systemctl restart iris-broker
+    sleep 2
+    if ! curl -sf "http://127.0.0.1:${IRIS_BROKER_PORT}/health" > /dev/null; then
+      sudo journalctl -u iris-broker -n 30 --no-pager || true
+      die "iris-broker.service failed its health check."
+    fi
+    log "✓ iris-broker running on 127.0.0.1:${IRIS_BROKER_PORT}"
+  fi
+
+  # Move known credential vars out of /iris/.env into the store (idempotent;
+  # prune rewrites .env without those lines). The runtime resolves them via
+  # the store/broker from here on.
+  sudo /usr/local/bin/iris-secret import-env "$IRIS_DIR/.env" --prune
+  sudo chmod 600 "$IRIS_DIR/.env"
+  if [[ "$SECRETS_MODE" == "store" && -f "$IRIS_DIR/secrets.json.enc" ]]; then
+    # import-env ran as root; the runtime (TARGET_USER) owns the store file.
+    sudo chown "$TARGET_USER" "$IRIS_DIR/secrets.json.enc"
+    sudo chmod 600 "$IRIS_DIR/secrets.json.enc"
+  fi
+  log "✓ secret migration complete"
+fi
 
 # ────────────────────────────────────────────────────────────
 # 10. Systemd service

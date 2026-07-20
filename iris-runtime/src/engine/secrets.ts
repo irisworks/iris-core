@@ -1,18 +1,22 @@
 /**
  * Secret resolution behind GET /secrets/:name (see api.ts).
  *
- * Two backends, selected by env var — no vendor-specific code in core:
+ * Three backends, selected by env vars — no vendor-specific code in core:
  *   - env (default): process.env lookup, falling back to Azure Key Vault when
  *     IRIS_KEY_VAULT is set. Kept for parity with the pre-broker get-secret
  *     script; this is the only place that still shells out to `az`.
- *   - broker: proxies to IRIS_SECRET_BROKER_URL. Whatever's behind that URL
- *     (Vault, Infisical, a custom shim) is the operator's choice; iris-core
- *     doesn't know or care which.
+ *   - file (IRIS_SECRETS_MODE=store): the encrypted local SecretStore, with
+ *     env as fallback so half-migrated installs keep resolving.
+ *   - broker: proxies to IRIS_SECRET_BROKER_URL. In proxy mode that URL is
+ *     the bundled iris-broker daemon; it can equally be an external broker
+ *     (Vault, Infisical, a custom shim) — iris-core doesn't know or care.
  */
 
 import { execFile } from "child_process";
 import { promisify } from "util";
 import * as log from "./log.js";
+import { SecretStore, secretsMode, type SecretMeta } from "./secret-store.js";
+import { registerSecretValue } from "./redact.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,11 +77,65 @@ export function createBrokerSecretProvider(baseUrl: string, token?: string): Sec
 	};
 }
 
+/** Encrypted local store (store mode), falling back to env for anything not yet migrated. */
+export const fileSecretProvider: SecretProvider = {
+	async get(name: string): Promise<string | undefined> {
+		const store = SecretStore.open();
+		const fromStore = store?.get(name);
+		if (fromStore !== undefined) return fromStore;
+		return envSecretProvider.get(name);
+	},
+};
+
+/**
+ * In store/proxy mode, every resolved plaintext is registered with the
+ * redaction backstop so sandbox output can mask it (redact.ts). Env mode is
+ * left untouched — its behavior must stay bit-identical to pre-mode releases.
+ */
+function withRedactionRegistry(provider: SecretProvider): SecretProvider {
+	return {
+		async get(name: string): Promise<string | undefined> {
+			const value = await provider.get(name);
+			if (value !== undefined) registerSecretValue(value);
+			return value;
+		},
+	};
+}
+
 /** Resolved once per call so tests / IRIS_SECRET_BROKER_URL changes don't need a restart. */
 export function getSecretProvider(): SecretProvider {
 	const brokerUrl = process.env.IRIS_SECRET_BROKER_URL;
 	if (brokerUrl) {
-		return createBrokerSecretProvider(brokerUrl, process.env.IRIS_SECRET_BROKER_TOKEN);
+		return withRedactionRegistry(createBrokerSecretProvider(brokerUrl, process.env.IRIS_SECRET_BROKER_TOKEN));
+	}
+	if (secretsMode() === "store") {
+		return withRedactionRegistry(fileSecretProvider);
 	}
 	return envSecretProvider;
+}
+
+/**
+ * Policy metadata for a secret (proxyOnly / agentReadable), so api.ts can
+ * refuse plaintext reads without touching the value. Store mode reads the
+ * local store; proxy mode asks the broker's /meta route; env mode has no
+ * metadata (undefined = no restrictions).
+ */
+export async function getSecretMeta(name: string): Promise<SecretMeta | undefined> {
+	const brokerUrl = process.env.IRIS_SECRET_BROKER_URL;
+	if (brokerUrl) {
+		try {
+			const token = process.env.IRIS_SECRET_BROKER_TOKEN;
+			const res = await fetch(`${brokerUrl.replace(/\/$/, "")}/meta/${encodeURIComponent(name)}`, {
+				headers: token ? { Authorization: `Bearer ${token}` } : {},
+			});
+			if (!res.ok) return undefined;
+			return (await res.json()) as SecretMeta;
+		} catch {
+			return undefined;
+		}
+	}
+	if (secretsMode() === "store") {
+		return SecretStore.open()?.meta(name);
+	}
+	return undefined;
 }

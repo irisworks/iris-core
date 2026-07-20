@@ -22,7 +22,8 @@ import { join, resolve, sep } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as log from "../../engine/log.js";
 import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
-import { readBody, secretMatches } from "../../engine/api.js";
+import { readBody, secretMatches, secretsBackendRequest } from "../../engine/api.js";
+import { consumeDrop, peekDrop, type SecretDrop } from "../../engine/secret-drops.js";
 import type { ChannelState, EngineTransport } from "../../engine/index.js";
 import { resolveChannelDir, resolveChannelPath } from "../../engine/store.js";
 import {
@@ -374,6 +375,22 @@ export class WebTransport implements ChannelTransport {
 			return;
 		}
 
+		// Secret drops sit before the session-cookie gate on purpose: the
+		// one-time capability token in the URL *is* the auth — the submitting
+		// user may only have Slack/Telegram, not the web UI password. Invalid,
+		// expired, and consumed tokens all render the same 404 (no oracle).
+		const dropMatch = /^\/secret-drop\/([a-f0-9]{48})$/.exec(url.pathname);
+		if (dropMatch) {
+			if (req.method === "GET") {
+				this.handleSecretDropForm(res, dropMatch[1]);
+				return;
+			}
+			if (req.method === "POST") {
+				void this.handleSecretDropSubmit(req, res, dropMatch[1]);
+				return;
+			}
+		}
+
 		if (url.pathname === "/" || url.pathname === "/index.html") {
 			res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
 			res.end(renderPage());
@@ -464,6 +481,74 @@ export class WebTransport implements ChannelTransport {
 		});
 	}
 
+	private handleSecretDropForm(res: ServerResponse, token: string): void {
+		const drop = peekDrop(token);
+		if (!drop) {
+			log.logWarning("[web] secret-drop form requested with unknown/expired token");
+			res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+			res.end(renderSecretDropGone());
+			return;
+		}
+		res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+		res.end(renderSecretDropForm(drop));
+	}
+
+	private async handleSecretDropSubmit(req: IncomingMessage, res: ServerResponse, token: string): Promise<void> {
+		let body: { value?: string; proxyOnly?: boolean };
+		try {
+			body = JSON.parse(await readBody(req)) as typeof body;
+		} catch {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "invalid JSON" }));
+			return;
+		}
+		// Validate before consuming so a malformed submit doesn't burn the link;
+		// consumeDrop itself is the atomic single-use claim.
+		if (typeof body.value !== "string" || body.value.length === 0 || body.value.length > 64 * 1024) {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "missing or oversized value" }));
+			return;
+		}
+		const drop = consumeDrop(token);
+		if (!drop) {
+			log.logWarning("[web] secret-drop submit with unknown/expired/used token");
+			res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+			res.end(renderSecretDropGone());
+			return;
+		}
+		const result = await secretsBackendRequest("PUT", drop.name, {
+			value: body.value,
+			proxyOnly: body.proxyOnly ?? drop.proxyOnlyDefault,
+			source: "drop",
+		});
+		if (result.status !== 200) {
+			log.logWarning(`[web] secret-drop store failed for '${drop.name}' (status ${result.status})`);
+			res.writeHead(502, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: "storing the secret failed — ask Iris for a new link" }));
+			return;
+		}
+		log.logInfo(`[web] secret '${drop.name}' submitted via drop link`);
+		// Name-only notification back into the conversation that requested the
+		// drop — the root events watcher (main.ts) routes it to the owning
+		// transport. The value itself never appears in any event or log.
+		if (drop.channelId) {
+			const eventsDir = join(this.workingDir, "events");
+			mkdirSync(eventsDir, { recursive: true });
+			const eventId = `drop-${Date.now()}-${randomBytes(4).toString("hex")}`;
+			writeFileSync(
+				join(eventsDir, `${eventId}.json`),
+				JSON.stringify({
+					type: "immediate",
+					channelId: drop.channelId,
+					user: "secret-drop",
+					text: `Secret '${drop.name}' was submitted via its drop link and stored.`,
+				}),
+			);
+		}
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ ok: true }));
+	}
+
 	private async handleLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		let body: { password?: string };
 		try {
@@ -486,6 +571,78 @@ export class WebTransport implements ChannelTransport {
 		});
 		res.end(JSON.stringify({ ok: true }));
 	}
+}
+
+// Minimal standalone pages for the secret-drop flow. `drop.name` is safe to
+// interpolate: names are validated against SECRET_NAME_RE at drop creation.
+const SECRET_DROP_STYLE = `
+	body { font-family: system-ui, sans-serif; background: #111; color: #eee; display: flex; justify-content: center; padding-top: 12vh; }
+	.card { background: #1c1c1e; border-radius: 12px; padding: 32px; max-width: 420px; width: 90%; }
+	h1 { font-size: 18px; margin: 0 0 8px; }
+	p { color: #aaa; font-size: 14px; line-height: 1.5; }
+	code { color: #7dc4ff; }
+	input[type=password] { width: 100%; box-sizing: border-box; padding: 10px; margin: 12px 0; border-radius: 8px; border: 1px solid #333; background: #111; color: #eee; font-size: 14px; }
+	label { font-size: 13px; color: #aaa; display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+	button { width: 100%; padding: 10px; border: 0; border-radius: 8px; background: #3b82f6; color: white; font-size: 14px; cursor: pointer; }
+	button:disabled { opacity: 0.5; }
+	.ok { color: #4ade80; }`;
+
+function renderSecretDropForm(drop: SecretDrop): string {
+	return `<!doctype html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Share a secret with Iris</title>
+<style>${SECRET_DROP_STYLE}</style>
+</head><body>
+<div class="card">
+	<h1>Share a secret with Iris</h1>
+	<p>Paste the value for <code>${drop.name}</code>. It goes straight into Iris's encrypted secret store — it never appears in the chat, logs, or the model's context. This link works once and then expires.</p>
+	<form id="f" autocomplete="off">
+		<input type="password" id="value" placeholder="Secret value" autocomplete="new-password" autofocus>
+		${drop.proxyOnlyDefault ? `<label><input type="checkbox" id="proxyOnly" checked> Proxy-only (Iris can use it via the gateway, but never read the raw value)</label>` : ""}
+		<button type="submit" id="submit">Store secret</button>
+	</form>
+	<p id="done" class="ok" style="display:none">Stored. You can close this page — Iris has been notified.</p>
+</div>
+<script>
+document.getElementById("f").addEventListener("submit", function (e) {
+	e.preventDefault();
+	var value = document.getElementById("value").value;
+	if (!value) return;
+	var proxyEl = document.getElementById("proxyOnly");
+	document.getElementById("submit").disabled = true;
+	fetch(location.pathname, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ value: value, proxyOnly: proxyEl ? proxyEl.checked : false }),
+	}).then(function (res) {
+		if (res.ok) {
+			document.getElementById("f").style.display = "none";
+			document.getElementById("done").style.display = "block";
+		} else {
+			document.getElementById("submit").disabled = false;
+			res.json().then(function (b) { alert(b.error || "Failed — ask Iris for a new link"); }, function () { alert("Failed — ask Iris for a new link"); });
+		}
+	});
+});
+</script>
+</body></html>`;
+}
+
+function renderSecretDropGone(): string {
+	return `<!doctype html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Link not available</title>
+<style>${SECRET_DROP_STYLE}</style>
+</head><body>
+<div class="card">
+	<h1>This link isn't available</h1>
+	<p>The link is invalid, expired, or was already used. Ask Iris for a fresh one.</p>
+</div>
+</body></html>`;
 }
 
 // Reference v1 page (IRIS-113): login, thread sidebar (localStorage-backed,

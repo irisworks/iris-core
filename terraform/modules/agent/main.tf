@@ -72,6 +72,13 @@ resource "null_resource" "agent_dirs" {
 resource "null_resource" "agent" {
   depends_on = [null_resource.build_image, null_resource.agent_dirs]
 
+  lifecycle {
+    precondition {
+      condition     = var.secrets_mode == "env" || var.unique_api_token
+      error_message = "secrets_mode store/proxy requires unique_api_token = true — the per-agent token is how the parent API enforces the agent's secrets allow-list (agents.json)."
+    }
+  }
+
   triggers = {
     agent_name = var.agent_name
     image_tag  = local.image_tag
@@ -87,8 +94,11 @@ resource "null_resource" "agent" {
         --restart unless-stopped \
         --network iris-internal \
         --add-host=iris-host:host-gateway \
-        --env-file ${var.iris_dir}/.env \
-        ${fileexists("${var.iris_dir}/.secrets.env") ? "--env-file ${var.iris_dir}/.secrets.env" : ""} \
+        ${var.secrets_mode == "env" ? "--env-file ${var.iris_dir}/.env" : ""} \
+        ${var.secrets_mode == "env" && fileexists("${var.iris_dir}/.secrets.env") ? "--env-file ${var.iris_dir}/.secrets.env" : ""} \
+        ${var.secrets_mode != "env" ? "-e IRIS_SECRET_BROKER_URL=${var.iris_api_url} -e IRIS_SECRET_BROKER_TOKEN=${var.unique_api_token ? random_password.api_token[0].result : ""}" : ""} \
+        ${var.iris_provider != "" ? "-e IRIS_PROVIDER=${var.iris_provider}" : ""} \
+        ${var.iris_model != "" ? "-e IRIS_MODEL=${var.iris_model}" : ""} \
         -e IRIS_ENV=prod \
         -e AGENT_NAME=${var.agent_name} \
         -e IRIS_KEY_VAULT=${var.key_vault_name} \

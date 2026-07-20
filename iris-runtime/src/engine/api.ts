@@ -14,11 +14,21 @@
  *                                          body: { channelId, text, user? }
  *   POST /escalate                       — sub-agent escalates a problem to Iris
  *                                          body: { agent, issue, context?, severity?, environment? }
- *   GET  /secrets/:name                  — resolve a secret (env or IRIS_SECRET_BROKER_URL backend)
+ *   GET  /secrets/:name                  — resolve a secret (env, store, or broker backend per
+ *                                          IRIS_SECRETS_MODE / IRIS_SECRET_BROKER_URL)
  *                                          caller is derived from which token authenticated the
  *                                          request (the shared IRIS_API_TOKEN = "iris", unrestricted;
  *                                          an agents.json[name].token match = that agent's identity)
- *                                          sub-agents must be allow-listed in agents.json[caller].secrets
+ *                                          sub-agents must be allow-listed in agents.json[caller].secrets;
+ *                                          proxy-only / runtime-only secrets 403 for every caller
+ *   GET  /secret/:name                   — alias of the above; the URL shape a child runtime's
+ *                                          IRIS_SECRET_BROKER_URL provider fetches
+ *   PUT  /secrets/:name                  — store/update a secret (iris only)
+ *                                          body: { value, proxyOnly?, agentReadable? }
+ *   DELETE /secrets/:name                — delete a secret (iris only)
+ *   GET  /secrets                        — list names + metadata, never values (iris only)
+ *   POST /secret-drops                   — mint a one-time out-of-band submission link (iris only)
+ *                                          body: { name, channelId?, ttlSeconds?, proxyOnly? }
  *
  *   POST   /sessions                     — create session
  *   GET    /sessions                     — list all sessions
@@ -43,7 +53,10 @@ import {
 	type Session,
 } from "./sessions.js";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
-import { getSecretProvider } from "./secrets.js";
+import { getSecretMeta, getSecretProvider } from "./secrets.js";
+import { SECRET_NAME_RE, SecretStore, secretsMode, type SecretSource } from "./secret-store.js";
+import { createDrop } from "./secret-drops.js";
+import { loadServices } from "../broker/services.js";
 
 // Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
 export interface SessionInjector {
@@ -122,6 +135,72 @@ export function secretMatches(presented: string, expected: string): boolean {
 	return timingSafeEqual(a, b) && presentedBuf.length === expectedBuf.length;
 }
 
+/**
+ * Writable secrets backend for the iris-only management routes: the bundled
+ * broker daemon / external broker when IRIS_SECRET_BROKER_URL is set, the
+ * local encrypted store in store mode, nothing in env mode. Reads stay on
+ * getSecretProvider(); this is the write/list side only.
+ */
+interface SecretsBackendResult {
+	status: number;
+	body: unknown;
+}
+
+export async function secretsBackendRequest(
+	method: "PUT" | "DELETE" | "LIST",
+	name?: string,
+	payload?: { value: string; proxyOnly?: boolean; agentReadable?: boolean; source?: SecretSource },
+): Promise<SecretsBackendResult> {
+	const brokerUrl = process.env.IRIS_SECRET_BROKER_URL;
+	if (brokerUrl) {
+		const base = brokerUrl.replace(/\/$/, "");
+		const token = process.env.IRIS_SECRET_BROKER_TOKEN;
+		const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+		try {
+			if (method === "LIST") {
+				const res = await fetch(`${base}/secrets`, { headers: auth });
+				return { status: res.status, body: await res.json() };
+			}
+			const res = await fetch(`${base}/secret/${encodeURIComponent(name ?? "")}`, {
+				method,
+				headers: { ...auth, "Content-Type": "application/json" },
+				body: method === "PUT" ? JSON.stringify(payload) : undefined,
+			});
+			return { status: res.status, body: await res.json() };
+		} catch (err) {
+			log.logWarning("[api] secrets broker unreachable", err instanceof Error ? err.message : String(err));
+			return { status: 502, body: { error: "secrets broker unreachable" } };
+		}
+	}
+	if (secretsMode() === "store") {
+		const store = SecretStore.open();
+		if (!store) return { status: 503, body: { error: "secret store not configured (key file missing)" } };
+		if (method === "LIST") return { status: 200, body: { secrets: store.list() } };
+		if (method === "PUT") {
+			store.set(name ?? "", payload?.value ?? "", {
+				source: payload?.source ?? "api",
+				proxyOnly: payload?.proxyOnly,
+				agentReadable: payload?.agentReadable,
+			});
+			return { status: 200, body: { ok: true, name } };
+		}
+		if (!store.delete(name ?? "")) return { status: 404, body: { error: "secret not found" } };
+		return { status: 200, body: { ok: true } };
+	}
+	return {
+		status: 503,
+		body: { error: "no writable secrets backend — set IRIS_SECRETS_MODE=store or IRIS_SECRET_BROKER_URL" },
+	};
+}
+
+/** True when a gateway service is configured to inject this secret — the drop form defaults to proxy-only for those. */
+function isGatewaySecret(name: string): boolean {
+	const underscored = name.replace(/-/g, "_");
+	return Object.values(loadServices()).some(
+		(service) => service.secret === name || service.secret.replace(/-/g, "_") === underscored,
+	);
+}
+
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
 	const eventId = `api-${Date.now()}-${randomBytes(4).toString("hex")}`;
 	const eventFile = join(eventsDir, `${eventId}.json`);
@@ -185,25 +264,141 @@ export function startApiServer(
 				return;
 			}
 
-			// ── GET /secrets/:name ────────────────────────────────────────────────────
-			// caller comes from the authenticated token (see resolveCaller above);
-			// "iris" is unrestricted, any other caller must be allow-listed in agents.json.
-			if (method === "GET" && urlParts[0] === "secrets" && urlParts.length === 2 && urlParts[1]) {
-				const secretName = urlParts[1];
+			// ── GET /secrets — list names + metadata, never values (iris only) ───
+			if (method === "GET" && url.split("?")[0] === "/secrets") {
 				if (caller !== "iris") {
-					const allowed = agentRegistry[caller]?.secrets ?? [];
-					if (!allowed.includes(secretName)) {
-						log.logWarning(`[api] GET /secrets/${secretName} denied for caller '${caller}'`);
-						json(res, 403, { error: `caller '${caller}' is not allow-listed for secret '${secretName}'` });
-						return;
-					}
-				}
-				const value = await getSecretProvider().get(secretName);
-				if (value === undefined) {
-					json(res, 404, { error: "secret not found" });
+					json(res, 403, { error: "listing secrets requires the iris token" });
 					return;
 				}
-				json(res, 200, { value });
+				const result = await secretsBackendRequest("LIST");
+				json(res, result.status, result.body);
+				return;
+			}
+
+			// ── /secrets/:name (alias /secret/:name) ─────────────────────────────
+			// caller comes from the authenticated token (see resolveCaller above);
+			// "iris" is unrestricted for reads, any other caller must be
+			// allow-listed in agents.json. The singular /secret/:name alias is the
+			// URL shape createBrokerSecretProvider fetches — it lets a sub-agent
+			// runtime point IRIS_SECRET_BROKER_URL at this API and resolve
+			// through its per-agent allow-list.
+			if ((urlParts[0] === "secrets" || urlParts[0] === "secret") && urlParts.length === 2 && urlParts[1]) {
+				const secretName = urlParts[1];
+
+				if (method === "GET") {
+					if (caller !== "iris") {
+						const allowed = agentRegistry[caller]?.secrets ?? [];
+						if (!allowed.includes(secretName)) {
+							log.logWarning(`[api] GET /secrets/${secretName} denied for caller '${caller}'`);
+							json(res, 403, { error: `caller '${caller}' is not allow-listed for secret '${secretName}'` });
+							return;
+						}
+					}
+					// Policy gate: proxy-only secrets are only usable through the
+					// broker's injection gateway; runtime-only secrets
+					// (agentReadable=false) are resolvable internally but never
+					// served over this API — for any caller, including "iris".
+					const meta = await getSecretMeta(secretName);
+					if (meta && (meta.proxyOnly || meta.agentReadable === false)) {
+						log.logWarning(`[api] GET /secrets/${secretName} refused: ${meta.proxyOnly ? "proxy-only" : "runtime-only"} secret`);
+						json(res, 403, {
+							error: meta.proxyOnly
+								? `secret '${secretName}' is proxy-only — call it through the broker gateway`
+								: `secret '${secretName}' is runtime-only`,
+						});
+						return;
+					}
+					const value = await getSecretProvider().get(secretName);
+					if (value === undefined) {
+						json(res, 404, { error: "secret not found" });
+						return;
+					}
+					json(res, 200, { value });
+					return;
+				}
+
+				if (method === "PUT" || method === "DELETE") {
+					if (caller !== "iris") {
+						log.logWarning(`[api] ${method} /secrets/${secretName} denied for caller '${caller}'`);
+						json(res, 403, { error: "writing secrets requires the iris token" });
+						return;
+					}
+					if (!SECRET_NAME_RE.test(secretName)) {
+						json(res, 400, { error: "invalid secret name" });
+						return;
+					}
+					if (method === "DELETE") {
+						const result = await secretsBackendRequest("DELETE", secretName);
+						json(res, result.status, result.body);
+						return;
+					}
+					let body: { value?: string; proxyOnly?: boolean; agentReadable?: boolean };
+					try {
+						body = JSON.parse(await readBody(req)) as typeof body;
+					} catch {
+						json(res, 400, { error: "invalid JSON body" });
+						return;
+					}
+					if (typeof body.value !== "string" || body.value.length === 0) {
+						json(res, 400, { error: "missing value" });
+						return;
+					}
+					const result = await secretsBackendRequest("PUT", secretName, {
+						value: body.value,
+						proxyOnly: body.proxyOnly,
+						agentReadable: body.agentReadable,
+						source: "api",
+					});
+					json(res, result.status, result.body);
+					return;
+				}
+			}
+
+			// ── POST /secret-drops — mint a one-time submission link (iris only) ──
+			// body: { name, channelId?, ttlSeconds?, proxyOnly? }
+			if (method === "POST" && url === "/secret-drops") {
+				if (caller !== "iris") {
+					json(res, 403, { error: "creating secret drops requires the iris token" });
+					return;
+				}
+				let body: { name?: string; channelId?: string; ttlSeconds?: number; proxyOnly?: boolean };
+				try {
+					body = JSON.parse(await readBody(req)) as typeof body;
+				} catch {
+					json(res, 400, { error: "invalid JSON body" });
+					return;
+				}
+				if (!body.name || !SECRET_NAME_RE.test(body.name)) {
+					json(res, 400, { error: "missing or invalid secret name" });
+					return;
+				}
+				if (!process.env.IRIS_SECRET_BROKER_URL && secretsMode() !== "store") {
+					json(res, 503, {
+						error: "secret drops need a writable secrets backend — enable IRIS_SECRETS_MODE=store or proxy",
+					});
+					return;
+				}
+				const webuiPort = parseInt(process.env.IRIS_WEBUI_PORT ?? "0", 10);
+				if (!(webuiPort > 0)) {
+					json(res, 503, {
+						error: "secret drops are served by the web transport — set IRIS_WEBUI_PORT (and expose it via serve-public for remote users)",
+					});
+					return;
+				}
+				const drop = createDrop({
+					name: body.name,
+					channelId: body.channelId,
+					ttlMs: body.ttlSeconds !== undefined ? body.ttlSeconds * 1000 : undefined,
+					proxyOnlyDefault: body.proxyOnly ?? isGatewaySecret(body.name),
+				});
+				const path = `/secret-drop/${drop.token}`;
+				const baseDomain = process.env.IRIS_BASE_DOMAIN;
+				json(res, 200, {
+					token: drop.token,
+					path,
+					url: baseDomain ? `https://${baseDomain}${path}` : undefined,
+					expiresAt: new Date(drop.expiresAt).toISOString(),
+				});
 				return;
 			}
 
