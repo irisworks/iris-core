@@ -29,8 +29,8 @@ Feature suggestions are welcome! Please create an issue describing:
 
 1. **Fork the repository** and create a branch from `main`
 2. **Make your changes** following our coding standards
-3. **Test thoroughly** - ensure bootstrap works, skills function correctly
-4. **Update documentation** - README, CLAUDE.md, or skill docs as needed
+3. **Test thoroughly** - run `npm test` in `iris-runtime/`; for bootstrap/skill changes, verify on a clean VM
+4. **Update the changelog and docs** - behavior-changing PRs must update `iris-runtime/CHANGELOG.md` (under `[Unreleased]`) and the relevant `docs/` page or README **in the same PR**. The docs-guard CI workflow fails PRs that don't; maintainers can apply the `changelog-not-needed` / `docs-not-needed` labels when a change is genuinely invisible to operators.
 5. **Write clear commit messages** - explain what and why
 6. **Submit a PR** with:
    - Description of changes
@@ -43,16 +43,19 @@ Feature suggestions are welcome! Please create an issue describing:
 ```bash
 # Clone your fork
 git clone https://github.com/your-username/iris-core.git
-cd iris-core
+cd iris-core/iris-runtime
 
-# Configure environment
-cp .env.example .env
-# Edit .env with your test values
+npm install
+npm test          # dispatch/secrets/transport regression suite (also run in CI)
+npm run build     # type-check + compile
 
-# Test bootstrap on a VM (recommended)
-# Or run locally for development
-./bootstrap.sh
+# Iterate locally with a Docker bash sandbox (tsx watch mode):
+./dev.sh
 ```
+
+For end-to-end testing of `bootstrap.sh` or install-path changes, use a clean
+Ubuntu 22.04 VM: `bash bootstrap.sh --setup --no-keyvault` (see
+[docs/SETUP.md](docs/SETUP.md) for all install paths).
 
 ### Coding Standards
 
@@ -78,28 +81,30 @@ cp .env.example .env
 ### Testing
 
 Before submitting a PR:
-- [ ] Bootstrap script works on clean Ubuntu VM
+- [ ] `npm test` passes in `iris-runtime/` (CI runs it on every PR)
+- [ ] Bootstrap script works on a clean Ubuntu VM (for bootstrap/install changes)
 - [ ] Skills load without errors
 - [ ] No hardcoded secrets or company-specific references
-- [ ] Documentation is updated
+- [ ] `iris-runtime/CHANGELOG.md` and the relevant docs page are updated (docs-guard CI enforces this for behavior changes)
 - [ ] Commit messages are clear
 
 ### Generalization Guidelines
 
 Iris Core must remain provider-agnostic and company-neutral:
-- **No hardcoded infrastructure:** Use environment variables
+- **No hardcoded infrastructure:** Use environment variables; cloud (Azure/Terraform) is an opt-in profile, never a requirement of the default path
 - **No company names:** Replace with `example.com` or `<your-company>`
-- **No secrets:** Store in Key Vault, reference via env vars
-- **Support multiple providers:** Azure, AWS, GCP, Anthropic, OpenAI
+- **No secrets:** Resolve via env vars / the `get-secret` skill (`GET /secrets/:name`); Azure Key Vault and external brokers are opt-in backends
+- **Support multiple providers:** Anthropic, OpenAI, Azure AI Foundry, AWS Bedrock, plus custom OpenAI-compatible endpoints via `data/models.json`
 
 ### Skill Development
 
 When adding new skills:
 1. Create `skills/your-skill/` directory
-2. Add `SKILL.md` with full documentation
-3. Test skill loads and executes correctly
+2. Add `SKILL.md` with full documentation (YAML frontmatter: `name`, `description`)
+3. Test skill loads and executes correctly (skills hot-reload — no restart needed)
 4. Ensure skill works across providers (if applicable)
-5. Document required secrets in Key Vault
+5. Document required secrets by name; resolve them via the `get-secret` skill, not direct env/Key Vault reads
+6. Core ships **platform skills only** (operate/extend/heal). Domain and business skills belong in an install's overlay, not in this repo
 
 ### Sub-Agent Development
 
