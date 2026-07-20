@@ -10,6 +10,8 @@ import { createEventsWatcher } from "./engine/events.js";
 import * as log from "./engine/log.js";
 import { shutdownMcp } from "./engine/mcp/index.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./engine/sandbox.js";
+import { getSecretMeta, getSecretProvider } from "./engine/secrets.js";
+import { scrubProcessEnv } from "./engine/secret-store.js";
 import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from "./transports/slack/slack.js";
 import { TelegramBot, type IrisTelegramHandler } from "./transports/telegram/telegram.js";
 import { ChannelStore } from "./engine/store.js";
@@ -21,9 +23,12 @@ import type { ChannelTransport, TransportEvent } from "./transport/types.js";
 // Config
 // ============================================================================
 
-const IRIS_SLACK_APP_TOKEN = process.env.IRIS_SLACK_APP_TOKEN ?? process.env.IRIS_SLACK_APP_TOKEN;
-const IRIS_SLACK_BOT_TOKEN = process.env.IRIS_SLACK_BOT_TOKEN ?? process.env.IRIS_SLACK_BOT_TOKEN;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// Transport tokens resolve through the secrets provider so store/proxy-mode
+// installs (where they no longer live in .env) keep working; the provider's
+// env fallback makes this identical to a plain process.env read in env mode.
+const IRIS_SLACK_APP_TOKEN = await getSecretProvider().get("IRIS-SLACK-APP-TOKEN");
+const IRIS_SLACK_BOT_TOKEN = await getSecretProvider().get("IRIS-SLACK-BOT-TOKEN");
+const TELEGRAM_BOT_TOKEN = await getSecretProvider().get("TELEGRAM-BOT-TOKEN");
 
 interface ParsedArgs {
 	workingDir?: string;
@@ -267,6 +272,20 @@ const webTransport = webuiPort > 0
 	})
 	: null;
 if (webTransport) transports.push(webTransport);
+
+// Startup consumers (transports, web UI password) have taken their copies —
+// drop credential vars from process.env so shells spawned by HostExecutor
+// inherit nothing sensitive. No-op in env mode; a var is only scrubbed when
+// the store/broker can still resolve it or a transport already consumed it.
+await scrubProcessEnv({
+	// getSecretMeta consults only the store/broker — never the env fallback —
+	// so unmigrated vars are retained rather than scrubbed into oblivion.
+	resolvable: async (name) => (await getSecretMeta(name)) !== undefined,
+	consumed: [
+		...(slackBot ? ["IRIS_SLACK_APP_TOKEN", "IRIS_SLACK_BOT_TOKEN"] : []),
+		...(tgBot ? ["TELEGRAM_BOT_TOKEN"] : []),
+	],
+});
 
 // ============================================================================
 // Wiring — API server, bridge server, transport startup, events watchers

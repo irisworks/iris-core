@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import { redactKnownSecrets } from "./redact.js";
+import { secretsMode } from "./secret-store.js";
 
 export type SandboxConfig =
 	| { type: "host" }
@@ -107,17 +109,23 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
  * VmManager can track which VM belongs to which session.
  */
 export function createExecutor(config: SandboxConfig, sessionId?: string): Executor {
-	if (config.type === "host") {
-		return new HostExecutor();
-	}
-	if (config.type === "firecracker") {
-		return new FirecrackerExecutor(config.agentIp);
-	}
-	if (config.type === "firecracker-pool") {
-		if (!sessionId) throw new Error("firecracker-pool sandbox requires a sessionId");
-		return new FirecrackerPoolExecutor(sessionId);
-	}
-	return new DockerExecutor(config.container);
+	const executor = (() => {
+		if (config.type === "host") {
+			return new HostExecutor();
+		}
+		if (config.type === "firecracker") {
+			return new FirecrackerExecutor(config.agentIp);
+		}
+		if (config.type === "firecracker-pool") {
+			if (!sessionId) throw new Error("firecracker-pool sandbox requires a sessionId");
+			return new FirecrackerPoolExecutor(sessionId);
+		}
+		return new DockerExecutor(config.container);
+	})();
+	// Store/proxy secrets modes mask any provider-resolved plaintext in command
+	// output before it reaches LLM context (docs/secrets.md, Tier 3). Env mode
+	// stays byte-identical to pre-mode behavior.
+	return secretsMode() === "env" ? executor : new RedactingExecutor(executor);
 }
 
 /**
@@ -125,8 +133,9 @@ export function createExecutor(config: SandboxConfig, sessionId?: string): Execu
  * Call this when a session ends.
  */
 export async function releaseExecutor(executor: Executor): Promise<void> {
-	if (executor instanceof FirecrackerPoolExecutor) {
-		await executor.release();
+	const target = executor instanceof RedactingExecutor ? executor.inner : executor;
+	if (target instanceof FirecrackerPoolExecutor) {
+		await target.release();
 	}
 }
 
@@ -227,6 +236,29 @@ class HostExecutor implements Executor {
 
 	getWorkspacePath(hostPath: string): string {
 		return hostPath;
+	}
+}
+
+/**
+ * Masks provider-resolved secret values in command output (and in the
+ * stdout/stderr embedded in rejection messages) before either reaches the
+ * agent loop. Wraps every executor type in store/proxy secrets modes.
+ */
+class RedactingExecutor implements Executor {
+	constructor(readonly inner: Executor) {}
+
+	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+		try {
+			const result = await this.inner.exec(command, options);
+			return { ...result, stdout: redactKnownSecrets(result.stdout), stderr: redactKnownSecrets(result.stderr) };
+		} catch (err) {
+			if (err instanceof Error) err.message = redactKnownSecrets(err.message);
+			throw err;
+		}
+	}
+
+	getWorkspacePath(hostPath: string): string {
+		return this.inner.getWorkspacePath(hostPath);
 	}
 }
 
