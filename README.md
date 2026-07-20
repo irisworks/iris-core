@@ -22,6 +22,7 @@ AI teammate — no cloud account, no Kubernetes, no vendor lock-in required.
 - **Resilient** — LLM retry with backoff, automatic context compaction, self-healing escalation
 - **Durable by design** — GitHub is the source of truth; the machine itself is cattle, not a pet
 - **Zero cloud dependencies to start** — secrets in `/iris/.env`, sub-agents in Docker; Azure Key Vault and Terraform are opt-in hardening, not requirements
+- **Opt-in credential broker** — encrypted local secret storage or a separate-uid injection proxy (`IRIS_SECRETS_MODE=store|proxy`), plus one-time drop links so users never have to paste a secret into chat (see `docs/secrets.md`)
 
 ## Quickstart
 
@@ -112,7 +113,8 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
 | `IRIS_WEBUI_PORT` / `IRIS_WEBUI_PASSWORD` | — (off) / — | Enable the built-in web UI on this port; shared-secret login (set it before exposing beyond loopback) |
-| `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | External secret broker for `GET /secrets/:name` (Vault, Infisical, or any HTTP service speaking the contract); default backend is env vars, then Key Vault if `IRIS_KEY_VAULT` is set |
+| `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in encrypted store / injection-proxy credential broker (see `docs/secrets.md`) |
+| `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | External secret broker for `GET /secrets/:name` (the bundled iris-broker in `proxy` mode, Vault, Infisical, or any HTTP service speaking the contract); default backend is env vars, then Key Vault if `IRIS_KEY_VAULT` is set |
 | `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | Identity injected into the constitution |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |

@@ -15,6 +15,19 @@ get-secret <SECRET_NAME>
 
 Returns the secret value on stdout. Never logs it.
 
+## Hygiene
+
+- Capture with command substitution — `KEY=$(get-secret NAME)` — and pass the
+  variable on; **never echo a secret value into chat, logs, or files.**
+- A 403 can also mean the secret is **proxy-only** or **runtime-only**
+  (store/proxy secrets modes, see `docs/secrets.md`). Proxy-only secrets are
+  used through the broker's injection gateway instead — e.g.
+  `curl http://127.0.0.1:9099/proxy/<service>/...` with the
+  `Authorization: Bearer $IRIS_SECRET_BROKER_TOKEN` header — which needs no
+  plaintext at all. Prefer the gateway whenever the service is mapped.
+- To store or request a secret, use the `set-secret` skill — never ask a user
+  to paste a secret into chat.
+
 ## How it works
 
 This is a thin client for Iris's internal `GET /secrets/:name` route — it doesn't
@@ -56,9 +69,11 @@ Server-side resolution order (in `iris-runtime/src/engine/secrets.ts`):
 
 1. Env var (name with hyphens → underscores, e.g. `APIFY-API-KEY` → `APIFY_API_KEY`)
 2. Azure Key Vault, if `IRIS_KEY_VAULT` is set and the secret wasn't in env
-3. If `IRIS_SECRET_BROKER_URL` is configured, that's used instead of 1–2 — whatever
-   sits behind it (Vault, Infisical, a custom shim) is the operator's choice; this
-   skill and the API route have no vendor-specific code.
+3. With `IRIS_SECRETS_MODE=store`, the encrypted local store is checked before 1–2
+4. If `IRIS_SECRET_BROKER_URL` is configured, that's used instead of 1–3 — in
+   proxy mode it's the bundled iris-broker daemon; it can equally be an external
+   broker (Vault, Infisical, a custom shim) — this skill and the API route have
+   no vendor-specific code.
 
 ## `sync-secrets` (optional, legacy)
 

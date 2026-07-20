@@ -48,6 +48,18 @@ Omitted or empty `secrets` = no access. Iris herself (not a sub-agent) is
 unrestricted. See [get-secret](skills.md) and [Configuration](configuration.md) for
 the resolution backends.
 
+With the host's `IRIS_SECRETS_MODE` set to `store` or `proxy`,
+`terraform/modules/agent`'s `secrets_mode` variable (default `"env"`, matching
+today's behavior) stops passing the whole `--env-file /iris/.env` to the
+container — the agent gets only its identity and an `IRIS_SECRET_BROKER_URL`
+pointing at the parent's API, and resolves everything through the `secrets`
+allow-list above. That means the allow-list must now include **every**
+secret the agent needs, including its own LLM key (e.g. `"ANTHROPIC-API-KEY"`)
+— nothing arrives implicitly anymore. This mode requires
+`unique_api_token = true` (enforced by a Terraform precondition), since the
+per-agent token is what the parent uses to scope the allow-list. See
+[Secrets](secrets.md).
+
 **Caller identity comes from which token authenticated the request, not from a
 self-reported header.** Set `unique_api_token = true` on an agent's
 `terraform/modules/agent` module block and its container gets its own
@@ -81,7 +93,9 @@ The runtime exposes an internal API (default `127.0.0.1:3000`, always on — see
 | `GET /channels` | Active channel states |
 | `POST /event` | Inject an immediate event into Iris's queue |
 | `POST /escalate` | Sub-agent escalation |
-| `GET /secrets/:name` | Resolve a secret (caller derived from the authenticating token; sub-agents must be allow-listed) |
+| `GET /secrets/:name` (alias `GET /secret/:name`) | Resolve a secret (caller derived from the authenticating token; sub-agents must be allow-listed; 403 for proxy-only/runtime-only secrets — see [Secrets](secrets.md)) |
+| `PUT`/`DELETE /secrets/:name` · `GET /secrets` | Write/delete/list secrets (iris only) |
+| `POST /secret-drops` | Mint a one-time out-of-band submission link (iris only) |
 | `POST /sessions` · `GET /sessions` · `GET/PATCH /sessions/:id` | Session CRUD |
 | `POST /sessions/open` | Post to a channel + create a session in one call |
 | `POST /sessions/:id/message` | Inject a message, wait for Iris's response |

@@ -65,3 +65,26 @@ variable "unique_api_token" {
   type        = bool
   default     = false
 }
+
+variable "iris_provider" {
+  description = "LLM provider for the agent runtime (IRIS_PROVIDER). Only needed with secrets_mode store/proxy, where the container no longer inherits it from /iris/.env."
+  type        = string
+  default     = ""
+}
+
+variable "iris_model" {
+  description = "Model id for the agent runtime (IRIS_MODEL). Only needed with secrets_mode store/proxy, where the container no longer inherits it from /iris/.env."
+  type        = string
+  default     = ""
+}
+
+variable "secrets_mode" {
+  description = "Host secrets mode (IRIS_SECRETS_MODE). With \"env\" (default) the container inherits the whole /iris/.env via --env-file, matching pre-mode behavior. With \"store\" or \"proxy\" the env files are NOT passed: the agent resolves secrets through the parent API's /secret/:name route (per-agent allow-list in agents.json), so unique_api_token must be true and the agent's `secrets` array must list every name it needs — including its LLM key (e.g. ANTHROPIC-API-KEY). See docs/secrets.md."
+  type        = string
+  default     = "env"
+
+  validation {
+    condition     = contains(["env", "store", "proxy"], var.secrets_mode)
+    error_message = "secrets_mode must be \"env\", \"store\", or \"proxy\"."
+  }
+}

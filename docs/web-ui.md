@@ -54,6 +54,15 @@ suitable for the `attachments` array on an inbound `message` frame.
 `GET /files/<channelId>/<filename>` — serves a previously uploaded or
 Iris-attached file. `filename` may not contain `/` or `..`.
 
+`GET`/`POST /secret-drop/<token>` — the out-of-band secret submission form
+(see [Secrets](secrets.md)). Deliberately checked **before** the session-cookie
+gate above: the one-time token in the URL *is* the auth, since the person
+submitting a secret may only have Slack or Telegram, not the web UI password.
+`GET` renders a minimal form for an unexpired, unused token; `POST` stores the
+value and burns the token — both an invalid and an already-used token return
+the same generic 404, so the response never confirms whether a given token
+ever existed.
+
 `GET /ws?thread=<id>&agent=<name>` (upgraded to WebSocket) — `thread` opens or
 resumes a conversation, mapped to a `WEBUI-<id>` channel id (the existing
 virtual-channel convention shared with `SESSION-`/`BRIDGE-`/`ESCALATE-`, see
