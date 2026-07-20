@@ -40,7 +40,7 @@ per-agent `token` so the API can tell them apart:
 
 ```json
 {
-  "newsletter": {
+  "digest": {
     "bridge_url": "http://172.18.0.2:4000",
     "secrets": ["SENDGRID_API_KEY"],
     "token": "<value from terraform/modules/agent's api_token output>"

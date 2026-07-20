@@ -102,8 +102,8 @@ fi
 ## Notes
 
 - Requires `jq` and `curl` (available on all Iris hosts)
-- API key retrieved via `get-secret RESEND-API-KEY` — stored in Azure Key Vault
-- Sending domain `example.com` must be verified in Resend (DNS records already configured)
+- API key retrieved via `get-secret RESEND-API-KEY` (resolved from env var `RESEND_API_KEY`, Key Vault, or your secret broker)
+- The sending domain of `IRIS_EMAIL_FROM` must be verified in Resend (add the DNS records Resend shows for your domain)
 - Rate limit: 100 emails/day on free tier; escalate if limit is hit
 - Never include secrets or API keys in the email body
 
@@ -113,8 +113,8 @@ fi
 # Escalate a failure to the human operator
 send-email \
   --to operator@example.com \
-  --subject "Iris: sub-agent cricket is unresponsive" \
-  --body "Cricket agent failed to respond after 3 retries. Manual intervention required."
+  --subject "Iris: sub-agent weather is unresponsive" \
+  --body "Weather agent failed to respond after 3 retries. Manual intervention required."
 
 # Send a report
 generate-report | send-email --to team@example.com --subject "Daily digest"

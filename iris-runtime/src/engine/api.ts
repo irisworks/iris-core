@@ -10,6 +10,8 @@
  * Endpoints:
  *   GET  /health                         — liveness check
  *   GET  /channels                       — list active channel states
+ *   GET  /mcp/status                     — refresh MCP servers from data/mcp.json and report
+ *                                          per-server status, tool names, and config errors
  *   POST /event                          — inject immediate event into Iris's queue
  *                                          body: { channelId, text, user? }
  *   POST /escalate                       — sub-agent escalates a problem to Iris
@@ -45,6 +47,7 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomBytes, timingSafeEqual } from "crypto";
 import * as log from "./log.js";
+import { getMcpManager } from "./mcp/index.js";
 import {
 	createSession,
 	findByEmail,
@@ -251,6 +254,16 @@ export function startApiServer(
 			const caller = resolveCaller(req.headers.authorization, apiToken, agentRegistry);
 			if (caller === null) {
 				json(res, 401, { error: "unauthorized" });
+				return;
+			}
+
+			// ── GET /mcp/status ────────────────────────────────────────────────────
+			// Refresh-on-GET: editing data/mcp.json and hitting this route verifies
+			// the change immediately, without waiting for the next agent run.
+			if (method === "GET" && url === "/mcp/status") {
+				const mcpManager = getMcpManager(workingDir);
+				await mcpManager.refresh();
+				json(res, 200, mcpManager.getStatus());
 				return;
 			}
 

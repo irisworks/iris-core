@@ -2,11 +2,15 @@
 
 ## Supported Versions
 
-We release patches for security vulnerabilities in the following versions:
+Iris Core is pre-1.0. Security fixes land on `main` and in the latest tagged
+release only — older tags are not patched. Installs pin the `core` submodule to
+a release tag (see [docs/RELEASING.md](docs/RELEASING.md)); bump to the latest
+tag to pick up fixes.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.x     | :white_check_mark: |
+| Version              | Supported          |
+| -------------------- | ------------------ |
+| Latest release (0.x) | :white_check_mark: |
+| Older tags           | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -45,19 +49,37 @@ When deploying Iris Core:
 
 ### Secrets Management
 
-- **Never commit secrets** to git repositories
-- Store all API keys and tokens in Azure Key Vault (or equivalent)
-- Use Key Vault references in systemd services
+- **Never commit secrets** to git repositories — `/iris/.env` and `agents.json`
+  (which holds live bearer tokens once per-agent `token` fields are set) must
+  stay out of version control with tight file permissions
+- Sub-agents resolve secrets through the internal API (`GET /secrets/:name`)
+  and must be allow-listed per secret in `agents.json` — grant each agent only
+  the secrets it needs
+- Optional hardened backends: Azure Key Vault (`IRIS_KEY_VAULT`) or an external
+  broker (`IRIS_SECRET_BROKER_URL` — Vault, Infisical, or any HTTP service
+  speaking the contract)
 - Rotate secrets regularly
 - Use separate secrets for preview and prod environments
 
-### Infrastructure
+### Internal API and Web UI
+
+- The internal HTTP API binds to loopback (`127.0.0.1:3000`) by default. If you
+  widen the bind (e.g. `IRIS_API_HOST=0.0.0.0` for Docker sub-agents), **always**
+  set `IRIS_API_TOKEN` — never expose the API beyond loopback without a token
+- Give each sub-agent its own API token (`unique_api_token` in the Terraform
+  agent module + a `token` field in `agents.json`) so the secrets allow-list is
+  a real boundary, not just an audit trail
+- The web UI is off by default (`IRIS_WEBUI_PORT`). Set `IRIS_WEBUI_PASSWORD`
+  before exposing it beyond loopback — without it there is no auth gate
+
+### Infrastructure (cloud profile)
+
+On installs using the opt-in Azure/Terraform profile:
 
 - **Principle of least privilege:** Grant minimal Azure permissions needed
 - Use managed identities when possible
-- Enable Azure Key Vault access policies, not RBAC for secrets
 - Restrict network access to VMs (use NSG rules)
-- Enable Azure Security Center monitoring
+- Enable cloud security monitoring
 
 ### Git Hygiene
 
@@ -71,7 +93,10 @@ When deploying Iris Core:
 
 ### Sub-Agent Isolation
 
-- Run sub-agents in separate containers or VMs
+- Run sub-agents in separate Docker containers, or — for the strongest
+  boundary — Firecracker microVMs (`--sandbox=firecracker:<ip>` or
+  `--sandbox=firecracker-pool`): KVM hardware boundary → jailer (chroot,
+  uid 10000, seccomp) → per-VM `/30` TAP network → ephemeral rootfs
 - Use resource limits (CPU, memory) to prevent DoS
 - Validate all input from sub-agents
 - Don't trust sub-agent responses implicitly
@@ -104,20 +129,27 @@ Iris runs with `--sandbox=host` which means:
 
 ### LLM Provider Trust
 
-Iris sends conversation history to your configured LLM provider:
-- Azure OpenAI: Microsoft trust boundary
-- Anthropic: Anthropic trust boundary
-- OpenAI: OpenAI trust boundary
+Iris sends conversation history to your configured LLM provider — Anthropic,
+OpenAI, Azure AI Foundry, AWS Bedrock, or a custom OpenAI-compatible endpoint
+registered in `data/models.json`. Each is its own trust boundary.
 
 **Mitigation:** Use provider-specific compliance certifications (SOC 2, HIPAA, etc.) and ensure your data classification allows cloud AI processing.
 
 ### Sub-Agent Communication
 
-Current sub-agent communication via Slack or file queues:
-- Slack: Messages visible to workspace members
-- File queues: Accessible to anyone with filesystem access
+Sub-agents communicate with Iris over an internal HTTP bridge (registered in
+`agents.json`, `@agentname` routing) and the internal API:
 
-**Mitigation:** Phase 4 internal HTTP API (planned) will provide isolated communication.
+- Both bind to loopback by default; bearer-token auth (`IRIS_API_TOKEN`) is
+  required the moment either is reachable beyond loopback
+- Bridge and API error responses return generic messages — internal details
+  (paths, exceptions) go to logs only
+- The secrets route derives caller identity from the authenticating token, not
+  from self-reported headers
+
+**Residual risk:** with a single shared `IRIS_API_TOKEN`, all sub-agents
+resolve as unrestricted `iris`. Issue per-agent tokens (see above) to make the
+secrets allow-list an enforced boundary.
 
 ## Vulnerability Disclosure Policy
 

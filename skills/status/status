@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# status — read-only health snapshot of this Iris install
+set -uo pipefail
+
+STORAGE_ROOT="${IRIS_STORAGE_ROOT:-/iris/data}"
+CHANNEL="${1:-${IRIS_STATUS_CHANNEL:-}}"
+EXIT=0
+
+section() { printf '\n== %s ==\n' "$1"; }
+
+section "iris.service"
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl is-active iris.service >/dev/null 2>&1 \
+    && systemctl status iris.service --no-pager -n 0 2>/dev/null | head -5 \
+    || echo "iris.service not active (or not installed on this host)"
+else
+  echo "no systemd on this host — skipped"
+fi
+
+section "host"
+uptime 2>/dev/null || true
+df -h "$STORAGE_ROOT" / 2>/dev/null | awk 'NR==1 || !seen[$0]++'
+
+section "sub-agent containers"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  docker ps --filter "name=iris-" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null \
+    | { read -r header; echo "$header"; grep . || echo "(none running)"; }
+else
+  echo "docker not available — skipped"
+fi
+
+section "recent runtime errors"
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl -u iris --no-pager -n 200 2>/dev/null \
+    | grep -iE "error|warn" | tail -10 || echo "(none in last 200 lines)"
+else
+  echo "no journalctl on this host — skipped"
+fi
+
+section "message processing"
+if [[ -z "$CHANNEL" ]]; then
+  echo "no channel given (arg or IRIS_STATUS_CHANNEL) — skipped"
+elif [[ ! -f "${STORAGE_ROOT}/${CHANNEL}/log.jsonl" ]]; then
+  echo "no log at ${STORAGE_ROOT}/${CHANNEL}/log.jsonl — skipped"
+elif ! command -v jq >/dev/null 2>&1; then
+  echo "jq not available — skipped"
+else
+  LOG="${STORAGE_ROOT}/${CHANNEL}/log.jsonl"
+  LAST_HUMAN_TS=$(jq -r 'select(.isBot == false) | .ts' "$LOG" 2>/dev/null | tail -1)
+  if [[ -z "$LAST_HUMAN_TS" ]]; then
+    echo "no human messages in log — nothing to check"
+  else
+    HAS_RESPONSE=$(jq -r --arg ts "$LAST_HUMAN_TS" \
+      'select(.isBot == true and .ts >= $ts) | .ts' "$LOG" 2>/dev/null | head -1)
+    if [[ -n "$HAS_RESPONSE" ]]; then
+      echo "OK — last human message (ts $LAST_HUMAN_TS) has a bot response"
+    else
+      echo "STUCK — last human message (ts $LAST_HUMAN_TS) has no bot response yet"
+      EXIT=1
+    fi
+  fi
+fi
+
+exit "$EXIT"

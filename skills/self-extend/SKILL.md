@@ -50,7 +50,7 @@ set -euo pipefail
 4. **Secrets are always fetched via `get-secret`.** Never hardcoded.
 5. **Files are always stored via `store-file`.** Never raw paths.
 6. **Cloud calls use abstraction skills.** Never call Azure/AWS/GCP directly.
-7. **Test in preview before promoting.** See `promote-skill` skill.
+7. **Test with a safe case before relying on it.** Invoke the skill once with harmless inputs; confirm no hardcoded secrets, a descriptive kebab-case name, and that it is committed before use.
 
 ## Example: writing a new skill for sending a Slack message
 

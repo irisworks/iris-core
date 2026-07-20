@@ -28,7 +28,14 @@ search-web "stock market today S&P 500"
 
 ## Configuration
 
-Requires `PERPLEXITY-API-KEY` in Azure Key Vault:
+Requires the `PERPLEXITY-API-KEY` secret, resolved via `get-secret`. On the
+default zero-cloud install, set it as an env var in `/iris/.env`:
+
+```bash
+PERPLEXITY_API_KEY=your-api-key-here
+```
+
+On the Key Vault profile:
 
 ```bash
 az keyvault secret set --vault-name "$IRIS_KEY_VAULT" \

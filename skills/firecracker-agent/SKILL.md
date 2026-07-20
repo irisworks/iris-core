@@ -1,4 +1,11 @@
+---
+name: firecracker-agent
+description: Opt-in Firecracker profile only — provision, verify, reset, and destroy Firecracker microVM sub-agents.
+---
+
 # Skill: firecracker-agent
+
+> **Opt-in profile:** this skill only applies to installs using the Firecracker profile (`--firecracker`, needs KVM). Default Docker-only installs have no microVMs — do not use this skill there.
 
 Provision, verify, and manage a Firecracker microVM sub-agent for Iris.
 

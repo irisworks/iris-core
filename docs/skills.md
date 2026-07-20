@@ -40,9 +40,9 @@ Usage: send-email --to <addr> --subject <s> --body <b>
 ## What belongs in core
 
 Core ships **platform skills** only — things Iris needs to operate, extend, and
-heal herself: `spawn-agent`, `self-heal`, `self-extend`, `promote-skill`,
-`get-secret`, `github`, `send-email`, `search-web`, `serve-public`, `store-file`,
-`transcribe-audio`, `watchdog`, plus the opt-in `azure`, `terraform`, and
+heal herself: `spawn-agent`, `self-heal`, `self-extend`, `get-secret`, `github`,
+`send-email`, `search-web`, `serve-public`, `store-file`, `transcribe-audio`,
+`schedule`, `status`, plus the opt-in `azure`, `terraform`, and
 `firecracker-agent` profile skills.
 
 Domain and business skills — cost dashboards, finance trackers, CRM integrations —

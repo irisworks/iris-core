@@ -19,6 +19,7 @@ import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
 import * as log from "./log.js";
+import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
 import { getSecretProvider } from "./secrets.js";
 import {
@@ -184,6 +185,7 @@ export function buildSystemPrompt(
 	skills: Skill[],
 	agents: AgentRegistry = {},
 	profile: TransportPromptProfile,
+	mcpStatus: McpStatusSummary | null = null,
 ): string {
 	const channelPath = `${workspacePath}/${channelId}`;
 	const isDocker = sandboxConfig.type === "docker";
@@ -258,6 +260,9 @@ Bridge: \`curl -s -X POST ${entry.bridge_url}/bridge -H 'Content-Type: applicati
 
 Only delegate when the user's intent clearly matches a sub-agent's domain. Handle general questions yourself.`
 	: "(no sub-agents configured)"}
+
+## MCP Servers
+${formatMcpSection(mcpStatus, workspacePath)}
 
 ## Events
 You can schedule events that wake you up at specific times or when external things happen. Events are JSON files in \`${workspacePath}/events/\`.
@@ -360,8 +365,30 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 - edit: Surgical file edits
 - attach: ${profile.attachNote}
 
-Each tool requires a "label" parameter (shown to user).
+Each built-in tool requires a "label" parameter (shown to user). MCP tools (mcp__*) take only the arguments in their schema — no label.
 `;
+}
+
+function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: string): string {
+	if (!mcpStatus || (mcpStatus.servers.length === 0 && mcpStatus.configErrors.length === 0)) {
+		return `(none configured — external toolsets can be added via ${workspacePath}/data/mcp.json, see the mcp skill)`;
+	}
+	const lines = mcpStatus.servers.map((server) => {
+		if (server.status === "connected") {
+			return `- ${server.name}: connected, ${server.toolCount} tools (prefix mcp__${server.name}__)`;
+		}
+		if (server.status === "disabled") {
+			return `- ${server.name}: disabled`;
+		}
+		return `- ${server.name}: FAILED — ${server.error ?? "unknown error"}`;
+	});
+	for (const error of mcpStatus.configErrors) {
+		lines.push(`- config error: ${error}`);
+	}
+	lines.push(
+		`Tools from connected servers are callable directly. Config: ${workspacePath}/data/mcp.json (hot-reloads before each message — see the mcp skill).`,
+	);
+	return lines.join("\n");
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -813,6 +840,14 @@ function createRunner(
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}
 
+			// Refresh MCP servers (hash-gated no-op while data/mcp.json is unchanged)
+			// and merge their tools with the built-in toolset. Mutating state.tools
+			// is safe: the session only derives tools from baseToolsOverride at
+			// construction; the agent loop reads state.tools live.
+			const mcpManager = getMcpManager(workingDir);
+			await mcpManager.refresh();
+			agent.state.tools = [...tools, ...mcpManager.getTools()];
+
 			// Update system prompt with fresh memory, constitution, channel/user info, and skills
 			const memory = getMemory(channelDir, workingDir);
 			const constitution = loadConstitution(workspaceDir);
@@ -833,6 +868,7 @@ function createRunner(
 				skills,
 				agents,
 				profile,
+				mcpManager.getStatus(),
 			);
 			session.agent.state.systemPrompt = systemPrompt;
 

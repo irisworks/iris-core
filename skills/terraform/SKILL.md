@@ -1,6 +1,6 @@
 ---
 name: terraform
-description: Plan and apply Terraform changes using the safe Iris workflow.
+description: Opt-in Azure/Terraform profile only — plan and apply Terraform changes using the safe Iris workflow.
 ---
 
 # Skill: terraform
