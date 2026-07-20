@@ -1,6 +1,6 @@
 ---
 title: What is Iris?
-description: An always-on AI orchestrator that runs commands, writes its own skills, and manages sub-agent fleets over Slack and Telegram.
+description: An AI operator that never clocks out — runs commands, writes its own skills, and manages sub-agent fleets over Slack, Telegram, and a built-in web UI.
 ---
 
 # What is Iris?
