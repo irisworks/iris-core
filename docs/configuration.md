@@ -29,7 +29,11 @@ env vars.
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
 | `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | Identity injected into the constitution |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
-| `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | When set, `GET /secrets/:name` proxies here instead of env/Key Vault — points at Vault, Infisical, or any HTTP service speaking the same tiny contract |
+| `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in credential broker, see [Secrets](secrets.md) |
+| `IRIS_SECRET_KEY_FILE` / `IRIS_SECRET_STORE_FILE` | `/iris/secret.key` / `/iris/secrets.json.enc` | Encrypted store paths (`store` mode) |
+| `IRIS_BROKER_PORT` / `IRIS_BROKER_HOST` | `9099` / `127.0.0.1` | iris-broker daemon bind (`proxy` mode) |
+| `IRIS_BROKER_SERVICES_FILE` | `/iris/broker/services.json` | Operator overrides for the injection gateway's service map |
+| `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | When set, `GET /secrets/:name` proxies here instead of env/Key Vault/store — points at the bundled iris-broker (`proxy` mode), Vault, Infisical, or any HTTP service speaking the same tiny contract |
 | `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |
 | `PASSTHROUGH_API_KEY` | — | Fallback API key for passthrough channels (see [Channel Modes](channel-modes.md)) |
 
