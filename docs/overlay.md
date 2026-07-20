@@ -48,6 +48,26 @@ through symlinks, so overlay skills behave exactly like core skills.
 4. **Your constitution is yours** — ship a full `CONSTITUTION.md` in
    `overlay/data/`; core's version is a generic default.
 
+## What belongs in the overlay vs. core
+
+Skills, sub-agents, and config (`channels.json`, `models.json`, `mcp.json`,
+`CONSTITUTION.md`) are overlay content by design — they're read from the
+workspace at runtime and hot-reload without a core change, so your business
+logic and per-client behavior never touches `core/`.
+
+**Chat transports are the exception.** A `ChannelTransport`
+(`src/transport/types.ts` — see [Writing a Transport](writing-a-transport.md)
+for the full contract) is constructed and registered in `main.ts`, not
+discovered from the workspace at runtime — there's no plugin-loading
+mechanism that lets an overlay drop in a new platform the way it drops in a
+skill. Adding Discord, WhatsApp, or any other platform is a core change:
+implement `ChannelTransport`, follow the checklist in
+[Writing a Transport](writing-a-transport.md), and send it upstream as a PR
+to `iris-core` rather than forking `core/` to add it locally. This keeps
+"never edit files under `core/`" (rule 1 above) true even for installs that
+need a platform core doesn't ship yet — the fix lands once, upstream, for
+every install instead of diverging per fork.
+
 ## Upgrading core
 
 ```bash

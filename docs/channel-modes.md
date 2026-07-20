@@ -85,7 +85,10 @@ and survives restarts; routes are rebuilt from `sessions.json` at startup.
 The six named modes are three primitives plus orthogonal flags, all resolved
 by one dispatch pipeline in the engine (`src/engine/dispatch.ts` and
 `dispatch-config.ts`) instead of each mode re-implementing its own slice of
-routing logic:
+routing logic. This dispatch pipeline is currently wired up for Slack only;
+see [Writing a Transport](writing-a-transport.md#channel-mode-dispatch-is-opt-in-not-part-of-the-contract)
+if you're adding a new chat platform and deciding whether it needs the same
+wiring.
 
 | Primitive | Behavior |
 |---|---|
@@ -100,7 +103,10 @@ routing logic:
 | `acceptBotMessages` | boolean | Bot/integration messages are admitted as triggers, not filtered out |
 | `replayMissed` | boolean | Pre-startup top-level messages are replayed instead of skipped |
 
-The mapping, exactly as implemented:
+The mapping, exactly as implemented — this is also the legacy-alias table:
+`channels.json` only ever stores one of these six names, expanded to the
+primitive shape on load, and the six names remain supported forever so no
+existing config ever needs to change.
 
 | Mode | container | trigger | adminCommands | acceptBotMessages | replayMissed |
 |---|---|---|---|---|---|
