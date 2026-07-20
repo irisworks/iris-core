@@ -44,8 +44,13 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 function authed(req: IncomingMessage): boolean {
 	const header = req.headers.authorization ?? "";
-	const match = /^Bearer\s+(.+)$/i.exec(header);
-	return match !== null && secretMatches(match[1], token);
+	// Avoid a regex with adjacent overlapping quantifiers (\s+ and (.+) both
+	// match spaces) — CodeQL flags that shape as polynomial-time on crafted
+	// input. Bounded prefix match + slice is equivalent and linear.
+	const prefix = /^Bearer\s+/i.exec(header);
+	if (!prefix) return false;
+	const presented = header.slice(prefix[0].length);
+	return presented.length > 0 && secretMatches(presented, token);
 }
 
 const server = createServer(async (req, res) => {

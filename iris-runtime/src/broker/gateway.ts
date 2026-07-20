@@ -36,9 +36,21 @@ const STRIPPED_RESPONSE_HEADERS = new Set([
 	"content-length",
 ]);
 
-async function readRawBody(req: IncomingMessage): Promise<Buffer> {
+// Bodies are buffered whole (fetch() needs a complete Buffer, not a stream,
+// to set Content-Length correctly for most upstreams) — cap it so a caller
+// with a valid broker token can't pressure broker memory with an oversized
+// request.
+const MAX_GATEWAY_BODY_BYTES = 10 * 1024 * 1024;
+
+/** Returns undefined if the body exceeds `limit` bytes. */
+async function readRawBody(req: IncomingMessage, limit: number): Promise<Buffer | undefined> {
 	const chunks: Buffer[] = [];
-	for await (const chunk of req) chunks.push(chunk as Buffer);
+	let total = 0;
+	for await (const chunk of req) {
+		total += (chunk as Buffer).length;
+		if (total > limit) return undefined;
+		chunks.push(chunk as Buffer);
+	}
 	return Buffer.concat(chunks);
 }
 
@@ -57,22 +69,37 @@ export async function forwardToService(
 		return;
 	}
 
-	const headers: Record<string, string> = {};
+	// Keyed by lowercase header name so an injected header (e.g. "X-Api-Key")
+	// always replaces — rather than duplicates alongside — a differently-cased
+	// caller-supplied header of the same name; HTTP header names are
+	// case-insensitive but a plain object isn't, and fetch() would otherwise
+	// send both to the upstream.
+	const headers = new Map<string, { name: string; value: string }>();
 	for (const [name, headerValue] of Object.entries(req.headers)) {
-		if (STRIPPED_REQUEST_HEADERS.has(name.toLowerCase())) continue;
-		if (typeof headerValue === "string") headers[name] = headerValue;
+		const lower = name.toLowerCase();
+		if (STRIPPED_REQUEST_HEADERS.has(lower)) continue;
+		if (typeof headerValue === "string") headers.set(lower, { name, value: headerValue });
 	}
 	for (const [name, template] of Object.entries(service.headers)) {
-		headers[name] = template.replace("{value}", value);
+		headers.set(name.toLowerCase(), { name, value: template.replace("{value}", value) });
 	}
+	const outgoingHeaders = Object.fromEntries([...headers.values()].map(({ name, value }) => [name, value]));
 
 	const upstreamUrl = service.upstream.replace(/\/$/, "") + subPath;
 	const method = req.method ?? "GET";
-	const body = method === "GET" || method === "HEAD" ? undefined : await readRawBody(req);
+	let body: Buffer | undefined;
+	if (method !== "GET" && method !== "HEAD") {
+		body = await readRawBody(req, MAX_GATEWAY_BODY_BYTES);
+		if (body === undefined) {
+			res.writeHead(413, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ error: `request body exceeds ${MAX_GATEWAY_BODY_BYTES} bytes` }));
+			return;
+		}
+	}
 
 	let upstream: Response;
 	try {
-		upstream = await fetch(upstreamUrl, { method, headers, body });
+		upstream = await fetch(upstreamUrl, { method, headers: outgoingHeaders, body });
 	} catch (err) {
 		log.logWarning(`[broker] upstream fetch failed for ${serviceName}`, err instanceof Error ? err.message : String(err));
 		res.writeHead(502, { "Content-Type": "application/json" });

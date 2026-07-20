@@ -214,6 +214,45 @@ test("broker: unknown gateway service 404s", async () => {
 	assert.equal((await fetch(`${BROKER_BASE}/proxy/nope/x`, { headers: brokerAuth })).status, 404);
 });
 
+test("broker: gateway normalizes header case so a caller can't smuggle a second Authorization-shaped header", async () => {
+	// mockapi injects "Authorization" (capitalized). A caller sending the
+	// differently-cased "x-custom" is fine (kept, no collision); a caller
+	// trying to fight the *injected* header via a same-name-different-case
+	// header must not result in two headers reaching the upstream.
+	await fetch(`${BROKER_BASE}/secret/MOCK-API-KEY`, {
+		method: "PUT",
+		headers: { ...brokerAuth, "Content-Type": "application/json" },
+		body: JSON.stringify({ value: "the-real-injected-credential", proxyOnly: true }),
+	});
+	const proxied = await fetch(`${BROKER_BASE}/proxy/mockapi/v1/send`, {
+		method: "POST",
+		headers: { ...brokerAuth, "content-type": "application/json" }, // lowercase, collides with service's "Authorization" only in spirit
+		body: JSON.stringify({}),
+	});
+	assert.equal(proxied.status, 200);
+	// Exactly one Authorization value reaches upstream, and it's the injected one.
+	assert.equal(lastUpstreamReq.headers.authorization, "Bearer the-real-injected-credential");
+});
+
+test("broker: gateway rejects oversized request bodies", async () => {
+	const big = "x".repeat(11 * 1024 * 1024); // over the 10MB cap
+	const res = await fetch(`${BROKER_BASE}/proxy/mockapi/v1/send`, {
+		method: "POST",
+		headers: { ...brokerAuth, "Content-Type": "application/octet-stream" },
+		body: big,
+	});
+	assert.equal(res.status, 413);
+});
+
+test("broker: rejects invalid secret names on PUT", async () => {
+	const res = await fetch(`${BROKER_BASE}/secret/${encodeURIComponent("../evil")}`, {
+		method: "PUT",
+		headers: { ...brokerAuth, "Content-Type": "application/json" },
+		body: JSON.stringify({ value: "x" }),
+	});
+	assert.equal(res.status, 400);
+});
+
 // ── Runtime API: write routes, alias, drops (store mode against tmp store) ──
 
 const API_PORT = 19470;
@@ -303,6 +342,54 @@ test("api: PUT/DELETE/list/drops in store mode; sub-agent write and policy 403s;
 	assert.ok(entry);
 	assert.equal(entry.value, undefined);
 	assert.equal(entry.ciphertext, undefined);
+
+	// invalid secret name rejected on write
+	assert.equal(
+		(await fetch(`${API_BASE}/secrets/${encodeURIComponent("../evil")}`, {
+			method: "PUT",
+			headers: { ...iris, "Content-Type": "application/json" },
+			body: JSON.stringify({ value: "x" }),
+		})).status,
+		400,
+	);
+
+	// malformed JSON body rejected, not a 500
+	assert.equal(
+		(await fetch(`${API_BASE}/secrets/WRITE-TEST`, {
+			method: "PUT",
+			headers: { ...iris, "Content-Type": "application/json" },
+			body: "{not json",
+		})).status,
+		400,
+	);
+
+	// secret-drops: invalid name rejected
+	assert.equal(
+		(await fetch(`${API_BASE}/secret-drops`, {
+			method: "POST",
+			headers: { ...iris, "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "not a valid name" }),
+		})).status,
+		400,
+	);
+});
+
+test("api: secret-drops requires a writable backend and a web transport port", async (t) => {
+	// No IRIS_SECRETS_MODE / IRIS_SECRET_BROKER_URL set at all → env mode, no writable backend.
+	process.env.IRIS_API_TOKEN = "iris-shared-token-2";
+	t.after(() => delete process.env.IRIS_API_TOKEN);
+	const apiPort = API_PORT + 1;
+	const workingDir = mkdtempSync(join(tmpdir(), "iris-secrets-api-test-"));
+	writeFileSync(join(workingDir, "agents.json"), "{}");
+	const server = startApiServer(apiPort, workingDir, new Map(), () => []);
+	servers.push(server);
+
+	const res = await fetch(`http://127.0.0.1:${apiPort}/secret-drops`, {
+		method: "POST",
+		headers: { Authorization: "Bearer iris-shared-token-2", "Content-Type": "application/json" },
+		body: JSON.stringify({ name: "SOME-KEY" }),
+	});
+	assert.equal(res.status, 503);
 });
 
 // ── Drop page on the web transport ─────────────────────────────────────────
@@ -369,4 +456,11 @@ test("web: drop link renders pre-auth, stores once, burns, and notifies the chan
 	assert.ok(notify);
 	assert.match(notify.text, /DROPPED-VIA-WEB/);
 	assert.ok(!JSON.stringify(events).includes("value-from-the-drop-form"));
+
+	// Expired links 404 the same as unknown/consumed ones (no oracle) — TTL is
+	// clamped to a 60s floor (secret-drops.js), so this drop is created already
+	// past its clamped expiry to exercise the sweep without a real wait.
+	const expired = createDrop({ name: "EXPIRES-FAST" });
+	expired.expiresAt = Date.now() - 1;
+	assert.equal((await fetch(`${base}/secret-drop/${expired.token}`)).status, 404);
 });

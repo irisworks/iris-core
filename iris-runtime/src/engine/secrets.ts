@@ -119,6 +119,18 @@ export function getSecretProvider(): SecretProvider {
  * refuse plaintext reads without touching the value. Store mode reads the
  * local store; proxy mode asks the broker's /meta route; env mode has no
  * metadata (undefined = no restrictions).
+ *
+ * NOTE — fail-open by design, not fail-closed: a broker fetch error or
+ * non-OK response returns `undefined` here, which api.ts's caller-side gate
+ * reads as "no restriction" and lets through to getSecretProvider().get().
+ * That's safe *only* because the broker's own /secret/:name route
+ * (broker/main.ts) independently re-checks proxyOnly and 403s regardless of
+ * what this function returned — this is deliberate defense-in-depth, not a
+ * single point of enforcement. If that second check is ever removed or
+ * bypassed (e.g. a future non-broker writable backend), this function must
+ * become fail-closed (treat fetch/parse errors as "restricted" rather than
+ * "unrestricted") or the proxyOnly guarantee breaks silently on broker
+ * hiccups.
  */
 export async function getSecretMeta(name: string): Promise<SecretMeta | undefined> {
 	const brokerUrl = process.env.IRIS_SECRET_BROKER_URL;

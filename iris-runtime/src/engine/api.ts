@@ -76,10 +76,22 @@ interface ChannelState {
 	running: boolean;
 }
 
-export function readBody(req: IncomingMessage): Promise<string> {
+/** Default cap on any single request body read via readBody() — a caller that authenticated but sends an oversized body gets a rejection instead of unbounded memory growth. */
+export const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+export function readBody(req: IncomingMessage, maxBytes: number = DEFAULT_MAX_BODY_BYTES): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
-		req.on("data", (chunk: Buffer) => chunks.push(chunk));
+		let total = 0;
+		req.on("data", (chunk: Buffer) => {
+			total += chunk.length;
+			if (total > maxBytes) {
+				req.destroy();
+				reject(Object.assign(new Error(`request body exceeds ${maxBytes} bytes`), { statusCode: 413 }));
+				return;
+			}
+			chunks.push(chunk);
+		});
 		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
 		req.on("error", reject);
 	});

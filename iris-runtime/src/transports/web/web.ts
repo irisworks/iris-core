@@ -496,7 +496,10 @@ export class WebTransport implements ChannelTransport {
 	private async handleSecretDropSubmit(req: IncomingMessage, res: ServerResponse, token: string): Promise<void> {
 		let body: { value?: string; proxyOnly?: boolean };
 		try {
-			body = JSON.parse(await readBody(req)) as typeof body;
+			// Cap well above the 64KB value limit below (room for JSON overhead)
+			// so an oversized pre-auth POST to this route can't buffer unbounded
+			// data before the value-length check ever runs.
+			body = JSON.parse(await readBody(req, 128 * 1024)) as typeof body;
 		} catch {
 			res.writeHead(400, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({ error: "invalid JSON" }));
