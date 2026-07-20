@@ -12,6 +12,7 @@ opt-in profiles for production hardening.
 
 - **Provider-agnostic** — Anthropic, OpenAI, Azure AI Foundry, or AWS Bedrock, switchable via env vars
 - **Skills** — plain directories with a `SKILL.md`; hot-reload without restart; Iris can write her own
+- **MCP servers** — external toolsets (stdio or remote HTTP) plug in via `data/mcp.json`, hot-reloaded and manageable through chat (see `docs/mcp.md`)
 - **Sub-agents** — spawned in Docker containers or Firecracker microVMs, talking over an HTTP bridge
 - **Resilient** — LLM retry with backoff, automatic context compaction, self-healing escalation
 - **Durable** — GitHub is the source of truth; the machine is disposable and rebuildable from this repo
