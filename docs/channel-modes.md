@@ -24,6 +24,12 @@ message does in `interactive-thread` and `passthrough` channels: when set, only
 an `@iris` mention opens a session / gets forwarded, and plain top-level messages
 are logged but otherwise ignored.
 
+These six names are the only supported, documented surface — copy one of the
+recipes below. Underneath, all six are the same dispatch pipeline running with
+different settings; see [Under the hood](#under-the-hood) if you're curious
+how they relate, but don't configure a channel with raw settings instead of a
+named mode.
+
 ```json
 {
   "C0XXXXXXX": { "mode": "interactive-thread", "requireMentionForTopLevel": true },
@@ -73,6 +79,47 @@ response is skipped.
 conversation containers created via the [internal API](sub-agents.md) or by a
 top-level mention in an interactive-thread channel. Session state lives on disk
 and survives restarts; routes are rebuilt from `sessions.json` at startup.
+
+## Under the hood
+
+The six named modes are three primitives plus orthogonal flags, all resolved
+by one dispatch pipeline in the engine (`src/engine/dispatch.ts` and
+`dispatch-config.ts`) instead of each mode re-implementing its own slice of
+routing logic:
+
+| Primitive | Behavior |
+|---|---|
+| `chat` | Channel-context LLM run — replies land in the channel itself |
+| `sessions` | Per-thread session LLM run — replies are scoped to a durable session (see [Sessions](#sessions)) |
+| `relay` | Webhook forward — Iris's LLM never runs |
+
+| Flag | Values | Meaning |
+|---|---|---|
+| `trigger` | `mention` \| `all-top-level` \| `api-only` | What opens/continues a container organically: an explicit `@iris` mention only, any top-level message, or nothing (only a pre-existing, API-created session continues) |
+| `adminCommands` | boolean | `stop` / `compact` / `reset` text is intercepted and executed (`chat` only, and only via a mention or DM — never via ambient top-level traffic) |
+| `acceptBotMessages` | boolean | Bot/integration messages are admitted as triggers, not filtered out |
+| `replayMissed` | boolean | Pre-startup top-level messages are replayed instead of skipped |
+
+The mapping, exactly as implemented:
+
+| Mode | container | trigger | adminCommands | acceptBotMessages | replayMissed |
+|---|---|---|---|---|---|
+| `dm` | chat | mention | — | — | — |
+| `admin` | chat | mention | ✓ | — | — |
+| `leads` | chat | all-top-level | — | ✓ | ✓ |
+| `thread` | sessions | api-only | — | — | — |
+| `interactive-thread` | sessions | mention if `requireMentionForTopLevel`, else all-top-level | — | — | — |
+| `passthrough` | relay | mention if `requireMentionForTopLevel`, else all-top-level | — | — | — |
+
+A mention or a DM always reaches its container regardless of `trigger` — the
+flag only gates plain top-level chatter with no explicit address to the bot.
+This mapping is an implementation detail, not a second configuration surface:
+`channels.json` only ever takes a named `mode` (+ `requireMentionForTopLevel`
++ passthrough's `url`/`payload`/`secretName`/`replyPrefix`), which the engine
+silently expands into this shape. There is no way to configure a channel with
+raw `container`/`trigger`/flag values directly, and there won't be — new
+behavior gets a new named mode (or a new flag on an existing one), documented
+here as a recipe, not a raw combination for callers to assemble themselves.
 
 ## Channel workspace layout
 
