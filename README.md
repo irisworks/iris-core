@@ -147,7 +147,7 @@ without a restart.
 
 Core ships platform skills only — things Iris needs to operate, extend, and heal
 herself (`spawn-agent`, `self-heal`, `self-extend`, `get-secret`, `github`,
-`send-email`, `serve-public`, `watchdog`, ...). Domain and business skills belong
+`send-email`, `serve-public`, `schedule`, `status`, ...). Domain and business skills belong
 in your install's overlay (see below).
 
 ## Sub-agents and the Internal API

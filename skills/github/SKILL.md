@@ -56,10 +56,10 @@ echo "[github] Committed and pushed: $COMMIT_MSG"
 github-commit "skills/my-new-skill/SKILL.md" "feat: add my-new-skill"
 
 # Commit a sub-agent skill
-github-commit "agents/newsletter/skills/send-newsletter/SKILL.md" "feat(newsletter): add send-newsletter skill"
+github-commit "agents/digest/skills/send-digest/SKILL.md" "feat(digest): add send-digest skill"
 
 # Commit terraform changes
-github-commit "terraform/" "infra: add newsletter agent containers"
+github-commit "terraform/" "infra: add digest agent containers"
 
 # Check status
 cd /iris/repo && git status && git log --oneline -5

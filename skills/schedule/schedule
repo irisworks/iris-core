@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# schedule — create/list/cancel events in Iris's events queue
+set -euo pipefail
+
+EVENTS_DIR="${IRIS_EVENTS_DIR:-/iris/data/events}"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  schedule once  --channel <channelId> --at "<ISO 8601>" --text "<instruction>"
+  schedule every --channel <channelId> --cron "<expr>" [--tz <IANA>] --text "<instruction>"
+  schedule list
+  schedule cancel <event-file>
+EOF
+  exit 1
+}
+
+CMD="${1:-}"; shift || true
+
+case "$CMD" in
+  once|every)
+    CHANNEL="" AT="" CRON="" TZNAME="UTC" TEXT=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --channel) CHANNEL="$2"; shift 2 ;;
+        --at)      AT="$2";      shift 2 ;;
+        --cron)    CRON="$2";    shift 2 ;;
+        --tz)      TZNAME="$2";  shift 2 ;;
+        --text)    TEXT="$2";    shift 2 ;;
+        *) echo "schedule: unknown option: $1" >&2; usage ;;
+      esac
+    done
+    [[ -z "$CHANNEL" || -z "$TEXT" ]] && usage
+
+    mkdir -p "$EVENTS_DIR"
+    EVENT_FILE="${EVENTS_DIR}/schedule-$(date +%s%N).json"
+
+    if [[ "$CMD" == "once" ]]; then
+      [[ -z "$AT" ]] && { echo "schedule once: --at is required" >&2; usage; }
+      jq -n --arg channelId "$CHANNEL" --arg text "$TEXT" --arg at "$AT" \
+        '{type:"one-shot", channelId:$channelId, text:$text, at:$at}' > "$EVENT_FILE"
+    else
+      [[ -z "$CRON" ]] && { echo "schedule every: --cron is required" >&2; usage; }
+      jq -n --arg channelId "$CHANNEL" --arg text "$TEXT" --arg schedule "$CRON" --arg timezone "$TZNAME" \
+        '{type:"periodic", channelId:$channelId, text:$text, schedule:$schedule, timezone:$timezone}' > "$EVENT_FILE"
+    fi
+    echo "scheduled: $(basename "$EVENT_FILE")"
+    ;;
+
+  list)
+    shopt -s nullglob
+    FOUND=false
+    for f in "$EVENTS_DIR"/*.json; do
+      FOUND=true
+      SUMMARY=$(jq -r '
+        if .type == "periodic" then "periodic  " + .schedule + " (" + .timezone + ")"
+        elif .type == "one-shot" then "one-shot  at " + .at
+        else .type end
+        + "  → #" + .channelId + ": " + .text' "$f" 2>/dev/null) || SUMMARY="(unparseable)"
+      echo "$(basename "$f")  $SUMMARY"
+    done
+    $FOUND || echo "no scheduled events in $EVENTS_DIR"
+    ;;
+
+  cancel)
+    FILE="${1:?Usage: schedule cancel <event-file>}"
+    TARGET="${EVENTS_DIR}/$(basename "$FILE")"
+    [[ -f "$TARGET" ]] || { echo "schedule: no such event: $(basename "$FILE")" >&2; exit 1; }
+    rm "$TARGET"
+    echo "cancelled: $(basename "$FILE")"
+    ;;
+
+  *) usage ;;
+esac
