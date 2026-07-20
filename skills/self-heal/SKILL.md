@@ -20,18 +20,18 @@ Iris monitors the event queue and will receive the escalation.
 
 ```bash
 # Escalate to Iris (writes event to Iris's events dir)
-self-heal --reason "Cricket API returning 503 for 10 minutes" --agent cricket
+self-heal --reason "Weather API returning 503 for 10 minutes" --agent weather
 
 # Escalate + email human
-self-heal --reason "Model provider unreachable" --agent newsletter --email operator@example.com
+self-heal --reason "Model provider unreachable" --agent digest --email operator@example.com
 
 # Escalate + attempt service restart
-self-heal --reason "Memory leak detected" --agent cricket --restart
+self-heal --reason "Memory leak detected" --agent weather --restart
 
 # Full escalation path
 self-heal \
-  --reason "Cannot connect to cricket API after 5 retries" \
-  --agent cricket \
+  --reason "Cannot connect to weather API after 5 retries" \
+  --agent weather \
   --email operator@example.com \
   --context "Last successful response: 2 hours ago. Error: ECONNREFUSED 142.250.80.35:443"
 ```

@@ -21,17 +21,17 @@ The wildcard DNS `*.<IRIS_BASE_DOMAIN>` is already configured during bootstrap �
 serve-public <name> <host-port>
 ```
 
-- `name` — subdomain prefix, e.g. `cricket` → `cricket.${IRIS_BASE_DOMAIN}`
+- `name` — subdomain prefix, e.g. `weather` → `weather.${IRIS_BASE_DOMAIN}`
 - `host-port` — port on the host that the service listens on
 
 ## Examples
 
 ```bash
-# Expose cricket web UI (container port mapped to host :8080)
-serve-public cricket 8080
+# Expose weather web UI (container port mapped to host :8080)
+serve-public weather 8080
 
 # Expose a different agent
-serve-public newsletter 8090
+serve-public digest 8090
 ```
 
 ## Implementation

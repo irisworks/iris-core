@@ -1,6 +1,6 @@
 ---
 name: azure
-description: Common Azure CLI patterns for auth, infrastructure, and operational checks.
+description: Opt-in Azure profile only — common Azure CLI patterns for auth, infrastructure, and operational checks.
 ---
 
 # Skill: azure
@@ -42,20 +42,20 @@ az keyvault secret list \
 
 ```bash
 # List VMs
-az vm list -g iris-rg --query "[].{name:name, ip:publicIps}" -o table
+az vm list -g "${IRIS_RESOURCE_GROUP:-iris-rg}" --query "[].{name:name, ip:publicIps}" -o table
 
 # List containers (if using ACI)
-az container list -g iris-rg -o table
+az container list -g "${IRIS_RESOURCE_GROUP:-iris-rg}" -o table
 
 # Get VM public IP
-az network public-ip show -g iris-rg -n iris-pip --query ipAddress -o tsv
+az network public-ip show -g "${IRIS_RESOURCE_GROUP:-iris-rg}" -n iris-pip --query ipAddress -o tsv
 ```
 
 ## Docker on VM (via SSH)
 
 ```bash
 # Check Iris container status
-ssh iris@$(az network public-ip show -g iris-rg -n iris-pip --query ipAddress -o tsv) \
+ssh iris@$(az network public-ip show -g "${IRIS_RESOURCE_GROUP:-iris-rg}" -n iris-pip --query ipAddress -o tsv) \
   "docker ps"
 
 # View Iris logs
@@ -65,6 +65,6 @@ ssh iris@<IP> "docker logs --tail 50 iris"
 ## Notes
 
 - Subscription ID: `${IRIS_AZURE_SUBSCRIPTION}`
-- Resource group: `iris-rg`
+- Resource group: `${IRIS_RESOURCE_GROUP}` (default `iris-rg`)
 - Never call `az keyvault secret show` to read secrets — use `get-secret` skill
 - Always use managed identity for VM-to-Azure auth where possible
