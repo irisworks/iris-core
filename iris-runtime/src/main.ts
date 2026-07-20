@@ -8,6 +8,7 @@ import { downloadChannel } from "./transports/slack/download.js";
 import { createEngine } from "./engine/index.js";
 import { createEventsWatcher } from "./engine/events.js";
 import * as log from "./engine/log.js";
+import { shutdownMcp } from "./engine/mcp/index.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./engine/sandbox.js";
 import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from "./transports/slack/slack.js";
 import { TelegramBot, type IrisTelegramHandler } from "./transports/telegram/telegram.js";
@@ -338,5 +339,13 @@ const watchers = watchDirs.map(sub => {
 	return w;
 });
 
-process.on("SIGINT", () => { log.logInfo("Shutting down..."); watchers.forEach(w => w.stop()); process.exit(0); });
-process.on("SIGTERM", () => { log.logInfo("Shutting down..."); watchers.forEach(w => w.stop()); process.exit(0); });
+// Close MCP clients on shutdown so stdio server children don't orphan.
+// Bounded so a hung server can't stall shutdown.
+const shutdown = async () => {
+	log.logInfo("Shutting down...");
+	watchers.forEach(w => w.stop());
+	await Promise.race([shutdownMcp(), new Promise((r) => setTimeout(r, 2000))]);
+	process.exit(0);
+};
+process.on("SIGINT", () => { void shutdown(); });
+process.on("SIGTERM", () => { void shutdown(); });

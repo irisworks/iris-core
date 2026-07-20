@@ -50,6 +50,12 @@ For Azure AI Foundry, bootstrap asks for the **bare account name** (e.g.
 trimmed automatically, and the generated `baseUrl` is validated — bootstrap aborts
 on a malformed hostname and warns if it doesn't resolve in DNS.
 
+## MCP servers
+
+External toolsets connect via `<workspace>/data/mcp.json` (optional,
+hot-reloaded per message; secrets referenced as `${VAR}` from `.env`) — see
+[MCP Servers](mcp.md).
+
 ## Internal API security
 
 The internal API binds to loopback by default. If sub-agent containers reach Iris

@@ -18,6 +18,7 @@ AI teammate — no cloud account, no Kubernetes, no vendor lock-in required.
 - **Defense in depth, opt-in** — Docker by default; flip a flag and every sub-agent runs in its own Firecracker microVM with a hardware KVM boundary
 - **Provider-agnostic** — Anthropic, OpenAI, Azure AI Foundry, or AWS Bedrock, switchable via env vars
 - **Three transports, one engine** — Slack, Telegram, and an optional built-in web UI (thread sidebar, live tool-call cards, attachments); adding a transport requires zero engine edits
+- **MCP servers** — external toolsets (stdio or remote HTTP) plug in via `data/mcp.json`, hot-reloaded and manageable through chat (see `docs/mcp.md`)
 - **Resilient** — LLM retry with backoff, automatic context compaction, self-healing escalation
 - **Durable by design** — GitHub is the source of truth; the machine itself is cattle, not a pet
 - **Zero cloud dependencies to start** — secrets in `/iris/.env`, sub-agents in Docker; Azure Key Vault and Terraform are opt-in hardening, not requirements
