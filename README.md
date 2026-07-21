@@ -38,6 +38,11 @@ dependencies, asks for your LLM API key, walks you through creating a Slack app
 and/or Telegram bot (exact scopes shown in-terminal), builds the runtime, and starts
 Iris as a systemd service.
 
+The installer itself always runs from `main`, but it pins the cloned repo to the
+**latest release tag** (not `main`) by default, so you get a stable, released
+version rather than whatever merged an hour ago. Override with
+`IRIS_CORE_REF=main` (or any branch/tag) for development installs.
+
 **Verify:** `sudo systemctl status iris`, then in Slack: `@iris what model are you?`
 
 ![Iris writes herself a markdown-to-PDF skill, then uses it](assets/demo-md-to-pdf.gif)
