@@ -52,6 +52,13 @@ writes herself a `convert.py` skill for it — then, when a user later hands her
 markdown file, just uses the skill she wrote to convert it. No redeploy, no PR,
 no human in the loop.*
 
+To have Iris commit skills like this one back to GitHub (her long-term memory —
+the VM is ephemeral), answer `Y` to the GitHub token prompt during bootstrap and
+give it a repo to push to: a fork of `iris-core`, or your own private overlay
+repo (see [Company-Specific Extensions](#company-specific-extensions-overlay)) —
+never the upstream you cloned from. Bootstrap writes this as `IRIS_GITHUB_ORG` /
+`IRIS_GITHUB_REPO` in `/iris/.env`.
+
 Want secrets in Azure Key Vault, or every command isolated in a Firecracker microVM?
 Pass bootstrap flags through the installer — see **[docs/SETUP.md](docs/SETUP.md)**
 for full walkthroughs of all four paths, including Telegram bot claiming:
@@ -128,7 +135,7 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 | `IRIS_WEBUI_PORT` / `IRIS_WEBUI_PASSWORD` | — (off) / — | Enable the built-in web UI on this port; shared-secret login (set it before exposing beyond loopback) |
 | `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in encrypted store / injection-proxy credential broker (see `docs/secrets.md`) |
 | `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | External secret broker for `GET /secrets/:name` (the bundled iris-broker in `proxy` mode, Vault, Infisical, or any HTTP service speaking the contract); default backend is env vars, then Key Vault if `IRIS_KEY_VAULT` is set |
-| `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | Identity injected into the constitution |
+| `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills/sub-agents/self-edits to (see [Company-Specific Extensions](#company-specific-extensions-overlay)) — a fork or your own private overlay, never the upstream you cloned from. Prompted by bootstrap alongside the GitHub token |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |
 

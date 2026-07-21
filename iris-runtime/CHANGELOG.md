@@ -8,6 +8,19 @@
 - Trimmed the `iris-runtime` Docker image from 2.75GB to ~930MB: dropped the unconditional Azure CLI install (693MB) — `az` runs on the host, installed by `bootstrap.sh` only on the Key Vault paths (Options 2/4 in `docs/SETUP.md`), and sub-agent containers mount `~/.azure` only when a bootstrap opts in (`agents/bootstrap.template.sh`); dropped the `wkhtmltopdf`/`xvfb`/`weasyprint`/`pypdf` PDF-generation stack (633MB) — unreferenced by any skill or `src/` code (the documented markdown→PDF self-extension demo in the README uses `pandoc`, never installed here); dropped the unused `@mariozechner/pi-web-ui` dependency from `iris-runtime/package.json` — never imported by `src/` (the reference web UI is hand-written static HTML/CSS/JS per `docs/web-ui.md`), and its own transitive deps (`pdfjs-dist`, `lucide`, `xlsx`, `docx-preview`, `ollama`, `@lmstudio/sdk`) were the single largest chunk of `node_modules`. This also fixes the `scripts/build-firecracker-rootfs.sh` headroom margin having less room to work with on hosts with less free disk.
 ### Fixed
 
+- `bootstrap.sh`'s optional GitHub token prompt now also asks which repo Iris
+  should push her own skill/sub-agent commits to, storing it as
+  `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` (env path: written to `/iris/.env`;
+  Key Vault path: seeded as `GITHUB-ORG`/`GITHUB-REPO` and fetched back on
+  redeploy) (IRIS-122). Previously these vars were documented in
+  `docs/configuration.md`/README but never prompted for or persisted anywhere,
+  so the `github` skill's `git remote set-url` silently built an empty
+  `.../github.com//.git` URL and every self-commit push failed until an
+  operator hand-edited `/iris/.env`. Docs (`README.md`, `docs/configuration.md`,
+  `docs/overlay.md`, `docs/SETUP.md`) now spell out that this must be a fork of
+  `iris-core` or the operator's own private overlay repo — never the upstream
+  `irisworks/iris-core` checkout — so a stock install can't accidentally push
+  to the public repo.
 - `scripts/build-firecracker-rootfs.sh` sized the ext4 rootfs at a hardcoded 2048MiB, smaller than the uncompressed `iris-runtime:local` image (2.75GB+), so `tar -xf -` into the loop-mounted image failed partway through with `Cannot write: No space left on device`. The script now exports the container to a tarball first, sizes the ext4 image from the tarball's actual size plus 1024MiB headroom (floored at the previous 2048MiB minimum), then extracts into it.
 
 ### Changed

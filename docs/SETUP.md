@@ -46,7 +46,11 @@ The script will:
    and Terraform are installed only on the Key Vault paths (Options 2 and 4).
 2. Ask for your LLM provider (anthropic / openai / foundry-e2 / amazon-bedrock) and API key.
 3. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
-4. Optionally set up email sending (Resend), a GitHub token (for repo access), and a public domain.
+4. Optionally set up email sending (Resend), a public domain, and a GitHub
+   token — if you add one, you'll also name the repo Iris pushes her own
+   skill/sub-agent commits to (a fork of `iris-core`, or your own private
+   overlay repo — see [Extending Iris](overlay.md); never the upstream you
+   cloned from).
 5. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
 
 **Verify:**

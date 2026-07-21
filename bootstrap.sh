@@ -337,8 +337,8 @@ fi
 # Sets: IRIS_PROVIDER, IRIS_MODEL, LLM_API_KEY, FOUNDRY_ACCOUNT,
 #       AWS_ACCESS_KEY_INPUT, AWS_SECRET_KEY_INPUT, AWS_REGION_INPUT,
 #       AWS_PROFILE_INPUT, SLACK_APP_TOKEN, SLACK_BOT_TOKEN,
-#       GITHUB_TOKEN, RESEND_API_KEY, IRIS_BASE_DOMAIN,
-#       CERTBOT_EMAIL, GIT_USER_EMAIL
+#       GITHUB_TOKEN, IRIS_GITHUB_ORG, IRIS_GITHUB_REPO, RESEND_API_KEY,
+#       IRIS_BASE_DOMAIN, CERTBOT_EMAIL, GIT_USER_EMAIL
 # ────────────────────────────────────────────────────────────
 prompt_secrets() {
   # ── LLM Provider ──
@@ -493,6 +493,8 @@ prompt_secrets() {
 
   # ── GitHub token ──
   GITHUB_TOKEN=""
+  IRIS_GITHUB_ORG=""
+  IRIS_GITHUB_REPO=""
   if confirm "Add GitHub token for repo access?"; then
     echo ""
     echo "  ┌─ GitHub Token Setup ────────────────────────────────────────────┐"
@@ -504,6 +506,21 @@ prompt_secrets() {
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your token is ready..."
     GITHUB_TOKEN=$(prompt_secret "GitHub token (github_pat_... or ghp_...)")
+
+    echo ""
+    echo "  This token needs a repo to push to: the one Iris commits her own"
+    echo "  skills, sub-agents, and self-edits to (GitHub is her long-term"
+    echo "  memory — see docs/overlay.md). Use a fork of iris-core, or your"
+    echo "  own private overlay repo — not this upstream checkout."
+    echo ""
+    GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
+    if [[ -n "$GH_ORG_REPO" ]]; then
+      IRIS_GITHUB_ORG="${GH_ORG_REPO%%/*}"
+      IRIS_GITHUB_REPO="${GH_ORG_REPO#*/}"
+    else
+      log "Warning: no org/repo set — Iris can't push skill commits until"
+      log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
+    fi
   fi
 
   # ── Email (optional) ──
@@ -549,6 +566,8 @@ SLACK_APP_TOKEN=""
 SLACK_BOT_TOKEN=""
 TELEGRAM_BOT_TOKEN=""
 GITHUB_TOKEN=""
+IRIS_GITHUB_ORG=""
+IRIS_GITHUB_REPO=""
 RESEND_API_KEY=""
 LLM_API_KEY=""
 FOUNDRY_ACCOUNT=""
@@ -636,6 +655,8 @@ if [[ "$NO_KEYVAULT" == false ]]; then
     seed_secret "SLACK-BOT-TOKEN"    "$SLACK_BOT_TOKEN"
     [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && seed_secret "TELEGRAM-BOT-TOKEN" "$TELEGRAM_BOT_TOKEN"
     seed_secret "GITHUB-TOKEN"       "$GITHUB_TOKEN"
+    seed_secret "GITHUB-ORG"         "$IRIS_GITHUB_ORG"
+    seed_secret "GITHUB-REPO"        "$IRIS_GITHUB_REPO"
     seed_secret "RESEND-API-KEY"     "$RESEND_API_KEY"
     log "✓ Secrets seeded."
   else
@@ -910,6 +931,8 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   OPENAI_API_KEY=$(fetch_secret "OPENAI-API-KEY")
   FOUNDRY_E2_KEY=$(fetch_secret "FOUNDRY-E2-KEY")
   GITHUB_TOKEN=$(fetch_secret "GITHUB-TOKEN")
+  IRIS_GITHUB_ORG=$(fetch_secret "GITHUB-ORG")
+  IRIS_GITHUB_REPO=$(fetch_secret "GITHUB-REPO")
   SLACK_APP_TOKEN=$(fetch_secret "SLACK-APP-TOKEN")
   SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
   TELEGRAM_BOT_TOKEN=$(fetch_secret "TELEGRAM-BOT-TOKEN")
@@ -1029,6 +1052,8 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "TELEGRAM_BOT_TOKEN=$(e "${TELEGRAM_BOT_TOKEN:-}")"
   echo ""
   echo "GITHUB_TOKEN=$(e "${GITHUB_TOKEN:-}")"
+  echo "IRIS_GITHUB_ORG=$(e "${IRIS_GITHUB_ORG:-}")"
+  echo "IRIS_GITHUB_REPO=$(e "${IRIS_GITHUB_REPO:-}")"
   echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"
   echo ""
   echo "AZURE_SUBSCRIPTION_ID=$(e "${SUBSCRIPTION_ID:-}")"
