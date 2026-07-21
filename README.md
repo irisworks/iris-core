@@ -40,6 +40,13 @@ Iris as a systemd service.
 
 **Verify:** `sudo systemctl status iris`, then in Slack: `@iris what model are you?`
 
+![Iris writes herself a markdown-to-PDF skill, then uses it](assets/demo-md-to-pdf.gif)
+
+*Asked to build a markdown→PDF workflow, Iris checks that `pandoc` is available,
+writes herself a `convert.py` skill for it — then, when a user later hands her a
+markdown file, just uses the skill she wrote to convert it. No redeploy, no PR,
+no human in the loop.*
+
 Want secrets in Azure Key Vault, or every command isolated in a Firecracker microVM?
 Pass bootstrap flags through the installer — see **[docs/SETUP.md](docs/SETUP.md)**
 for full walkthroughs of all four paths, including Telegram bot claiming:
