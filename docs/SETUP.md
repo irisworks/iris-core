@@ -137,10 +137,15 @@ Iris supports Telegram natively. The bot is private by design — it ignores all
 messages until you claim it with a one-time token.
 
 **1. Create a bot:** message `@BotFather`, send `/newbot`, pick a display name and a
-username ending in `bot`, and copy the token (`7123456789:AAF...`).
+username ending in `bot`, and copy the token (`7123456789:AAF...`). Do this at
+`web.telegram.org` or the desktop app on the same machine you're running bootstrap
+from — Telegram syncs the BotFather chat to every logged-in device, so you can
+copy-paste the token locally instead of moving it off your phone.
 
 **2. Add the token:** enter it when bootstrap asks (`Set up Telegram integration? [Y/n]`).
-It's written to `/iris/.env` automatically.
+Pasting BotFather's whole reply also works — bootstrap extracts the token out of it —
+and it echoes back a masked confirmation (`123456789…xyz9 (46 chars)`) so you can
+confirm the paste landed. It's written to `/iris/.env` automatically.
 
 **3. Claim the bot:** on first startup Iris prints a one-time claim token to the
 terminal (`journalctl -u iris -f` if you missed it). Send that exact token to your
