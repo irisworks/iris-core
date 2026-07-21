@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Trimmed the `iris-runtime` Docker image from 2.75GB to ~930MB: dropped the unconditional Azure CLI install (693MB) — `az` runs on the host, installed by `bootstrap.sh` only on the Key Vault paths (Options 2/4 in `docs/SETUP.md`), and sub-agent containers mount `~/.azure` only when a bootstrap opts in (`agents/bootstrap.template.sh`); dropped the `wkhtmltopdf`/`xvfb`/`weasyprint`/`pypdf` PDF-generation stack (633MB) — unreferenced by any skill or `src/` code (the documented markdown→PDF self-extension demo in the README uses `pandoc`, never installed here); dropped the unused `@mariozechner/pi-web-ui` dependency from `iris-runtime/package.json` — never imported by `src/` (the reference web UI is hand-written static HTML/CSS/JS per `docs/web-ui.md`), and its own transitive deps (`pdfjs-dist`, `lucide`, `xlsx`, `docx-preview`, `ollama`, `@lmstudio/sdk`) were the single largest chunk of `node_modules`. This also fixes the `scripts/build-firecracker-rootfs.sh` headroom margin having less room to work with on hosts with less free disk.
+
 ### Changed
 
 - `install.sh` now defaults `IRIS_CORE_REF` to the latest release tag (resolved via `git ls-remote --tags --sort=-v:refname`) instead of `main`, so the curl-pipe installer pins to a released version rather than whatever last merged to `main` (IRIS-122). Falls back to `main` if no `v*` tags exist on the remote (e.g. a fork with no releases yet). The `IRIS_CORE_REF` env override still works for developers who want a specific branch or tag. The full-repo clone (no sparse checkout) is kept as-is — every top-level directory is load-bearing at runtime (`scripts/`, `skills/` symlinked live into `/iris/data/skills`, `terraform/` for the opt-in cloud profile), and a filtered clone would diverge from the documented overlay/submodule pattern.
