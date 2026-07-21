@@ -496,8 +496,27 @@ prompt_secrets() {
   echo ""
   TELEGRAM_BOT_TOKEN=""
   if confirm "Set up Telegram integration?"; then
+    echo ""
+    echo "  ┌─ Telegram Bot Setup ────────────────────────────────────────────┐"
+    echo "  │                                                                 │"
+    echo "  │  1. Open Telegram, message  @BotFather                        │"
+    echo "  │     → confirm the handle is exactly @BotFather                │"
+    echo "  │                                                                 │"
+    echo "  │  2. Send  /newbot  and follow the prompts:                    │"
+    echo "  │     → display name (anything)                                 │"
+    echo "  │     → username (must end in 'bot' or '_bot')                  │"
+    echo "  │                                                                 │"
+    echo "  │  3. BotFather replies with your token — copy it               │"
+    echo "  │     (looks like  123456789:AAbecomeF-...)                     │"
+    echo "  │                                                                 │"
+    echo "  │  Full walkthrough incl. claiming/reclaiming the bot:           │"
+    echo "  │  docs/SETUP.md#telegram-setup                                  │"
+    echo "  └─────────────────────────────────────────────────────────────────┘"
+    echo ""
+    read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
     TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
     [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
+    [[ "$TELEGRAM_BOT_TOKEN" != *:* ]] && die "Telegram Bot Token should look like '123456789:AA...'. Got: ${TELEGRAM_BOT_TOKEN:0:10}..."
   else
     log "Skipping Telegram — you can add TELEGRAM_BOT_TOKEN to /iris/.env later."
   fi
