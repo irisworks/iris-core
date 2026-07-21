@@ -33,11 +33,13 @@
 		"croner": "^9.1.0",
 		"diff": "^8.0.2",
 		"dotenv": "^16.0.0",
+		"qrcode-terminal": "^0.12.0",
 		"ws": "^8.18.0"
 	},
 	"devDependencies": {
 		"@types/diff": "^7.0.2",
 		"@types/node": "^24.3.0",
+		"@types/qrcode-terminal": "^0.12.2",
 		"@types/ws": "^8.5.13",
 		"typescript": "^5.7.3"
 	},

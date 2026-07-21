@@ -257,6 +257,8 @@ export class TelegramBot implements ChannelTransport {
 	private offset = 0;
 	private chatNames = new Map<string, string>();
 	readonly claim: TelegramClaimManager;
+	// Set once start() resolves getMe(). Used to build the t.me deep link for the claim QR code.
+	username: string | null = null;
 
 	constructor(
 		handler: IrisTelegramHandler,
@@ -580,6 +582,7 @@ export class TelegramBot implements ChannelTransport {
 			);
 		}
 
+		this.username = me.username ?? null;
 		log.logInfo(`[telegram] Connected as @${me.username ?? me.first_name ?? "unknown"}`);
 		log.logConnected();
 		void this.poll();
@@ -661,15 +664,24 @@ export class TelegramBot implements ChannelTransport {
 		// ==========================================================================
 
 		if (!this.claim.isClaimed()) {
-			// Only accept a claim token — ignore everything else
-			const result = this.claim.tryClaimWith(chatId, text);
+			// A claim QR code encodes a t.me/<bot>?start=<token> deep link — tapping it
+			// sends "/start <token>" rather than the bare token, so unwrap that here.
+			const startMatch = text.match(/^\/start(?:@\S+)?\s+(\S+)$/);
+			const candidate = startMatch ? startMatch[1] : text;
+			const result = this.claim.tryClaimWith(chatId, candidate);
 			if (result === "claimed") {
 				log.logInfo(`[telegram] Bot claimed by chat_id ${chatId}`);
 				await this.postMessage(channelId, "✅ Bot claimed. You're all set — start chatting!");
 			} else if (result === "expired") {
 				await this.postMessage(channelId, "❌ Token expired. Restart Iris to get a new one.");
+			} else {
+				// Invalid token or no pending token — let the sender know the bot is alive
+				// and waiting, rather than going silent (looks indistinguishable from broken/wrong bot).
+				await this.postMessage(
+					channelId,
+					"This bot hasn't been claimed yet. Check your terminal/`journalctl -u iris -f` for the one-time claim token, then send it here.",
+				);
 			}
-			// Invalid token or no pending token — silently ignore
 			return;
 		}
 
