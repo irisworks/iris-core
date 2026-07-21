@@ -18,6 +18,7 @@
 
 ### Changed
 
+- `bootstrap.sh`'s Telegram prompt now shows an in-terminal setup box (message `@BotFather`, `/newbot`, token format) before asking for the token, mirroring the existing Slack/GitHub setup boxes — previously it jumped straight to `prompt_secret` with no guidance, unlike every other integration. Also validates the token contains a `:` (BotFather tokens are `<numeric id>:<hash>`) so a pasted Slack/GitHub token or stray whitespace fails fast instead of silently reaching `/iris/.env`.
 - `install.sh` now defaults `IRIS_CORE_REF` to the latest release tag (resolved via `git ls-remote --tags --sort=-v:refname`) instead of `main`, so the curl-pipe installer pins to a released version rather than whatever last merged to `main` (IRIS-122). Falls back to `main` if no `v*` tags exist on the remote (e.g. a fork with no releases yet). The `IRIS_CORE_REF` env override still works for developers who want a specific branch or tag. The full-repo clone (no sparse checkout) is kept as-is — every top-level directory is load-bearing at runtime (`scripts/`, `skills/` symlinked live into `/iris/data/skills`, `terraform/` for the opt-in cloud profile), and a filtered clone would diverge from the documented overlay/submodule pattern.
 
 ## [1.0.0] - 2026-07-21
