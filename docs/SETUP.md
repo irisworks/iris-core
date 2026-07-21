@@ -44,11 +44,14 @@ The script will:
 1. Install system dependencies (Docker, Node 22, jq, GitHub CLI). nginx and
    certbot are installed only if you configure a public domain; the Azure CLI
    and Terraform are installed only on the Key Vault paths (Options 2 and 4).
-2. Log into GitHub (`gh auth login` — browser or device code).
-3. Ask for your LLM provider (anthropic / openai / azure-foundry / amazon-bedrock / deepseek / mistral / custom) and API key. `custom` covers any other OpenAI-compatible endpoint — Kimi/Moonshot direct, a self-hosted gateway, etc. — and prompts for a base URL and provider name in addition to the key.
-4. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
-5. Optionally set up email sending (Resend) and a public domain.
-6. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
+2. Ask for your LLM provider (anthropic / openai / azure-foundry / amazon-bedrock / deepseek / mistral / custom) and API key. `custom` covers any other OpenAI-compatible endpoint — Kimi/Moonshot direct, a self-hosted gateway, etc. — and prompts for a base URL and provider name in addition to the key.
+3. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
+4. Optionally set up email sending (Resend), a public domain, and a GitHub
+   token — if you add one, you'll also name the repo Iris pushes her own
+   skill/sub-agent commits to (a fork of `iris-core`, or your own private
+   overlay repo — see [Extending Iris](overlay.md); never the upstream you
+   cloned from).
+5. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
 
 **Verify:**
 
