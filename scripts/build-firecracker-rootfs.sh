@@ -7,7 +7,7 @@
 #   sudo bash scripts/build-firecracker-rootfs.sh
 #
 # Produces:
-#   /var/lib/iris/firecracker/rootfs.ext4  (2 GiB, reusable base)
+#   /var/lib/iris/firecracker/rootfs.ext4  (sized to the image + headroom, min 2 GiB)
 #
 # Requirements:
 #   - iris-runtime:local Docker image already built
@@ -17,7 +17,8 @@ set -euo pipefail
 
 ROOTFS_DIR="/var/lib/iris/firecracker"
 ROOTFS_IMG="$ROOTFS_DIR/rootfs.ext4"
-ROOTFS_SIZE_MB=2048
+ROOTFS_MIN_SIZE_MB=2048
+ROOTFS_HEADROOM_MB=1024
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 log() { echo "[build-rootfs] $*"; }
@@ -32,8 +33,20 @@ done
 
 mkdir -p "$ROOTFS_DIR"
 
+# ── Create a temporary container so we can size the image from its
+# actual exported (uncompressed) contents, not the compressed image size ──
+log "Creating temporary container from iris-runtime:local..."
+CONTAINER_ID=$(docker create iris-runtime:local)
+EXPORT_TAR=$(mktemp /tmp/iris-rootfs-export-XXXXXX.tar)
+trap 'rm -f "$EXPORT_TAR"; docker rm -f "$CONTAINER_ID" &>/dev/null || true' EXIT
+docker export "$CONTAINER_ID" -o "$EXPORT_TAR"
+
+EXPORT_SIZE_MB=$(( ($(stat -c%s "$EXPORT_TAR") + 1024 * 1024 - 1) / (1024 * 1024) ))
+ROOTFS_SIZE_MB=$(( EXPORT_SIZE_MB + ROOTFS_HEADROOM_MB ))
+[[ $ROOTFS_SIZE_MB -lt $ROOTFS_MIN_SIZE_MB ]] && ROOTFS_SIZE_MB=$ROOTFS_MIN_SIZE_MB
+
 # ── Create blank ext4 image ──
-log "Creating blank ${ROOTFS_SIZE_MB}MiB ext4 image at $ROOTFS_IMG..."
+log "Creating blank ${ROOTFS_SIZE_MB}MiB ext4 image at $ROOTFS_IMG (export is ${EXPORT_SIZE_MB}MiB + ${ROOTFS_HEADROOM_MB}MiB headroom)..."
 dd if=/dev/zero of="$ROOTFS_IMG" bs=1M count="$ROOTFS_SIZE_MB" status=progress
 mkfs.ext4 -F -L iris-rootfs "$ROOTFS_IMG"
 
@@ -42,11 +55,11 @@ MOUNT_DIR=$(mktemp -d /tmp/iris-rootfs-XXXXXX)
 log "Mounting rootfs at $MOUNT_DIR..."
 mount -o loop "$ROOTFS_IMG" "$MOUNT_DIR"
 
-trap 'log "Cleaning up..."; umount "$MOUNT_DIR" 2>/dev/null; rm -rf "$MOUNT_DIR"' EXIT
+trap 'log "Cleaning up..."; umount "$MOUNT_DIR" 2>/dev/null; rm -rf "$MOUNT_DIR"; rm -f "$EXPORT_TAR"; docker rm -f "$CONTAINER_ID" &>/dev/null || true' EXIT
 
-log "Exporting iris-runtime:local Docker image into rootfs..."
-CONTAINER_ID=$(docker create iris-runtime:local)
-docker export "$CONTAINER_ID" | tar -xf - -C "$MOUNT_DIR"
+log "Extracting iris-runtime:local export into rootfs..."
+tar -xf "$EXPORT_TAR" -C "$MOUNT_DIR"
+rm -f "$EXPORT_TAR"
 docker rm -f "$CONTAINER_ID" &>/dev/null
 
 # ── Install iris-exec-server ──
