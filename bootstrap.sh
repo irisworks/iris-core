@@ -80,6 +80,9 @@ prompt_secret() {
   local hint=""; [[ -n "$default" ]] && hint=" [Enter to keep existing key on file]"
   read -r -s -p "[iris-bootstrap] $question$hint: " answer
   echo "" >&2
+  # Mobile paste (esp. from the Telegram app) commonly drags in a leading/trailing
+  # newline or space that a masked prompt gives no visual way to spot.
+  answer="$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   echo "${answer:-$default}"
 }
 
@@ -564,6 +567,11 @@ prompt_secrets() {
     echo "  │  3. BotFather replies with your token — copy it               │"
     echo "  │     (looks like  123456789:AAbecomeF-...)                     │"
     echo "  │                                                                 │"
+    echo "  │  Tip: do this at web.telegram.org (or the desktop app) in a   │"
+    echo "  │  browser tab on THIS machine — Telegram syncs the BotFather    │"
+    echo "  │  chat to every device, so you can copy-paste locally instead   │"
+    echo "  │  of moving the token off your phone.                          │"
+    echo "  │                                                                 │"
     echo "  │  Full walkthrough incl. claiming/reclaiming the bot:           │"
     echo "  │  docs/SETUP.md#telegram-setup                                  │"
     echo "  └─────────────────────────────────────────────────────────────────┘"
@@ -572,7 +580,17 @@ prompt_secrets() {
     while true; do
       TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
       [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
+      # BotFather tokens are "<numeric bot id>:<35-char hash>"; if stray text
+      # landed on the same line (e.g. a label was pasted along with it), pull
+      # just the token out of it. (Only the pasted line is ever seen here —
+      # `read` stops at the first newline — so this can't recover a token
+      # buried further down in a multi-line paste of BotFather's whole reply.)
+      if [[ "$TELEGRAM_BOT_TOKEN" != *:* ]]; then
+        EXTRACTED=$(grep -oE '[0-9]{6,}:[A-Za-z0-9_-]{30,}' <<< "$TELEGRAM_BOT_TOKEN" | head -n1)
+        [[ -n "$EXTRACTED" ]] && TELEGRAM_BOT_TOKEN="$EXTRACTED"
+      fi
       [[ "$TELEGRAM_BOT_TOKEN" != *:* ]] && die "Telegram Bot Token should look like '123456789:AA...'. Got: ${TELEGRAM_BOT_TOKEN:0:10}..."
+      log "  ✓ Got Telegram token: ${TELEGRAM_BOT_TOKEN:0:10}…${TELEGRAM_BOT_TOKEN: -4} (${#TELEGRAM_BOT_TOKEN} chars)"
       log "Verifying token with Telegram..."
       # Masked pastes give mobile users no feedback if the copy got mangled
       # (truncated, extra newline, autocorrect) — hit getMe live so a bad
