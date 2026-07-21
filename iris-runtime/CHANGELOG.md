@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-21
+
+First tagged release — the tag Phase 3 (iris-30signals migration) pins first. Consolidates the transport refactor (`ChannelTransport` interface, Slack/Telegram/Bridge/Web transports, `src/engine/` + `src/transports/*` layout), MCP server support, the reference web UI, and the release-hygiene/npm-readiness cleanup below.
+
 ### Removed
 
 - Skills distribution cleanup: deleted two skills that were internal-install artifacts, not shippable platform skills. `skills/watchdog/` hardcoded a specific install's Slack DM channel ID in four files, read legacy `/iris/data/.secrets/telegram-*` paths no current bootstrap creates, and referenced a `telegram/bot.js` skill that doesn't exist in this repo — its health-check role is replaced by the new generic `status` skill. `skills/promote-skill/` automated a preview→prod promotion flow that no longer exists (`spawn-agent` provisions one container per agent) and probed for `iris-<agent>-prod` container names that don't match current naming; its still-valid checklist (test with a safe case, no hardcoded secrets, kebab-case name, committed before use) is folded into `self-extend` rule 7. Remaining internal residue scrubbed from kept skills: `azure` resource group parameterized as `${IRIS_RESOURCE_GROUP:-iris-rg}`, `send-email` no longer claims the sending domain's DNS is "already configured", `firecracker-agent/SKILL.md` gained the YAML frontmatter every other skill has, and internal agent names in usage examples replaced with neutral ones. The opt-in profile skills (`azure`, `terraform`, `firecracker-agent`) stay in core — they're required by the documented Key Vault/Terraform and Firecracker profiles — but now state "Opt-in … profile only" in their frontmatter `description` (the line injected into the system prompt), and `firecracker-agent` gained the same opt-in banner `azure`/`terraform` already had, so zero-cloud installs aren't steered toward cloud tooling they don't have. No AWS skills exist or were added: Bedrock support is pure env-var provider config, and AWS infrastructure tooling belongs in an install overlay until there's a real AWS profile.
