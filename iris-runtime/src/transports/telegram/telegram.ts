@@ -644,15 +644,20 @@ export class TelegramBot implements ChannelTransport {
 		// ==========================================================================
 
 		if (!this.claim.isClaimed()) {
-			// Only accept a claim token — ignore everything else
 			const result = this.claim.tryClaimWith(chatId, text);
 			if (result === "claimed") {
 				log.logInfo(`[telegram] Bot claimed by chat_id ${chatId}`);
 				await this.postMessage(channelId, "✅ Bot claimed. You're all set — start chatting!");
 			} else if (result === "expired") {
 				await this.postMessage(channelId, "❌ Token expired. Restart Iris to get a new one.");
+			} else {
+				// Invalid token or no pending token — let the sender know the bot is alive
+				// and waiting, rather than going silent (looks indistinguishable from broken/wrong bot).
+				await this.postMessage(
+					channelId,
+					"This bot hasn't been claimed yet. Check your terminal/`journalctl -u iris -f` for the one-time claim token, then send it here.",
+				);
 			}
-			// Invalid token or no pending token — silently ignore
 			return;
 		}
 

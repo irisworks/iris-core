@@ -1635,6 +1635,7 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "  │                                                                 │"
     log "  │  Token expires in 10 minutes.                                  │"
     log "  └─────────────────────────────────────────────────────────────────┘"
+    log "  Tip: run 'sudo journalctl -u iris -n 50' to see this token as a scannable QR code."
   elif [[ "$CLAIM_STATUS" == "true" ]]; then
     log ""
     log "  ⚠ Telegram bot is already claimed from a previous run (state file: $CLAIM_FILE)."

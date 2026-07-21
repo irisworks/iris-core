@@ -2,6 +2,7 @@
 
 import { existsSync, mkdirSync, readdirSync, renameSync } from "fs";
 import { join, resolve } from "path";
+import qrcodeTerminal from "qrcode-terminal";
 import { startApiServer, type SessionInjector } from "./engine/api.js";
 import { startBridgeServer } from "./engine/bridge.js";
 import { downloadChannel } from "./transports/slack/download.js";
@@ -329,6 +330,8 @@ if (tgBot) {
 		log.logInfo("");
 		log.logInfo(`    ${token}`);
 		log.logInfo("");
+		log.logInfo("[telegram] Or scan this QR code and paste the token into the chat:");
+		qrcodeTerminal.generate(token, { small: true }, (qr) => console.log(qr));
 		log.logInfo("[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.");
 		log.logInfo("[telegram] To force re-claim later, set IRIS_TELEGRAM_FORCE_RECLAIM=true and restart.");
 	}

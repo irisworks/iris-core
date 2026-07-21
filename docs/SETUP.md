@@ -143,9 +143,12 @@ username ending in `bot`, and copy the token (`7123456789:AAF...`).
 It's written to `/iris/.env` automatically.
 
 **3. Claim the bot:** on first startup Iris prints a one-time claim token to the
-terminal (`journalctl -u iris -f` if you missed it). Send that exact token to your
-bot on Telegram; it replies `✅ Bot claimed`. Claim state persists across restarts.
-Tokens expire after 10 minutes — restart Iris to generate a new one.
+terminal, alongside a scannable QR code encoding the same token
+(`journalctl -u iris -f` if you missed it). Send that exact token to your
+bot on Telegram — either type it, or scan the QR code and paste it — and it
+replies `✅ Bot claimed`. Claim state persists across restarts. Tokens expire
+after 10 minutes — restart Iris to generate a new one. Until claimed, any other
+message to the bot gets a reminder to check the terminal for the claim token.
 
 **Reclaiming** (transfer to a different Telegram account):
 
