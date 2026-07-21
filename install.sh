@@ -13,14 +13,25 @@
 # Env overrides:
 #   IRIS_DIR        install root            (default /iris)
 #   IRIS_CORE_URL   repo to clone           (default https://github.com/irisworks/iris-core.git)
-#   IRIS_CORE_REF   branch or tag to check out (default main)
+#   IRIS_CORE_REF   branch or tag to check out (default: latest release tag, falls back to main)
 # ============================================================
 set -euo pipefail
 
 IRIS_DIR="${IRIS_DIR:-/iris}"
 IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}"
-IRIS_CORE_REF="${IRIS_CORE_REF:-main}"
 REPO_DIR="$IRIS_DIR/repo"
+
+if [ -n "${IRIS_CORE_REF:-}" ]; then
+	echo "[iris-install] Using IRIS_CORE_REF override: $IRIS_CORE_REF"
+else
+	echo "[iris-install] Resolving latest release tag from $IRIS_CORE_URL"
+	IRIS_CORE_REF="$(git ls-remote --tags --sort=-v:refname "$IRIS_CORE_URL" 'v*' 2>/dev/null \
+		| awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}$' | head -n1)"
+	if [ -z "$IRIS_CORE_REF" ]; then
+		echo "[iris-install] No release tags found — falling back to main"
+		IRIS_CORE_REF="main"
+	fi
+fi
 
 echo "[iris-install] Installing Iris into $REPO_DIR (ref: $IRIS_CORE_REF)"
 
