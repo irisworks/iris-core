@@ -1,9 +1,9 @@
 {
   "providers": {
-    "foundry-e2": {
+    "azure-foundry": {
       "baseUrl": "https://<your-account>.cognitiveservices.azure.com/openai/v1",
       "api": "openai-completions",
-      "apiKey": "FOUNDRY_E2_KEY",
+      "apiKey": "AZURE_FOUNDRY_KEY",
       "authHeader": true,
       "compat": {
         "supportsDeveloperRole": false,
@@ -13,7 +13,7 @@
       "models": [
         {
           "id": "gpt-4o",
-          "name": "GPT-4o (Foundry E2)",
+          "name": "GPT-4o (Azure Foundry)",
           "reasoning": false,
           "input": ["text", "image"],
           "contextWindow": 128000,
@@ -22,7 +22,7 @@
         },
         {
           "id": "gpt-4o-mini",
-          "name": "GPT-4o mini (Foundry E2)",
+          "name": "GPT-4o mini (Azure Foundry)",
           "reasoning": false,
           "input": ["text", "image"],
           "contextWindow": 128000,
@@ -31,7 +31,7 @@
         },
         {
           "id": "Kimi-K2.5",
-          "name": "Kimi K2.5 (Foundry E2)",
+          "name": "Kimi K2.5 (Azure Foundry)",
           "reasoning": true,
           "input": ["text"],
           "contextWindow": 131072,
@@ -40,10 +40,60 @@
         },
         {
           "id": "Kimi-K2.6",
-          "name": "Kimi K2.6 (Foundry E2)",
+          "name": "Kimi K2.6 (Azure Foundry)",
           "reasoning": true,
           "input": ["text"],
           "contextWindow": 131072,
+          "maxTokens": 16384,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    },
+    "deepseek": {
+      "baseUrl": "https://api.deepseek.com/v1",
+      "api": "openai-completions",
+      "apiKey": "DEEPSEEK_API_KEY",
+      "models": [
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek V3 (Chat)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 64000,
+          "maxTokens": 8192,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "deepseek-reasoner",
+          "name": "DeepSeek R1 (Reasoner)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 64000,
+          "maxTokens": 8192,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    },
+    "mistral": {
+      "baseUrl": "https://api.mistral.ai/v1",
+      "api": "mistral",
+      "apiKey": "MISTRAL_API_KEY",
+      "models": [
+        {
+          "id": "devstral-medium-2507",
+          "name": "Devstral Medium",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "mistral-large-latest",
+          "name": "Mistral Large",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 128000,
           "maxTokens": 16384,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }

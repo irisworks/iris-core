@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek and Mistral (including Devstral) as first-class LLM providers, alongside a rename of the Azure AI Foundry provider from `foundry-e2` to `azure-foundry` (issue #86). `data/models.json.template` gained `deepseek` (OpenAI-compatible, `DEEPSEEK_API_KEY`, `deepseek-chat`/`deepseek-reasoner`) and `mistral` (native `pi-ai` provider module, `MISTRAL_API_KEY`, `devstral-medium-2507`/`mistral-large-latest`) provider blocks — both config-only, no new SDK integration since `pi-ai` already ships provider modules for both API shapes. `bootstrap.sh` gained matching menu options, API-key prompts, and models.json generation branches. The `foundry-e2` → `azure-foundry` rename (a leftover from the original `eastus2` install) is a breaking key change for anyone with a hand-edited `models.json`, but `bootstrap.sh` migrates `IRIS_PROVIDER=foundry-e2` and the `FOUNDRY_E2_KEY`/`FOUNDRY-E2-KEY` secret to the new names automatically on re-run (`.env` sourcing and Key Vault fetch both fall back to the old names).
+
 ### Removed
 
 - Trimmed the `iris-runtime` Docker image from 2.75GB to ~930MB: dropped the unconditional Azure CLI install (693MB) — `az` runs on the host, installed by `bootstrap.sh` only on the Key Vault paths (Options 2/4 in `docs/SETUP.md`), and sub-agent containers mount `~/.azure` only when a bootstrap opts in (`agents/bootstrap.template.sh`); dropped the `wkhtmltopdf`/`xvfb`/`weasyprint`/`pypdf` PDF-generation stack (633MB) — unreferenced by any skill or `src/` code (the documented markdown→PDF self-extension demo in the README uses `pandoc`, never installed here); dropped the unused `@mariozechner/pi-web-ui` dependency from `iris-runtime/package.json` — never imported by `src/` (the reference web UI is hand-written static HTML/CSS/JS per `docs/web-ui.md`), and its own transitive deps (`pdfjs-dist`, `lucide`, `xlsx`, `docx-preview`, `ollama`, `@lmstudio/sdk`) were the single largest chunk of `node_modules`. This also fixes the `scripts/build-firecracker-rootfs.sh` headroom margin having less room to work with on hosts with less free disk.
+
 ### Fixed
 
 - `scripts/build-firecracker-rootfs.sh` sized the ext4 rootfs at a hardcoded 2048MiB, smaller than the uncompressed `iris-runtime:local` image (2.75GB+), so `tar -xf -` into the loop-mounted image failed partway through with `Cannot write: No space left on device`. The script now exports the container to a tarball first, sizes the ext4 image from the tarball's actual size plus 1024MiB headroom (floored at the previous 2048MiB minimum), then extracts into it.

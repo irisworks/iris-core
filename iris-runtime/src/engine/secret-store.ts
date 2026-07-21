@@ -23,7 +23,10 @@ export const SECRET_NAME_RE = /^[A-Za-z0-9_-]{1,128}$/;
  * so agent shells never inherit them).
  */
 export const SENSITIVE_ENV_VARS = [
+	"AZURE_FOUNDRY_KEY",
 	"FOUNDRY_E2_KEY",
+	"DEEPSEEK_API_KEY",
+	"MISTRAL_API_KEY",
 	"ANTHROPIC_API_KEY",
 	"OPENAI_API_KEY",
 	"AWS_ACCESS_KEY_ID",

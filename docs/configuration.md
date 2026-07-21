@@ -42,17 +42,29 @@ env vars.
 The runtime loads provider endpoints and model definitions from
 `<workspace>/models.json` (generated from `data/models.json.template` at bootstrap).
 Anthropic and OpenAI work out of the box; custom endpoints (Azure AI Foundry,
-AWS Bedrock) are defined in the template. Switch with:
+DeepSeek, Mistral, AWS Bedrock) are defined in the template. Switch with:
 
 ```bash
 IRIS_PROVIDER=anthropic
 IRIS_MODEL=claude-sonnet-4-5
 ```
 
-For Azure AI Foundry, bootstrap asks for the **bare account name** (e.g.
-`my-account-eastus2`), not the full endpoint URL. Pasted URLs or hostnames are
-trimmed automatically, and the generated `baseUrl` is validated — bootstrap aborts
-on a malformed hostname and warns if it doesn't resolve in DNS.
+For Azure AI Foundry (`azure-foundry`), bootstrap asks for the **bare account
+name** (e.g. `my-account-eastus2`), not the full endpoint URL. Pasted URLs or
+hostnames are trimmed automatically, and the generated `baseUrl` is validated —
+bootstrap aborts on a malformed hostname and warns if it doesn't resolve in DNS.
+
+DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
+API key — DeepSeek's API is OpenAI-compatible, Mistral's uses `pi-ai`'s native
+`mistral` provider module. Both ship ready-to-use model entries in the template
+(`deepseek-chat` / `deepseek-reasoner`, `devstral-medium-2507` /
+`mistral-large-latest`).
+
+> `azure-foundry` was named `foundry-e2` before this repo supported more than
+> one custom provider; the name was a leftover from its original `eastus2`
+> deployment. Bootstrap migrates `IRIS_PROVIDER=foundry-e2` and the
+> `FOUNDRY_E2_KEY`/`FOUNDRY-E2-KEY` secret automatically on re-run, but a
+> hand-edited `models.json` needs its `foundry-e2` key renamed manually.
 
 ## MCP servers
 
