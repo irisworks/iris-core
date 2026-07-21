@@ -27,7 +27,7 @@ env vars.
 | `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
-| `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | Identity injected into the constitution |
+| `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills, sub-agents, and self-edits to (the `github` skill's push target — see [Extending Iris](overlay.md)). Use a fork of `iris-core` or your own private overlay repo, never the upstream you cloned from. Prompted by bootstrap alongside the GitHub token; also injected into the constitution as Iris's identity source |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in credential broker, see [Secrets](secrets.md) |
 | `IRIS_SECRET_KEY_FILE` / `IRIS_SECRET_STORE_FILE` | `/iris/secret.key` / `/iris/secrets.json.enc` | Encrypted store paths (`store` mode) |

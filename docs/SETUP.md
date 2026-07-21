@@ -44,11 +44,14 @@ The script will:
 1. Install system dependencies (Docker, Node 22, jq, GitHub CLI). nginx and
    certbot are installed only if you configure a public domain; the Azure CLI
    and Terraform are installed only on the Key Vault paths (Options 2 and 4).
-2. Log into GitHub (`gh auth login` — browser or device code).
-3. Ask for your LLM provider (anthropic / openai / azure-foundry / amazon-bedrock / deepseek / mistral / custom) and API key. `custom` covers any other OpenAI-compatible endpoint — Kimi/Moonshot direct, a self-hosted gateway, etc. — and prompts for a base URL and provider name in addition to the key.
-4. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
-5. Optionally set up email sending (Resend) and a public domain.
-6. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
+2. Ask for your LLM provider (anthropic / openai / azure-foundry / amazon-bedrock / deepseek / mistral / custom) and API key. `custom` covers any other OpenAI-compatible endpoint — Kimi/Moonshot direct, a self-hosted gateway, etc. — and prompts for a base URL and provider name in addition to the key.
+3. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
+4. Optionally set up email sending (Resend), a public domain, and a GitHub
+   token — if you add one, you'll also name the repo Iris pushes her own
+   skill/sub-agent commits to (a fork of `iris-core`, or your own private
+   overlay repo — see [Extending Iris](overlay.md); never the upstream you
+   cloned from).
+5. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
 
 **Verify:**
 
@@ -140,12 +143,20 @@ messages until you claim it with a one-time token.
 username ending in `bot`, and copy the token (`7123456789:AAF...`).
 
 **2. Add the token:** enter it when bootstrap asks (`Set up Telegram integration? [Y/n]`).
-It's written to `/iris/.env` automatically.
+Bootstrap verifies it live against Telegram's `getMe` API before continuing —
+useful if you're pasting from a phone, where a masked terminal prompt gives no
+feedback on a mangled copy — and re-prompts if it's rejected. Once verified,
+it's written to `/iris/.env` automatically.
 
 **3. Claim the bot:** on first startup Iris prints a one-time claim token to the
-terminal (`journalctl -u iris -f` if you missed it). Send that exact token to your
-bot on Telegram; it replies `✅ Bot claimed`. Claim state persists across restarts.
-Tokens expire after 10 minutes — restart Iris to generate a new one.
+terminal, alongside a scannable QR code (`journalctl -u iris -f` if you missed
+it). The QR code is a `t.me/<bot>?start=<token>` deep link — scanning it opens
+a chat with the bot with the token pre-filled, so a tap on Send claims it with
+no typing at all. You can also just send the plaintext token by hand. Either
+way the bot replies `✅ Bot claimed`. Claim state persists across restarts.
+Tokens expire after 10 minutes — restart Iris to generate a new one. Until
+claimed, any other message to the bot gets a reminder to check the terminal
+for the claim token.
 
 **Reclaiming** (transfer to a different Telegram account):
 
