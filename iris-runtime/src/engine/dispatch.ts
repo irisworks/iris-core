@@ -91,11 +91,17 @@ export function resolveDispatch(
 	}
 
 	if (config.container === "chat") {
-		// Admin-command-shaped text addressed to the bot (a mention or a DM) is always
-		// intercepted — swallowed silently in channels without adminCommands enabled,
-		// executed in channels with it — never dispatched through as ordinary chat text.
+		// Admin-command-shaped text in a channel with adminCommands enabled is always
+		// intercepted — mention or DM or bare ambient top-level text — so `stop`/`compact`/
+		// `reset` work the same whether or not the message explicitly @mentions the bot
+		// (matching Telegram's unprefixed /commands, which need no such targeting either).
+		if (adminCommand && config.adminCommands) {
+			return { kind: "admin", cmd: adminCommand };
+		}
+		// adminCommands disabled: admin-command-shaped text addressed to the bot (a mention
+		// or a DM) is still swallowed rather than dispatched through as ordinary chat text.
 		if (adminCommand && (input.isMention || input.isDM)) {
-			return config.adminCommands ? { kind: "admin", cmd: adminCommand } : { kind: "ignore" };
+			return { kind: "ignore" };
 		}
 		if (input.isDM || input.isMention) return { kind: "chat" };
 		// Non-mention channel message: only a top-level, all-top-level-triggered

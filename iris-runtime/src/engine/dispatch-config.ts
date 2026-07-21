@@ -16,7 +16,8 @@
 //                                 a pre-existing (API-created) session
 //                                 continues
 //   adminCommands     — stop/compact/reset text commands are intercepted
-//                        (chat container only; mentions/DMs only)
+//                        (chat container only; mentions/DMs/bare top-level
+//                        text all count — no @mention required)
 //   acceptBotMessages — bot/integration messages are admitted as triggers
 //                        (chat container, all-top-level trigger only)
 //   replayMissed      — pre-startup top-level messages are replayed instead

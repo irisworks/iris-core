@@ -336,6 +336,18 @@ test("message: DM admin commands run in admin mode, swallowed in dm mode", async
 	assert.equal(calls.events.length, 0); // swallowed everywhere, dispatched nowhere
 });
 
+test("message: bare top-level admin commands run in admin mode without a mention, swallowed in dm mode", async () => {
+	const { calls, message } = makeBot({
+		channels: { CADM: { mode: "admin" } },
+		isRunning: () => true,
+	});
+	message({ text: "compact", channel: "CADM", user: "U1", ts: "1000.0004a" });
+	message({ text: "compact", channel: "CPLAIN", user: "U1", ts: "1000.0004b" });
+	await settle();
+	assert.deepEqual(calls.compacts, ["CADM"]);
+	assert.equal(calls.events.length, 0); // swallowed everywhere, dispatched nowhere
+});
+
 test("message: edited messages and other subtypes are ignored", async () => {
 	const { calls, message } = makeBot({});
 	message({ text: "edited", channel: "D1", user: "U1", ts: "1000.0006", channel_type: "im", subtype: "message_changed" });
