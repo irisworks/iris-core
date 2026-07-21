@@ -154,8 +154,14 @@ example:
 - **`formattingSection`** — the platform's markup dialect, spelled out
   precisely enough the model doesn't guess wrong (Telegram's is a Markdown
   subset converted to HTML server-side; the profile explicitly calls out
-  what does *not* convert — single `*asterisks*`, `[markdown](links)` — so
-  the model doesn't use GitHub-flavored Markdown by habit).
+  what does *not* convert — single `*asterisks*` — so the model doesn't use
+  GitHub-flavored Markdown by habit. `[markdown](links)` are still
+  discouraged in the prompt, but `toTelegramHtml()` handles them
+  defensively either way: an `http(s)` URL becomes a real `<a href>`, and
+  anything else — most commonly the model wrapping an attachment's filename
+  in link syntax, since the file itself already went out separately via the
+  `attach` tool — is reduced to plain label text instead of leaking raw
+  `[text](url)` bracket syntax into the chat).
 - **`directorySection(channels, users)`** — a function, not a static string,
   because it renders the live channel/user list into ID↔name mapping
   guidance for that run.

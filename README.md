@@ -41,7 +41,11 @@ Iris as a systemd service.
 The installer itself always runs from `main`, but it pins the cloned repo to the
 **latest release tag** (not `main`) by default, so you get a stable, released
 version rather than whatever merged an hour ago. Override with
-`IRIS_CORE_REF=main` (or any branch/tag) for development installs.
+`IRIS_CORE_REF=main` (or any branch/tag) for development installs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/irisworks/iris-core/main/install.sh | IRIS_CORE_REF=main bash
+```
 
 **Verify:** `sudo systemctl status iris`, then in Slack: `@iris what model are you?`
 

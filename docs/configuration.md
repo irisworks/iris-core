@@ -42,17 +42,39 @@ env vars.
 The runtime loads provider endpoints and model definitions from
 `<workspace>/models.json` (generated from `data/models.json.template` at bootstrap).
 Anthropic and OpenAI work out of the box; custom endpoints (Azure AI Foundry,
-AWS Bedrock) are defined in the template. Switch with:
+DeepSeek, Mistral, AWS Bedrock) are defined in the template. Switch with:
 
 ```bash
 IRIS_PROVIDER=anthropic
 IRIS_MODEL=claude-sonnet-4-5
 ```
 
-For Azure AI Foundry, bootstrap asks for the **bare account name** (e.g.
-`my-account-eastus2`), not the full endpoint URL. Pasted URLs or hostnames are
-trimmed automatically, and the generated `baseUrl` is validated — bootstrap aborts
-on a malformed hostname and warns if it doesn't resolve in DNS.
+For Azure AI Foundry (`azure-foundry`), bootstrap asks for the **bare account
+name** (e.g. `my-account-eastus2`), not the full endpoint URL. Pasted URLs or
+hostnames are trimmed automatically, and the generated `baseUrl` is validated —
+bootstrap aborts on a malformed hostname and warns if it doesn't resolve in DNS.
+
+DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
+API key — both go through `pi-ai`'s `openai-completions` provider module,
+since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
+`pi-ai`'s native `mistral` provider module hangs indefinitely on every call
+(see the Fixed entry in `iris-runtime/CHANGELOG.md` — do not switch Mistral's
+`api` back to `"mistral"`). Both ship ready-to-use model entries in the
+template (`deepseek-chat` / `deepseek-reasoner`, `devstral-medium-latest` /
+`mistral-large-latest`).
+
+For any other OpenAI-compatible endpoint (Kimi/Moonshot direct, a self-hosted
+vLLM/Ollama gateway, etc.), pick `custom` — bootstrap asks for a short provider
+name (used as the `models.json` key), the base URL, the API key, and the exact
+model id the endpoint expects, and writes a fresh `openai-completions` provider
+block. To add one without bootstrap, add a block by hand — see
+[data/README.md](../data/README.md) for the shape.
+
+> `azure-foundry` was named `foundry-e2` before this repo supported more than
+> one custom provider; the name was a leftover from its original `eastus2`
+> deployment. Bootstrap migrates `IRIS_PROVIDER=foundry-e2` and the
+> `FOUNDRY_E2_KEY`/`FOUNDRY-E2-KEY` secret automatically on re-run, but a
+> hand-edited `models.json` needs its `foundry-e2` key renamed manually.
 
 ## MCP servers
 
