@@ -24,7 +24,6 @@
 		"@mariozechner/pi-agent-core": "0.66.1",
 		"@mariozechner/pi-ai": "0.66.1",
 		"@mariozechner/pi-coding-agent": "0.66.1",
-		"@mariozechner/pi-web-ui": "^0.66.1",
 		"@modelcontextprotocol/sdk": "^1.29.0",
 		"@sinclair/typebox": "^0.34.0",
 		"@slack/socket-mode": "^2.0.0",

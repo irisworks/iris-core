@@ -7,21 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     ca-certificates \
     iproute2 \
-    wkhtmltopdf \
-    xvfb \
-    fontconfig \
-    fonts-liberation \
-    python3 \
-    python3-pip \
-    libpango-1.0-0 \
-    libpangoft2-1.0-0 \
-    libgdk-pixbuf2.0-0 \
-    libcairo2 \
-    && pip3 install weasyprint pypdf requests --break-system-packages --quiet \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Azure CLI
-RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 
 WORKDIR /app
 
