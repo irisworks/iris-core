@@ -3,10 +3,13 @@
 ## models.json
 
 `models.json` registers **custom LLM providers** — OpenAI-compatible endpoints
-(Azure AI Foundry, self-hosted gateways) or AWS Bedrock. You only need it when
-going beyond the built-in providers: with a plain Anthropic or OpenAI key, just
-set `IRIS_PROVIDER` / `IRIS_MODEL` in `/iris/.env` and skip this file entirely
-(see [Configuration](../docs/configuration.md)).
+(Azure AI Foundry, DeepSeek, Mistral, self-hosted gateways), or AWS Bedrock.
+Mistral goes through the OpenAI-compatible path, not `pi-ai`'s native `mistral`
+provider module, which hangs indefinitely on every call — see
+`iris-runtime/CHANGELOG.md`. You only need this file when going beyond the
+built-in providers: with a plain
+Anthropic or OpenAI key, just set `IRIS_PROVIDER` / `IRIS_MODEL` in `/iris/.env`
+and skip this file entirely (see [Configuration](../docs/configuration.md)).
 
 To use it, copy `models.json.template` to `models.json` and adapt:
 
@@ -21,18 +24,25 @@ Example:
 ```json
 {
   "providers": {
-    "foundry-e2": {
+    "azure-foundry": {
       "baseUrl": "https://my-ai-account.cognitiveservices.azure.com/openai/v1",
       "api": "openai-completions",
-      "apiKey": "FOUNDRY_E2_KEY",
+      "apiKey": "AZURE_FOUNDRY_KEY",
       ...
     }
   }
 }
 ```
 
-Here `FOUNDRY_E2_KEY` is looked up as `FOUNDRY_E2_KEY=...` in `/iris/.env`, or as
-a Key Vault secret of the same name when `IRIS_KEY_VAULT` is set.
+Here `AZURE_FOUNDRY_KEY` is looked up as `AZURE_FOUNDRY_KEY=...` in `/iris/.env`,
+or as a Key Vault secret of the same name when `IRIS_KEY_VAULT` is set. The
+template also ships ready-to-use `deepseek` and `mistral` provider blocks
+(`DEEPSEEK_API_KEY` / `MISTRAL_API_KEY`).
+
+> Note: `azure-foundry` was named `foundry-e2` before it supported providers
+> beyond Azure's `eastus2` deployment — bootstrap.sh migrates old `.env`/Key
+> Vault entries automatically, but hand-edited `models.json` files on existing
+> installs need the provider key renamed manually.
 
 ## Other Data Files
 

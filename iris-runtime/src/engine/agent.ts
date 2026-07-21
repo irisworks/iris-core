@@ -531,7 +531,9 @@ function createRunner(
 		// lives in .env/process.env.
 		const brokered = await getSecretProvider().get(`${provider.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`);
 		if (brokered) return brokered;
-		// Fallback env var: FOUNDRY_E2_KEY, ANTHROPIC_API_KEY, etc.
+		// Fallback env var: ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, etc. (models.json's
+		// per-provider "apiKey" field, handled above, is checked first — that's how
+		// providers with a non-standard env var name like AZURE_FOUNDRY_KEY work.)
 		const envFallback = process.env[`${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`];
 		if (envFallback) return envFallback;
 		throw new Error(

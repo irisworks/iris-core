@@ -45,7 +45,7 @@ The script will:
    certbot are installed only if you configure a public domain; the Azure CLI
    and Terraform are installed only on the Key Vault paths (Options 2 and 4).
 2. Log into GitHub (`gh auth login` — browser or device code).
-3. Ask for your LLM provider (anthropic / openai / foundry-e2 / amazon-bedrock) and API key.
+3. Ask for your LLM provider (anthropic / openai / azure-foundry / amazon-bedrock / deepseek / mistral / custom) and API key. `custom` covers any other OpenAI-compatible endpoint — Kimi/Moonshot direct, a self-hosted gateway, etc. — and prompts for a base URL and provider name in addition to the key.
 4. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
 5. Optionally set up email sending (Resend) and a public domain.
 6. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
