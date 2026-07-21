@@ -92,10 +92,13 @@ export function resolveDispatch(
 
 	if (config.container === "chat") {
 		// Admin-command-shaped text in a channel with adminCommands enabled is always
-		// intercepted — mention or DM or bare ambient top-level text — so `stop`/`compact`/
+		// intercepted — mention, DM, or bare top-level ambient text — so `stop`/`compact`/
 		// `reset` work the same whether or not the message explicitly @mentions the bot
 		// (matching Telegram's unprefixed /commands, which need no such targeting either).
-		if (adminCommand && config.adminCommands) {
+		// A buried thread reply that's neither a mention nor a DM stays exempt: a reply
+		// that happens to be the literal word "stop" mid-conversation, not addressed to
+		// the bot, shouldn't abort/wipe/compact the whole channel out from under it.
+		if (adminCommand && config.adminCommands && (input.isMention || input.isDM || !input.threadTs)) {
 			return { kind: "admin", cmd: adminCommand };
 		}
 		// adminCommands disabled: admin-command-shaped text addressed to the bot (a mention

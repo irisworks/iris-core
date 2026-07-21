@@ -348,6 +348,19 @@ test("message: bare top-level admin commands run in admin mode without a mention
 	assert.equal(calls.events.length, 0); // swallowed everywhere, dispatched nowhere
 });
 
+test("message: a buried thread reply that isn't a mention or DM does not trigger admin commands", async () => {
+	const { calls, message } = makeBot({
+		channels: { CADM: { mode: "admin" } },
+		isRunning: () => true,
+	});
+	message({ text: "stop", channel: "CADM", user: "U1", ts: "1000.0004c", thread_ts: "999.0001" });
+	await settle();
+	assert.equal(calls.stops.length, 0);
+	assert.equal(calls.compacts.length, 0);
+	assert.equal(calls.resets.length, 0);
+	assert.equal(calls.events.length, 0); // ignored, not dispatched as chat either
+});
+
 test("message: edited messages and other subtypes are ignored", async () => {
 	const { calls, message } = makeBot({});
 	message({ text: "edited", channel: "D1", user: "U1", ts: "1000.0006", channel_type: "im", subtype: "message_changed" });
