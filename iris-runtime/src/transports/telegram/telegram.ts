@@ -192,6 +192,13 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// escapeHtml doesn't escape quotes (fine for text nodes); href="..." needs them
+// escaped too, or a URL containing a literal `"` could break out of the
+// attribute and inject arbitrary HTML.
+function escapeAttr(text: string): string {
+	return escapeHtml(text).replace(/"/g, "&quot;");
+}
+
 function toTelegramHtml(text: string): string {
 	// Fenced code blocks: ```lang\ncode\n``` → <pre><code>code</code></pre>
 	text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code: string) =>
@@ -203,7 +210,7 @@ function toTelegramHtml(text: string): string {
 	// usually referencing a file sent separately via the attach tool, so drop the
 	// bracket syntax rather than leave it showing literally.
 	text = text.replace(/\[([^\]\n]+)\]\((\S+)\)/g, (_, label: string, url: string) =>
-		/^https?:\/\//i.test(url) ? `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>` : escapeHtml(label),
+		/^https?:\/\//i.test(url) ? `<a href="${escapeAttr(url)}">${escapeHtml(label)}</a>` : escapeHtml(label),
 	);
 	// Bold: **text**
 	text = text.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
