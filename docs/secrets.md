@@ -39,7 +39,13 @@ service names to upstreams and auth headers. A caller hits
 broker injects the stored secret into the configured header and forwards over
 TLS (streaming, so SSE works). Plaintext reads of proxy-only secrets return
 403 for **every** token — the value can be used, never seen. Bundled services:
-`resend`, `github`, `anthropic`, `openai`, `slack`; operators add more in
+`resend`, `github`, `anthropic`, `openai`, `slack`, `deepseek`, `mistral`, and
+`azure-foundry` (the last requires `AZURE_FOUNDRY_ACCOUNT` in
+`/iris/broker/broker.env`, since its upstream is a per-install account
+subdomain rather than a fixed URL — bootstrap sets this automatically when
+`IRIS_PROVIDER=azure-foundry`). `amazon-bedrock` isn't bundled — it
+authenticates via AWS SigV4 request signing, which this header-injection
+gateway can't express. Operators add more services in
 `/iris/broker/services.json`:
 
 ```json
