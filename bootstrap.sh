@@ -139,6 +139,27 @@ if [[ "$SETUP_MODE" == true && "$KEYVAULT_EXPLICIT" == false ]]; then
   echo ""
 fi
 
+# Re-run (no --setup) without an explicit --keyvault/--no-keyvault: infer the
+# storage method from the existing install instead of falling back to the
+# Key Vault path (NO_KEYVAULT's hardcoded default). That default previously
+# sent a plain re-run like `bootstrap.sh --secrets-mode=proxy` down the Key
+# Vault branch, which (a) demands an unwanted az login and (b) — far worse —
+# its non-setup "restore mode" only restores IRIS_PROVIDER/IRIS_MODEL, not
+# the LLM_API_KEY-derived vars, so re-running it clobbered the real provider
+# API key in /iris/.env with an empty string before the secrets-mode
+# migration could pick it up. Reading IRIS_KEY_VAULT back from the existing
+# .env keeps re-runs on whichever path the install actually uses.
+if [[ "$SETUP_MODE" == false && "$KEYVAULT_EXPLICIT" == false && -f "$IRIS_DIR/.env" ]]; then
+  EXISTING_KV_NAME=$(grep -m1 '^IRIS_KEY_VAULT=' "$IRIS_DIR/.env" | cut -d= -f2- || true)
+  if [[ -z "$EXISTING_KV_NAME" ]]; then
+    NO_KEYVAULT=true
+    log "Existing install has no Key Vault configured — using /iris/.env (pass --keyvault to opt in)."
+  else
+    KV_NAME="${KV_NAME:-$EXISTING_KV_NAME}"
+    log "Existing install uses Key Vault '$KV_NAME' — continuing with Azure login (pass --no-keyvault to switch to /iris/.env)."
+  fi
+fi
+
 docker_cmd() {
   if docker info &>/dev/null; then docker "$@"; else sudo docker "$@"; fi
 }
