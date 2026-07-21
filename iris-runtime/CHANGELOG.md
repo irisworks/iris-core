@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- A tool call that never completed (e.g. `bash` still running when `IRIS_LLM_TIMEOUT_SECS` fires and `session.agent.abort()` cuts the run) left a trailing assistant `tool_call` in session history with no matching `tool_result`. Every following prompt then resent that malformed history, which most OpenAI-schema providers reject outright (observed as Mistral's `400 status code (no body)`) — and because the resulting error message carries no usable content, the threshold-based auto-compactor's own summarizer call hit the same 400, so it kept "compacting" into an empty `[No conversation provided to summarize]` on every single turn instead of ever recovering. `src/engine/agent.ts` now runs `sanitizeDanglingToolCalls()` before every LLM call (alongside the existing pre-run auto-compaction check): it closes any dangling `tool_call` with a synthetic error `tool_result` and drops empty-content assistant stubs left over from prior aborted/errored attempts, so the request sent to the provider is always well-formed.
 - `bootstrap.sh`'s optional GitHub token prompt now also asks which repo Iris
   should push her own skill/sub-agent commits to, storing it as
   `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` (env path: written to `/iris/.env`;
