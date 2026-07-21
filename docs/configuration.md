@@ -55,9 +55,12 @@ hostnames are trimmed automatically, and the generated `baseUrl` is validated �
 bootstrap aborts on a malformed hostname and warns if it doesn't resolve in DNS.
 
 DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
-API key — DeepSeek's API is OpenAI-compatible, Mistral's uses `pi-ai`'s native
-`mistral` provider module. Both ship ready-to-use model entries in the template
-(`deepseek-chat` / `deepseek-reasoner`, `devstral-medium-2507` /
+API key — both go through `pi-ai`'s `openai-completions` provider module,
+since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
+`pi-ai`'s native `mistral` provider module hangs indefinitely on every call
+(see the Fixed entry in `iris-runtime/CHANGELOG.md` — do not switch Mistral's
+`api` back to `"mistral"`). Both ship ready-to-use model entries in the
+template (`deepseek-chat` / `deepseek-reasoner`, `devstral-medium-latest` /
 `mistral-large-latest`).
 
 For any other OpenAI-compatible endpoint (Kimi/Moonshot direct, a self-hosted

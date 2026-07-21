@@ -383,7 +383,7 @@ prompt_secrets() {
       azure-foundry)  default_model="Kimi-K2.6" ;;
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       deepseek)       default_model="deepseek-chat" ;;
-      mistral)        default_model="devstral-medium-2507" ;;
+      mistral)        default_model="devstral-medium-latest" ;;
       custom)         default_model="" ;;
       *)              default_model="gpt-4o" ;;
     esac
@@ -851,10 +851,11 @@ MODELJSON
   "providers": {
     "mistral": {
       "baseUrl": "https://api.mistral.ai/v1",
-      "api": "mistral",
+      "api": "openai-completions",
       "apiKey": "MISTRAL_API_KEY",
+      "compat": { "supportsStore": false },
       "models": [
-        { "id": "devstral-medium-2507", "name": "Devstral Medium", "reasoning": false, "input": ["text"],          "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "devstral-medium-latest", "name": "Devstral Medium", "reasoning": false, "input": ["text"],          "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
         { "id": "mistral-large-latest", "name": "Mistral Large",  "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
     }

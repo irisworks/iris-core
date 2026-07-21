@@ -76,11 +76,12 @@
     },
     "mistral": {
       "baseUrl": "https://api.mistral.ai/v1",
-      "api": "mistral",
+      "api": "openai-completions",
       "apiKey": "MISTRAL_API_KEY",
+      "compat": { "supportsStore": false },
       "models": [
         {
-          "id": "devstral-medium-2507",
+          "id": "devstral-medium-latest",
           "name": "Devstral Medium",
           "reasoning": false,
           "input": ["text"],

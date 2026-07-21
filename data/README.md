@@ -3,8 +3,11 @@
 ## models.json
 
 `models.json` registers **custom LLM providers** — OpenAI-compatible endpoints
-(Azure AI Foundry, DeepSeek, self-hosted gateways), Mistral's native API, or AWS
-Bedrock. You only need it when going beyond the built-in providers: with a plain
+(Azure AI Foundry, DeepSeek, Mistral, self-hosted gateways), or AWS Bedrock.
+Mistral goes through the OpenAI-compatible path, not `pi-ai`'s native `mistral`
+provider module, which hangs indefinitely on every call — see
+`iris-runtime/CHANGELOG.md`. You only need this file when going beyond the
+built-in providers: with a plain
 Anthropic or OpenAI key, just set `IRIS_PROVIDER` / `IRIS_MODEL` in `/iris/.env`
 and skip this file entirely (see [Configuration](../docs/configuration.md)).
 
