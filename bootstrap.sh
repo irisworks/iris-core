@@ -139,6 +139,27 @@ if [[ "$SETUP_MODE" == true && "$KEYVAULT_EXPLICIT" == false ]]; then
   echo ""
 fi
 
+# Re-run (no --setup) without an explicit --keyvault/--no-keyvault: infer the
+# storage method from the existing install instead of falling back to the
+# Key Vault path (NO_KEYVAULT's hardcoded default). That default previously
+# sent a plain re-run like `bootstrap.sh --secrets-mode=proxy` down the Key
+# Vault branch, which (a) demands an unwanted az login and (b) — far worse —
+# its non-setup "restore mode" only restores IRIS_PROVIDER/IRIS_MODEL, not
+# the LLM_API_KEY-derived vars, so re-running it clobbered the real provider
+# API key in /iris/.env with an empty string before the secrets-mode
+# migration could pick it up. Reading IRIS_KEY_VAULT back from the existing
+# .env keeps re-runs on whichever path the install actually uses.
+if [[ "$SETUP_MODE" == false && "$KEYVAULT_EXPLICIT" == false && -f "$IRIS_DIR/.env" ]]; then
+  EXISTING_KV_NAME=$(grep -m1 '^IRIS_KEY_VAULT=' "$IRIS_DIR/.env" | cut -d= -f2- || true)
+  if [[ -z "$EXISTING_KV_NAME" ]]; then
+    NO_KEYVAULT=true
+    log "Existing install has no Key Vault configured — using /iris/.env (pass --keyvault to opt in)."
+  else
+    KV_NAME="${KV_NAME:-$EXISTING_KV_NAME}"
+    log "Existing install uses Key Vault '$KV_NAME' — continuing with Azure login (pass --no-keyvault to switch to /iris/.env)."
+  fi
+fi
+
 docker_cmd() {
   if docker info &>/dev/null; then docker "$@"; else sudo docker "$@"; fi
 }
@@ -1165,6 +1186,16 @@ ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 
+# get-secret/set-secret are documented and invoked by many skills (send-email,
+# github, transcribe-audio, etc.) as bare commands, but nothing else puts a
+# skill's own directory on PATH — the sandbox executor spawns `sh -c "<cmd>"`
+# with the plain inherited PATH. Symlinking them into /usr/local/bin (same as
+# iris-secret above) makes the documented bare-command usage actually work,
+# instead of relying on the model discovering the "not found" failure and
+# falling back to the skill's absolute path every time.
+sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret" /usr/local/bin/get-secret
+sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret" /usr/local/bin/set-secret
+
 if [[ -n "$GENERATED_MODELS_JSON" && -f "$GENERATED_MODELS_JSON" ]]; then
   cp "$GENERATED_MODELS_JSON" "$IRIS_DIR/data/models.json"
 elif [[ -f "$REPO_DIR/data/models.json" ]]; then
@@ -1241,6 +1272,14 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
     echo "IRIS_API_TOKEN=$(e "$IRIS_API_TOKEN")"
   fi
 } | sudo tee "$IRIS_DIR/.env" > /dev/null
+# sudo tee creates the file as root; iris.service runs as User=$TARGET_USER
+# and reads this file itself via dotenv/config at process startup (there's no
+# systemd EnvironmentFile= — the unit never touches it, so ownership matters).
+# Without this chown, iris.service can't read its own config: dotenv silently
+# loads nothing, every var falls back to hardcoded defaults, and anything
+# resolved through the broker (IRIS_SECRET_BROKER_URL) or Telegram/Slack
+# breaks with no obvious error tying it back to a permissions problem.
+sudo chown "$TARGET_USER:$TARGET_USER" "$IRIS_DIR/.env"
 sudo chmod 600 "$IRIS_DIR/.env"
 log "✓ /iris/.env written"
 
@@ -1697,9 +1736,11 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "    IRIS_TELEGRAM_FORCE_RECLAIM=true sudo systemctl restart iris"
   elif [[ ! -r "$CLAIM_FILE" ]]; then
     log ""
-    log "  ⚠ Could not read $CLAIM_FILE after 30s — likely a permissions issue between"
-    log "    the account running this script (${TARGET_USER}) and iris.service's User=."
-    log "    Check ownership with: ls -la ${IRIS_DIR}/data/data/ && sudo systemctl status iris"
+    log "  ⚠ Could not read $CLAIM_FILE after 30s — either Telegram never connected, or"
+    log "    iris.service (User=${TARGET_USER}) can't read its own /iris/.env (dotenv fails"
+    log "    silently, so every setting falls back to hardcoded defaults, including a"
+    log "    disabled Telegram transport)."
+    log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/data/ && sudo journalctl -u iris -n 30"
   else
     log ""
     log "  ⚠ No Telegram claim token appeared after 30s. Check: sudo journalctl -u iris -n 50"
