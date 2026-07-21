@@ -109,6 +109,11 @@ iris-secret import-env /iris/.env --prune   # migrate known secret vars out of .
 The CLI talks to the broker daemon in proxy mode and to the store file
 directly in store mode.
 
+The agent-facing `get-secret NAME` / `set-secret NAME` commands are symlinked
+onto `PATH` (`/usr/local/bin`, same as `iris-secret`) by `bootstrap.sh`, so the
+bare-command form documented above and used by skills works directly — no need
+to invoke them through a skill's absolute path.
+
 ## Migration from `.env`
 
 Re-running `bootstrap.sh --secrets-mode=<mode>` does everything: generates the
