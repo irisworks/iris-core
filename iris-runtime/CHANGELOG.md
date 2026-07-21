@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/build-firecracker-rootfs.sh` sized the ext4 rootfs at a hardcoded 2048MiB, smaller than the uncompressed `iris-runtime:local` image (2.75GB+), so `tar -xf -` into the loop-mounted image failed partway through with `Cannot write: No space left on device`. The script now exports the container to a tarball first, sizes the ext4 image from the tarball's actual size plus 1024MiB headroom (floored at the previous 2048MiB minimum), then extracts into it.
+
 ### Changed
 
 - `install.sh` now defaults `IRIS_CORE_REF` to the latest release tag (resolved via `git ls-remote --tags --sort=-v:refname`) instead of `main`, so the curl-pipe installer pins to a released version rather than whatever last merged to `main` (IRIS-122). Falls back to `main` if no `v*` tags exist on the remote (e.g. a fork with no releases yet). The `IRIS_CORE_REF` env override still works for developers who want a specific branch or tag. The full-repo clone (no sparse checkout) is kept as-is — every top-level directory is load-bearing at runtime (`scripts/`, `skills/` symlinked live into `/iris/data/skills`, `terraform/` for the opt-in cloud profile), and a filtered clone would diverge from the documented overlay/submodule pattern.
