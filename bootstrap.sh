@@ -1635,7 +1635,15 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "  │                                                                 │"
     log "  │  Token expires in 10 minutes.                                  │"
     log "  └─────────────────────────────────────────────────────────────────┘"
-    log "  Tip: run 'sudo journalctl -u iris -n 50' to see this token as a scannable QR code."
+    if [[ -d "${RUNTIME_DIR}/node_modules/qrcode-terminal" ]]; then
+      log ""
+      while IFS= read -r qr_line; do log "  $qr_line"; done < <(
+        cd "$RUNTIME_DIR" && node -e "require('qrcode-terminal').generate(process.argv[1], { small: true })" "$CLAIM_TOKEN"
+      )
+    else
+      log ""
+      log "  Tip: run 'sudo journalctl -u iris -n 50' to see this token as a scannable QR code."
+    fi
   elif [[ "$CLAIM_STATUS" == "true" ]]; then
     log ""
     log "  ⚠ Telegram bot is already claimed from a previous run (state file: $CLAIM_FILE)."
