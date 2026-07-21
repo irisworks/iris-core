@@ -142,6 +142,28 @@ destroyed with the VM.
 
 ## Skills
 
+| Skill | Description |
+|---|---|
+| `aimfox` | Query and manage Aimfox LinkedIn outreach |
+| `azure` | Azure CLI patterns (opt-in) |
+| `firecracker-agent` | Provision/destroy Firecracker microVM sub-agents |
+| `get-secret` | Retrieve secrets via platform abstraction |
+| `github` | Commit and push repo changes to GitHub |
+| `mcp` | Add/remove/test MCP servers |
+| `schedule` | Create, list, and cancel reminders and recurring tasks |
+| `search-web` | Search the web using Perplexity AI API |
+| `self-extend` | Protocol for creating new reusable skills |
+| `self-heal` | Sub-agent diagnostics and escalation |
+| `send-email` | Send email via Resend API |
+| `serve-public` | Expose local port as public HTTPS subdomain |
+| `set-secret` | Store secrets or mint drop links |
+| `spawn-agent` | Create new sub-agent scaffolds |
+| `status` | Health snapshot of this install |
+| `store-file` | Persist files via storage abstraction |
+| `terraform` | Plan and apply Terraform safely |
+| `transcribe-audio` | Transcribe audio to text via Whisper |
+| **`word-count`** | Count words, lines, and characters in text |
+
 A skill is a directory with a `SKILL.md` (YAML frontmatter: `name`, `description`)
 plus any scripts it needs. Workspace-level skills live in `<workspace>/skills/`
 (symlinked to this repo's `skills/` for hot reload); per-channel skills in
