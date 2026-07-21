@@ -1243,6 +1243,14 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
     echo "IRIS_API_TOKEN=$(e "$IRIS_API_TOKEN")"
   fi
 } | sudo tee "$IRIS_DIR/.env" > /dev/null
+# sudo tee creates the file as root; iris.service runs as User=$TARGET_USER
+# and reads this file itself via dotenv/config at process startup (there's no
+# systemd EnvironmentFile= — the unit never touches it, so ownership matters).
+# Without this chown, iris.service can't read its own config: dotenv silently
+# loads nothing, every var falls back to hardcoded defaults, and anything
+# resolved through the broker (IRIS_SECRET_BROKER_URL) or Telegram/Slack
+# breaks with no obvious error tying it back to a permissions problem.
+sudo chown "$TARGET_USER:$TARGET_USER" "$IRIS_DIR/.env"
 sudo chmod 600 "$IRIS_DIR/.env"
 log "✓ /iris/.env written"
 
@@ -1676,9 +1684,11 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "    IRIS_TELEGRAM_FORCE_RECLAIM=true sudo systemctl restart iris"
   elif [[ ! -r "$CLAIM_FILE" ]]; then
     log ""
-    log "  ⚠ Could not read $CLAIM_FILE after 30s — likely a permissions issue between"
-    log "    the account running this script (${TARGET_USER}) and iris.service's User=."
-    log "    Check ownership with: ls -la ${IRIS_DIR}/data/data/ && sudo systemctl status iris"
+    log "  ⚠ Could not read $CLAIM_FILE after 30s — either Telegram never connected, or"
+    log "    iris.service (User=${TARGET_USER}) can't read its own /iris/.env (dotenv fails"
+    log "    silently, so every setting falls back to hardcoded defaults, including a"
+    log "    disabled Telegram transport)."
+    log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/data/ && sudo journalctl -u iris -n 30"
   else
     log ""
     log "  ⚠ No Telegram claim token appeared after 30s. Check: sudo journalctl -u iris -n 50"
