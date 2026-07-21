@@ -566,8 +566,6 @@ prompt_secrets() {
     echo "  │                                                                 │"
     echo "  │  3. BotFather replies with your token — copy it               │"
     echo "  │     (looks like  123456789:AAbecomeF-...)                     │"
-    echo "  │     Pasting BotFather's whole reply also works — Iris will    │"
-    echo "  │     pull the token out of it for you.                         │"
     echo "  │                                                                 │"
     echo "  │  Tip: do this at web.telegram.org (or the desktop app) in a   │"
     echo "  │  browser tab on THIS machine — Telegram syncs the BotFather    │"
@@ -580,10 +578,13 @@ prompt_secrets() {
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
     while true; do
-      TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token (or paste BotFather's whole message)")
+      TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
       [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
-      # BotFather tokens are "<numeric bot id>:<35-char hash>"; if the whole chat
-      # message got pasted instead of just the token, pull the token out of it.
+      # BotFather tokens are "<numeric bot id>:<35-char hash>"; if stray text
+      # landed on the same line (e.g. a label was pasted along with it), pull
+      # just the token out of it. (Only the pasted line is ever seen here —
+      # `read` stops at the first newline — so this can't recover a token
+      # buried further down in a multi-line paste of BotFather's whole reply.)
       if [[ "$TELEGRAM_BOT_TOKEN" != *:* ]]; then
         EXTRACTED=$(grep -oE '[0-9]{6,}:[A-Za-z0-9_-]{30,}' <<< "$TELEGRAM_BOT_TOKEN" | head -n1)
         [[ -n "$EXTRACTED" ]] && TELEGRAM_BOT_TOKEN="$EXTRACTED"

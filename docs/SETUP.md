@@ -146,12 +146,11 @@ from — Telegram syncs the BotFather chat to every logged-in device, so you can
 copy-paste the token locally instead of moving it off your phone.
 
 **2. Add the token:** enter it when bootstrap asks (`Set up Telegram integration? [Y/n]`).
-Pasting BotFather's whole reply also works — bootstrap extracts the token out of it —
-and it echoes back a masked confirmation (`123456789…xyz9 (46 chars)`) so you can
-confirm the paste landed. Bootstrap then verifies the token live against Telegram's
-`getMe` API before continuing — useful if you're pasting from a phone, where a masked
-terminal prompt gives no feedback on a mangled copy — and re-prompts if it's rejected.
-Once verified, it's written to `/iris/.env` automatically.
+It echoes back a masked confirmation (`123456789…xyz9 (46 chars)`) so you can confirm
+the paste landed, then verifies the token live against Telegram's `getMe` API before
+continuing — useful if you're pasting from a phone, where a masked terminal prompt
+gives no feedback on a mangled copy — and re-prompts if it's rejected. Once verified,
+it's written to `/iris/.env` automatically.
 
 **3. Claim the bot:** on first startup Iris prints a one-time claim token to the
 terminal, alongside a scannable QR code (`journalctl -u iris -f` if you missed
