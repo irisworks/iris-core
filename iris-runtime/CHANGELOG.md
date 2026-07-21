@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `bootstrap.sh` verifies the Telegram bot token live against `getMe` right after you paste it, instead of writing it to `/iris/.env` unchecked and only surfacing a bad token as a runtime crash later (see #90). A masked terminal prompt (`read -s`) gives no visual feedback on a mangled paste, which is especially easy to hit typing/pasting a token from a phone; bootstrap now shows `✓ Verified: connected as @<bot username>` on success, or the Telegram API's rejection reason and a re-prompt on failure, so a bad token is caught immediately instead of at runtime. Docs: `docs/SETUP.md` Telegram Setup section updated.
+
 ### Removed
 
 - Trimmed the `iris-runtime` Docker image from 2.75GB to ~930MB: dropped the unconditional Azure CLI install (693MB) — `az` runs on the host, installed by `bootstrap.sh` only on the Key Vault paths (Options 2/4 in `docs/SETUP.md`), and sub-agent containers mount `~/.azure` only when a bootstrap opts in (`agents/bootstrap.template.sh`); dropped the `wkhtmltopdf`/`xvfb`/`weasyprint`/`pypdf` PDF-generation stack (633MB) — unreferenced by any skill or `src/` code (the documented markdown→PDF self-extension demo in the README uses `pandoc`, never installed here); dropped the unused `@mariozechner/pi-web-ui` dependency from `iris-runtime/package.json` — never imported by `src/` (the reference web UI is hand-written static HTML/CSS/JS per `docs/web-ui.md`), and its own transitive deps (`pdfjs-dist`, `lucide`, `xlsx`, `docx-preview`, `ollama`, `@lmstudio/sdk`) were the single largest chunk of `node_modules`. This also fixes the `scripts/build-firecracker-rootfs.sh` headroom margin having less room to work with on hosts with less free disk.

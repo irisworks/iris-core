@@ -496,8 +496,23 @@ prompt_secrets() {
   echo ""
   TELEGRAM_BOT_TOKEN=""
   if confirm "Set up Telegram integration?"; then
-    TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
-    [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
+    while true; do
+      TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
+      [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
+      log "Verifying token with Telegram..."
+      # Masked pastes give mobile users no feedback if the copy got mangled
+      # (truncated, extra newline, autocorrect) — hit getMe live so a bad
+      # token is caught here instead of surfacing as a runtime crash later.
+      TG_ME=$(curl -s --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" 2>/dev/null || true)
+      if [[ -n "$TG_ME" ]] && [[ "$(echo "$TG_ME" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
+        TG_USERNAME=$(echo "$TG_ME" | jq -r '.result.username // "unknown"')
+        log "✓ Verified: connected as @${TG_USERNAME}"
+        break
+      fi
+      TG_ERR=$(echo "${TG_ME:-}" | jq -r '.description // empty' 2>/dev/null || true)
+      log "⚠ Could not verify this token with Telegram${TG_ERR:+ (${TG_ERR})}."
+      confirm "Try a different token?" || die "Telegram Bot Token could not be verified."
+    done
   else
     log "Skipping Telegram — you can add TELEGRAM_BOT_TOKEN to /iris/.env later."
   fi
