@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `install.sh` now defaults `IRIS_CORE_REF` to the latest release tag (resolved via `git ls-remote --tags --sort=-v:refname`) instead of `main`, so the curl-pipe installer pins to a released version rather than whatever last merged to `main` (IRIS-122). Falls back to `main` if no `v*` tags exist on the remote (e.g. a fork with no releases yet). The `IRIS_CORE_REF` env override still works for developers who want a specific branch or tag. The full-repo clone (no sparse checkout) is kept as-is — every top-level directory is load-bearing at runtime (`scripts/`, `skills/` symlinked live into `/iris/data/skills`, `terraform/` for the opt-in cloud profile), and a filtered clone would diverge from the documented overlay/submodule pattern.
+
 ## [1.0.0] - 2026-07-21
 
 First tagged release — the tag Phase 3 (iris-30signals migration) pins first. Consolidates the transport refactor (`ChannelTransport` interface, Slack/Telegram/Bridge/Web transports, `src/engine/` + `src/transports/*` layout), MCP server support, the reference web UI, and the release-hygiene/npm-readiness cleanup below.
