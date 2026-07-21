@@ -330,8 +330,16 @@ if (tgBot) {
 		log.logInfo("");
 		log.logInfo(`    ${token}`);
 		log.logInfo("");
-		log.logInfo("[telegram] Or scan this QR code and paste the token into the chat:");
-		qrcodeTerminal.generate(token, { small: true }, (qr) => console.log(qr));
+		if (tgBot.username) {
+			// Deep link opens a chat with the bot with "/start <token>" pre-filled —
+			// scanning it and hitting Send claims the bot without typing anything.
+			const claimLink = `https://t.me/${tgBot.username}?start=${token}`;
+			log.logInfo("[telegram] Or scan this QR code to open the bot with the token pre-filled:");
+			qrcodeTerminal.generate(claimLink, { small: true }, (qr) => console.log(qr));
+		} else {
+			log.logInfo("[telegram] Or scan this QR code and paste the token into the chat:");
+			qrcodeTerminal.generate(token, { small: true }, (qr) => console.log(qr));
+		}
 		log.logInfo("[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.");
 		log.logInfo("[telegram] To force re-claim later, set IRIS_TELEGRAM_FORCE_RECLAIM=true and restart.");
 	}

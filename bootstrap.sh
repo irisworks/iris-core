@@ -1635,10 +1635,24 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "  │                                                                 │"
     log "  │  Token expires in 10 minutes.                                  │"
     log "  └─────────────────────────────────────────────────────────────────┘"
+
+    # Resolve the bot's @username so the QR code can be a t.me deep link
+    # (scan -> chat opens with "/start <token>" pre-filled -> tap Send) instead
+    # of just the raw token (scan -> manually copy/paste).
+    BOT_USERNAME=$(curl -sf "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | jq -r '.result.username // empty' 2>/dev/null || true)
+    if [[ -n "$BOT_USERNAME" ]]; then
+      CLAIM_QR_PAYLOAD="https://t.me/${BOT_USERNAME}?start=${CLAIM_TOKEN}"
+      QR_HINT="scan to open the bot with the token pre-filled"
+    else
+      CLAIM_QR_PAYLOAD="$CLAIM_TOKEN"
+      QR_HINT="scan and paste the token into the chat"
+    fi
+
     if [[ -d "${RUNTIME_DIR}/node_modules/qrcode-terminal" ]]; then
       log ""
+      log "  (${QR_HINT})"
       while IFS= read -r qr_line; do log "  $qr_line"; done < <(
-        cd "$RUNTIME_DIR" && node -e "require('qrcode-terminal').generate(process.argv[1], { small: true })" "$CLAIM_TOKEN"
+        cd "$RUNTIME_DIR" && node -e "require('qrcode-terminal').generate(process.argv[1], { small: true })" "$CLAIM_QR_PAYLOAD"
       )
     else
       log ""
