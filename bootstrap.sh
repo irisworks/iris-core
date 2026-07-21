@@ -1300,6 +1300,9 @@ IRIS_SECRET_KEY_FILE=${IRIS_DIR}/broker/secret.key
 IRIS_SECRET_STORE_FILE=${IRIS_DIR}/broker/secrets.json.enc
 IRIS_BROKER_SERVICES_FILE=${IRIS_DIR}/broker/services.json
 BROKERENV
+    if [[ "$IRIS_PROVIDER" == "azure-foundry" && -n "${FOUNDRY_ACCOUNT:-}" ]]; then
+      echo "AZURE_FOUNDRY_ACCOUNT=${FOUNDRY_ACCOUNT}" | sudo tee -a "$IRIS_DIR/broker/broker.env" > /dev/null
+    fi
     sudo chown -R iris-broker:iris-broker "$IRIS_DIR/broker"
     sudo chmod 700 "$IRIS_DIR/broker"
     sudo chmod 600 "$IRIS_DIR/broker/secret.key" "$IRIS_DIR/broker/broker.env"
