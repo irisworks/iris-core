@@ -782,7 +782,15 @@ export function createTelegramContext(event: TelegramEvent, bot: TelegramBot, st
 		replaceMessage: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
 				try {
-					if (messageId) {
+					// If tool-call updates were posted in between, editing the original
+					// "Thinking..." message would put the final answer above them —
+					// post it fresh at the bottom instead so message order matches
+					// chronological order. With no intervening messages, editing in
+					// place (as before) keeps a simple exchange to a single message.
+					if (messageId && extraMessageIds.length > 0) {
+						await bot.deleteMessage(event.channel, messageId);
+						messageId = await bot.postMessage(event.channel, text);
+					} else if (messageId) {
 						await bot.finalizeMessage(event.channel, messageId, text);
 					} else {
 						messageId = await bot.postMessage(event.channel, text);
