@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-22
+
 ### Added
 
 - `bootstrap.sh` verifies the Telegram bot token live against `getMe` right after you paste it, instead of writing it to `/iris/.env` unchecked and only surfacing a bad token as a runtime crash later (see #90). A masked terminal prompt (`read -s`) gives no visual feedback on a mangled paste, which is especially easy to hit typing/pasting a token from a phone; bootstrap now shows `✓ Verified: connected as @<bot username>` on success, or the Telegram API's rejection reason and a re-prompt on failure, so a bad token is caught immediately instead of at runtime. Docs: `docs/SETUP.md` Telegram Setup section updated.
