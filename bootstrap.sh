@@ -1159,6 +1159,16 @@ ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 
+# get-secret/set-secret are documented and invoked by many skills (send-email,
+# github, transcribe-audio, etc.) as bare commands, but nothing else puts a
+# skill's own directory on PATH — the sandbox executor spawns `sh -c "<cmd>"`
+# with the plain inherited PATH. Symlinking them into /usr/local/bin (same as
+# iris-secret above) makes the documented bare-command usage actually work,
+# instead of relying on the model discovering the "not found" failure and
+# falling back to the skill's absolute path every time.
+sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret" /usr/local/bin/get-secret
+sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret" /usr/local/bin/set-secret
+
 if [[ -n "$GENERATED_MODELS_JSON" && -f "$GENERATED_MODELS_JSON" ]]; then
   cp "$GENERATED_MODELS_JSON" "$IRIS_DIR/data/models.json"
 elif [[ -f "$REPO_DIR/data/models.json" ]]; then
