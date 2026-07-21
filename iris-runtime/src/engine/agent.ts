@@ -522,10 +522,33 @@ function createRunner(
 		}
 	})();
 
+	// pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders)
+	// falls back to echoing the raw config string when the env var it names isn't
+	// set: `process.env[config] || config`. models.json's custom providers (azure-foundry,
+	// deepseek, mistral, custom) configure "apiKey" as an env var name (e.g.
+	// "MISTRAL_API_KEY"), so once store/proxy mode scrubs that var from process.env
+	// after migrating the real key to the secret store, getApiKeyAndHeaders reports
+	// `ok: true, apiKey: "MISTRAL_API_KEY"` — the literal env var name, not a real
+	// key — and our broker fallback below never runs. Detect that specific echo so
+	// we treat it as unresolved instead of sending the env var's own name as the key.
+	const configuredApiKeyField = ((): string | undefined => {
+		if (!existsSync(workspaceModelsJson)) return undefined;
+		try {
+			const parsed = JSON.parse(readFileSync(workspaceModelsJson, "utf8")) as {
+				providers?: Record<string, { apiKey?: string }>;
+			};
+			return parsed.providers?.[provider]?.apiKey;
+		} catch {
+			return undefined;
+		}
+	})();
+
 	// getApiKey: ModelRegistry handles env var lookup + auth storage for any provider
 	const getApiKey = async (): Promise<string> => {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok && auth.apiKey) return auth.apiKey;
+		const isUnresolvedEchoedConfig =
+			auth.ok && Boolean(configuredApiKeyField) && auth.apiKey === configuredApiKeyField;
+		if (auth.ok && auth.apiKey && !isUnresolvedEchoedConfig) return auth.apiKey;
 		// Secrets provider (store/broker in store/proxy modes; env-backed
 		// otherwise) — this is what keeps the LLM key working once it no longer
 		// lives in .env/process.env.
