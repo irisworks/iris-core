@@ -60,6 +60,13 @@ API key — DeepSeek's API is OpenAI-compatible, Mistral's uses `pi-ai`'s native
 (`deepseek-chat` / `deepseek-reasoner`, `devstral-medium-2507` /
 `mistral-large-latest`).
 
+For any other OpenAI-compatible endpoint (Kimi/Moonshot direct, a self-hosted
+vLLM/Ollama gateway, etc.), pick `custom` — bootstrap asks for a short provider
+name (used as the `models.json` key), the base URL, the API key, and the exact
+model id the endpoint expects, and writes a fresh `openai-completions` provider
+block. To add one without bootstrap, add a block by hand — see
+[data/README.md](../data/README.md) for the shape.
+
 > `azure-foundry` was named `foundry-e2` before this repo supported more than
 > one custom provider; the name was a leftover from its original `eastus2`
 > deployment. Bootstrap migrates `IRIS_PROVIDER=foundry-e2` and the

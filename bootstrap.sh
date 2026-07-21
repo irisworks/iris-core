@@ -361,6 +361,7 @@ prompt_secrets() {
     echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)"
     echo "  5) deepseek        — DeepSeek V3 / R1"
     echo "  6) mistral         — Mistral Large / Devstral"
+    echo "  7) custom          — any other OpenAI-compatible endpoint (Kimi/Moonshot direct, self-hosted, etc.)"
     read -r -p "[iris-bootstrap] Choice [1]: " provider_choice
     case "${provider_choice:-1}" in
       1) IRIS_PROVIDER="anthropic" ;;
@@ -369,6 +370,7 @@ prompt_secrets() {
       4) IRIS_PROVIDER="amazon-bedrock" ;;
       5) IRIS_PROVIDER="deepseek" ;;
       6) IRIS_PROVIDER="mistral" ;;
+      7) IRIS_PROVIDER="custom" ;;
       *) IRIS_PROVIDER="anthropic" ;;
     esac
   fi
@@ -382,15 +384,23 @@ prompt_secrets() {
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       deepseek)       default_model="deepseek-chat" ;;
       mistral)        default_model="devstral-medium-2507" ;;
+      custom)         default_model="" ;;
       *)              default_model="gpt-4o" ;;
     esac
-    IRIS_MODEL=$(prompt "Model" "$default_model")
+    if [[ "$IRIS_PROVIDER" == "custom" ]]; then
+      IRIS_MODEL=$(prompt "Model id (exact string the endpoint expects, e.g. kimi-k2-0905-preview)" "")
+      [[ -z "$IRIS_MODEL" ]] && die "Model id is required for a custom provider."
+    else
+      IRIS_MODEL=$(prompt "Model" "$default_model")
+    fi
   fi
   log "Provider: $IRIS_PROVIDER / $IRIS_MODEL"
 
   # ── API Key / Credentials ──
   LLM_API_KEY=""
   FOUNDRY_ACCOUNT=""
+  CUSTOM_BASE_URL=""
+  CUSTOM_PROVIDER_NAME=""
   AWS_REGION_INPUT=""
   AWS_ACCESS_KEY_INPUT=""
   AWS_SECRET_KEY_INPUT=""
@@ -436,6 +446,27 @@ prompt_secrets() {
     mistral)
       LLM_API_KEY=$(prompt_secret "Mistral API key")
       [[ -z "$LLM_API_KEY" ]] && die "Mistral API key is required."
+      ;;
+    custom)
+      # Reuse settings already on file instead of forcing re-entry on every re-run.
+      EXISTING_CUSTOM_KEY=""
+      EXISTING_CUSTOM_BASE_URL=""
+      EXISTING_CUSTOM_NAME=""
+      if [[ -f "$IRIS_DIR/.env" ]]; then
+        EXISTING_CUSTOM_KEY=$(grep -E '^CUSTOM_API_KEY=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+        EXISTING_CUSTOM_BASE_URL=$(grep -E '^CUSTOM_BASE_URL=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+        EXISTING_CUSTOM_NAME=$(grep -E '^CUSTOM_PROVIDER_NAME=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+      fi
+      if [[ -z "$EXISTING_CUSTOM_KEY" && "$NO_KEYVAULT" == false && -n "$KV_NAME" ]]; then
+        EXISTING_CUSTOM_KEY=$(az keyvault secret show --vault-name "$KV_NAME" --name "CUSTOM-API-KEY" --query value -o tsv 2>/dev/null || true)
+      fi
+      [[ -n "$EXISTING_CUSTOM_KEY" ]] && log "Found an existing custom-provider API key on this machine — reusing it."
+      CUSTOM_PROVIDER_NAME=$(prompt "Short name for this provider (lowercase, used as the models.json key, e.g. kimi)" "${EXISTING_CUSTOM_NAME:-kimi}")
+      [[ -z "$CUSTOM_PROVIDER_NAME" ]] && die "Provider name is required."
+      CUSTOM_BASE_URL=$(prompt "Base URL (OpenAI-compatible, e.g. https://api.moonshot.ai/v1)" "$EXISTING_CUSTOM_BASE_URL")
+      [[ -z "$CUSTOM_BASE_URL" ]] && die "Base URL is required."
+      LLM_API_KEY=$(prompt_secret "API key for $CUSTOM_PROVIDER_NAME" "$EXISTING_CUSTOM_KEY")
+      [[ -z "$LLM_API_KEY" ]] && die "API key is required."
       ;;
     amazon-bedrock)
       echo ""
@@ -568,6 +599,9 @@ OPENAI_API_KEY=""
 AZURE_FOUNDRY_KEY=""
 DEEPSEEK_API_KEY=""
 MISTRAL_API_KEY=""
+CUSTOM_API_KEY=""
+CUSTOM_BASE_URL=""
+CUSTOM_PROVIDER_NAME=""
 AWS_ACCESS_KEY_ID=""
 AWS_SECRET_ACCESS_KEY=""
 AWS_REGION=""
@@ -656,6 +690,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
       azure-foundry)  seed_secret "AZURE-FOUNDRY-KEY"     "$LLM_API_KEY" ;;
       deepseek)       seed_secret "DEEPSEEK-API-KEY"      "$LLM_API_KEY" ;;
       mistral)        seed_secret "MISTRAL-API-KEY"       "$LLM_API_KEY" ;;
+      custom)         seed_secret "CUSTOM-API-KEY"        "$LLM_API_KEY" ;;
       amazon-bedrock) seed_secret "AWS-ACCESS-KEY-ID"     "${AWS_ACCESS_KEY_INPUT:-}"
                       seed_secret "AWS-SECRET-ACCESS-KEY" "${AWS_SECRET_KEY_INPUT:-}"
                       seed_secret "AWS-REGION"            "${AWS_REGION_INPUT:-us-east-1}"
@@ -726,6 +761,7 @@ if [[ "$NO_KEYVAULT" == true ]]; then
     azure-foundry)  AZURE_FOUNDRY_KEY="${LLM_API_KEY:-}" ;;
     deepseek)       DEEPSEEK_API_KEY="${LLM_API_KEY:-}" ;;
     mistral)        MISTRAL_API_KEY="${LLM_API_KEY:-}" ;;
+    custom)         CUSTOM_API_KEY="${LLM_API_KEY:-}" ;;
     amazon-bedrock) AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_INPUT:-}"
                     AWS_SECRET_ACCESS_KEY="${AWS_SECRET_KEY_INPUT:-}"
                     AWS_REGION="${AWS_REGION_INPUT:-}"
@@ -826,6 +862,25 @@ MODELJSON
 }
 MODELJSON
     log "✓ models.json generated for Mistral"
+  elif [[ "$IRIS_PROVIDER" == "custom" && -n "${CUSTOM_BASE_URL:-}" ]]; then
+    CUSTOM_PROVIDER_KEY=$(echo "${CUSTOM_PROVIDER_NAME:-custom}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//')
+    [[ -z "$CUSTOM_PROVIDER_KEY" ]] && CUSTOM_PROVIDER_KEY="custom"
+    cat > /tmp/iris-models.json << MODELJSON
+{
+  "providers": {
+    "${CUSTOM_PROVIDER_KEY}": {
+      "baseUrl": "${CUSTOM_BASE_URL}",
+      "api": "openai-completions",
+      "apiKey": "CUSTOM_API_KEY",
+      "models": [
+        { "id": "${IRIS_MODEL}", "name": "${IRIS_MODEL}", "reasoning": false, "input": ["text"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
+      ]
+    }
+  }
+}
+MODELJSON
+    IRIS_PROVIDER="$CUSTOM_PROVIDER_KEY"
+    log "✓ models.json generated for custom provider '$CUSTOM_PROVIDER_KEY' ($CUSTOM_BASE_URL)"
   elif [[ "$IRIS_PROVIDER" == "amazon-bedrock" ]]; then
     BEDROCK_REGION="${AWS_REGION_INPUT:-us-east-1}"
     cat > /tmp/iris-models.json << MODELJSON
@@ -986,6 +1041,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   [[ -z "$AZURE_FOUNDRY_KEY" ]] && AZURE_FOUNDRY_KEY=$(fetch_secret "FOUNDRY-E2-KEY")
   DEEPSEEK_API_KEY=$(fetch_secret "DEEPSEEK-API-KEY")
   MISTRAL_API_KEY=$(fetch_secret "MISTRAL-API-KEY")
+  CUSTOM_API_KEY=$(fetch_secret "CUSTOM-API-KEY")
   GITHUB_TOKEN=$(fetch_secret "GITHUB-TOKEN")
   SLACK_APP_TOKEN=$(fetch_secret "SLACK-APP-TOKEN")
   SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
@@ -996,7 +1052,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   AWS_REGION=$(fetch_secret "AWS-REGION")
   AWS_PROFILE=$(fetch_secret "AWS-PROFILE")
 
-  if [[ -z "$ANTHROPIC_API_KEY" && -z "$OPENAI_API_KEY" && -z "$AZURE_FOUNDRY_KEY" && -z "$DEEPSEEK_API_KEY" && -z "$MISTRAL_API_KEY" && -z "$AWS_ACCESS_KEY_ID" && -z "$AWS_PROFILE" && "$IRIS_PROVIDER" != "amazon-bedrock" ]]; then
+  if [[ -z "$ANTHROPIC_API_KEY" && -z "$OPENAI_API_KEY" && -z "$AZURE_FOUNDRY_KEY" && -z "$DEEPSEEK_API_KEY" && -z "$MISTRAL_API_KEY" && -z "$CUSTOM_API_KEY" && -z "$AWS_ACCESS_KEY_ID" && -z "$AWS_PROFILE" && "$IRIS_PROVIDER" != "amazon-bedrock" ]]; then
     die "No LLM API key found in Key Vault '$KV_NAME'. Run --setup or seed the key manually."
   fi
 
@@ -1096,6 +1152,9 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "AZURE_FOUNDRY_KEY=$(e "${AZURE_FOUNDRY_KEY:-}")"
   echo "DEEPSEEK_API_KEY=$(e "${DEEPSEEK_API_KEY:-}")"
   echo "MISTRAL_API_KEY=$(e "${MISTRAL_API_KEY:-}")"
+  echo "CUSTOM_API_KEY=$(e "${CUSTOM_API_KEY:-}")"
+  echo "CUSTOM_BASE_URL=$(e "${CUSTOM_BASE_URL:-}")"
+  echo "CUSTOM_PROVIDER_NAME=$(e "${CUSTOM_PROVIDER_NAME:-}")"
   echo "ANTHROPIC_API_KEY=$(e "${ANTHROPIC_API_KEY:-}")"
   echo "OPENAI_API_KEY=$(e "${OPENAI_API_KEY:-}")"
   echo "AWS_ACCESS_KEY_ID=$(e "${AWS_ACCESS_KEY_ID:-}")"

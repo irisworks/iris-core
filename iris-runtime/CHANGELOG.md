@@ -5,6 +5,7 @@
 ### Added
 
 - DeepSeek and Mistral (including Devstral) as first-class LLM providers, alongside a rename of the Azure AI Foundry provider from `foundry-e2` to `azure-foundry` (issue #86). `data/models.json.template` gained `deepseek` (OpenAI-compatible, `DEEPSEEK_API_KEY`, `deepseek-chat`/`deepseek-reasoner`) and `mistral` (native `pi-ai` provider module, `MISTRAL_API_KEY`, `devstral-medium-2507`/`mistral-large-latest`) provider blocks — both config-only, no new SDK integration since `pi-ai` already ships provider modules for both API shapes. `bootstrap.sh` gained matching menu options, API-key prompts, and models.json generation branches. The `foundry-e2` → `azure-foundry` rename (a leftover from the original `eastus2` install) is a breaking key change for anyone with a hand-edited `models.json`, but `bootstrap.sh` migrates `IRIS_PROVIDER=foundry-e2` and the `FOUNDRY_E2_KEY`/`FOUNDRY-E2-KEY` secret to the new names automatically on re-run (`.env` sourcing and Key Vault fetch both fall back to the old names).
+- `custom` bootstrap provider option for any other OpenAI-compatible endpoint (Kimi/Moonshot direct, self-hosted vLLM/Ollama, etc.) — prompts for a short provider name, base URL, API key, and exact model id, and generates an `openai-completions` provider block under that name (`CUSTOM_API_KEY`/`CUSTOM_BASE_URL`/`CUSTOM_PROVIDER_NAME` persisted in `/iris/.env` so re-running `--setup` reuses them). `IRIS_PROVIDER` is written as the sanitized provider name itself, not the literal string `custom`.
 
 ### Removed
 
