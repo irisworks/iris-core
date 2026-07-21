@@ -13,7 +13,7 @@ wildcards match, the longest prefix wins (e.g. `DA*` beats `D*`).
 | Mode | Behavior |
 |---|---|
 | `dm` | Default. Responds in DMs; channels need an `@iris` mention |
-| `admin` | Like `dm`, plus `stop` / `compact` / `reset` control commands |
+| `admin` | Like `dm`, plus `stop` / `compact` / `reset` control commands — these work as plain text, no `@iris` mention needed |
 | `thread` | Only responds inside registered session threads (sessions created via the API) |
 | `interactive-thread` | A top-level message opens a session; replies in that thread continue it without further mentions |
 | `leads` | Every top-level message triggers Iris — no mention needed |
@@ -99,7 +99,7 @@ wiring.
 | Flag | Values | Meaning |
 |---|---|---|
 | `trigger` | `mention` \| `all-top-level` \| `api-only` | What opens/continues a container organically: an explicit `@iris` mention only, any top-level message, or nothing (only a pre-existing, API-created session continues) |
-| `adminCommands` | boolean | `stop` / `compact` / `reset` text is intercepted and executed (`chat` only, and only via a mention or DM — never via ambient top-level traffic) |
+| `adminCommands` | boolean | `stop` / `compact` / `reset` text is intercepted and executed (`chat` only) — via a mention, a DM, or bare ambient top-level text alike |
 | `acceptBotMessages` | boolean | Bot/integration messages are admitted as triggers, not filtered out |
 | `replayMissed` | boolean | Pre-startup top-level messages are replayed instead of skipped |
 
