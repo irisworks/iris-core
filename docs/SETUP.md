@@ -44,11 +44,10 @@ The script will:
 1. Install system dependencies (Docker, Node 22, jq, GitHub CLI). nginx and
    certbot are installed only if you configure a public domain; the Azure CLI
    and Terraform are installed only on the Key Vault paths (Options 2 and 4).
-2. Log into GitHub (`gh auth login` — browser or device code).
-3. Ask for your LLM provider (anthropic / openai / foundry-e2 / amazon-bedrock) and API key.
-4. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
-5. Optionally set up email sending (Resend) and a public domain.
-6. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
+2. Ask for your LLM provider (anthropic / openai / foundry-e2 / amazon-bedrock) and API key.
+3. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
+4. Optionally set up email sending (Resend), a GitHub token (for repo access), and a public domain.
+5. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
 
 **Verify:**
 

@@ -331,17 +331,6 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────
-# 3. GitHub login
-# ────────────────────────────────────────────────────────────
-log_h "GitHub login"
-if ! gh auth status &>/dev/null; then
-  log "Not logged in to GitHub. Running gh auth login..."
-  gh auth login
-fi
-GH_USER=$(gh api user --jq .login)
-log "GitHub user: $GH_USER"
-
-# ────────────────────────────────────────────────────────────
 # Shared: prompt for all secrets
 # Called in --setup mode (both paths) and in --no-keyvault
 # restore mode when /iris/.env does not yet exist.
@@ -544,7 +533,7 @@ prompt_secrets() {
 }
 
 # ────────────────────────────────────────────────────────────
-# 4. Secret configuration
+# 3. Secret configuration
 # ────────────────────────────────────────────────────────────
 GENERATED_MODELS_JSON=""
 
@@ -793,7 +782,7 @@ MODELJSON
 fi
 
 # ────────────────────────────────────────────────────────────
-# 5. Public networking (only if IRIS_BASE_DOMAIN set)
+# 4. Public networking (only if IRIS_BASE_DOMAIN set)
 #    nginx/certbot install + base config for any domain;
 #    DNS + NSG automation is Azure-only.
 # ────────────────────────────────────────────────────────────
@@ -891,7 +880,7 @@ NGINX
 fi
 
 # ────────────────────────────────────────────────────────────
-# 6. Resolve Key Vault (skipped when --no-keyvault)
+# 5. Resolve Key Vault (skipped when --no-keyvault)
 # ────────────────────────────────────────────────────────────
 if [[ "$NO_KEYVAULT" == false ]]; then
   log_h "Key Vault"
@@ -908,7 +897,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
 fi
 
 # ────────────────────────────────────────────────────────────
-# 7. Fetch secrets from Key Vault (skipped when --no-keyvault)
+# 6. Fetch secrets from Key Vault (skipped when --no-keyvault)
 # ────────────────────────────────────────────────────────────
 if [[ "$NO_KEYVAULT" == false ]]; then
   log_h "Fetching secrets"
@@ -941,7 +930,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
 fi
 
 # ────────────────────────────────────────────────────────────
-# 8. Workspace setup
+# 7. Workspace setup
 # ────────────────────────────────────────────────────────────
 log_h "Workspace"
 resolve_repo_dir
@@ -1069,7 +1058,7 @@ sudo chmod 600 "$IRIS_DIR/.env"
 log "✓ /iris/.env written"
 
 # ────────────────────────────────────────────────────────────
-# 9. Build iris-runtime
+# 8. Build iris-runtime
 # ────────────────────────────────────────────────────────────
 log_h "Building iris-runtime"
 RUNTIME_DIR="$REPO_DIR/iris-runtime"
