@@ -80,6 +80,9 @@ prompt_secret() {
   local hint=""; [[ -n "$default" ]] && hint=" [Enter to keep existing key on file]"
   read -r -s -p "[iris-bootstrap] $question$hint: " answer
   echo "" >&2
+  # Mobile paste (esp. from the Telegram app) commonly drags in a leading/trailing
+  # newline or space that a masked prompt gives no visual way to spot.
+  answer="$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   echo "${answer:-$default}"
 }
 
@@ -553,15 +556,24 @@ prompt_secrets() {
     echo "  │                                                                 │"
     echo "  │  3. BotFather replies with your token — copy it               │"
     echo "  │     (looks like  123456789:AAbecomeF-...)                     │"
+    echo "  │     Pasting BotFather's whole reply also works — Iris will    │"
+    echo "  │     pull the token out of it for you.                         │"
     echo "  │                                                                 │"
     echo "  │  Full walkthrough incl. claiming/reclaiming the bot:           │"
     echo "  │  docs/SETUP.md#telegram-setup                                  │"
     echo "  └─────────────────────────────────────────────────────────────────┘"
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
-    TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
+    TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token (or paste BotFather's whole message)")
     [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
+    # BotFather tokens are "<numeric bot id>:<35-char hash>"; if the whole chat
+    # message got pasted instead of just the token, pull the token out of it.
+    if [[ "$TELEGRAM_BOT_TOKEN" != *:* ]]; then
+      EXTRACTED=$(grep -oE '[0-9]{6,}:[A-Za-z0-9_-]{30,}' <<< "$TELEGRAM_BOT_TOKEN" | head -n1)
+      [[ -n "$EXTRACTED" ]] && TELEGRAM_BOT_TOKEN="$EXTRACTED"
+    fi
     [[ "$TELEGRAM_BOT_TOKEN" != *:* ]] && die "Telegram Bot Token should look like '123456789:AA...'. Got: ${TELEGRAM_BOT_TOKEN:0:10}..."
+    log "  ✓ Got Telegram token: ${TELEGRAM_BOT_TOKEN:0:10}…${TELEGRAM_BOT_TOKEN: -4} (${#TELEGRAM_BOT_TOKEN} chars)"
   else
     log "Skipping Telegram — you can add TELEGRAM_BOT_TOKEN to /iris/.env later."
   fi
