@@ -38,6 +38,7 @@ sudo systemctl start iris
 | VM boots but `/health` times out | exec-server not started | `journalctl -u iris-fc-<name>` |
 | Jailer fails to chroot | `irisjailer` user missing | `sudo groupadd -g 10000 irisjailer; sudo useradd -u 10000 -g 10000 -r -s /usr/sbin/nologin irisjailer` |
 | rootfs missing | Build script not run | `sudo bash scripts/build-firecracker-rootfs.sh` |
+| `build-firecracker-rootfs.sh` fails with `tar: ... Cannot write: No space left on device` | Old script version hardcoded the rootfs image at 2048MiB, smaller than the `iris-runtime:local` export | Pull the latest `scripts/build-firecracker-rootfs.sh` — it now sizes the image from the actual export plus headroom — and re-run |
 
 ## Inspecting the last prompt
 
