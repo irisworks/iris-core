@@ -115,14 +115,18 @@ export type { MessageContext as TelegramContext } from "../../transport/types.js
 // ============================================================================
 
 // Formatting guidance mirrors toTelegramHtml() below: **bold**, _italic_, and
-// backtick code are converted to HTML (parse_mode: "HTML"); single *asterisks*
-// and [markdown](links) are NOT converted and would render literally.
+// backtick code are converted to HTML (parse_mode: "HTML"). Single *asterisks*
+// are NOT converted and render literally. [markdown](links) are converted only
+// when the URL is http(s) — anything else (e.g. a bare filename, since files
+// sent via the attach tool arrive separately) is reduced to just the label text
+// so stray bracket/paren syntax never leaks into the message.
 export const telegramPromptProfile: TransportPromptProfile = {
 	transportId: "telegram",
 	identityLine: "You are Iris, a Telegram-connected orchestrator for specialized sub-agents.",
 	formattingSection: `## Telegram Formatting (Markdown subset, converted to HTML)
 Bold: **text**, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`
-Do NOT use single *asterisks* for bold or [markdown](links) — write URLs plainly, they render as-is.`,
+Do NOT use single *asterisks* for bold. Write URLs plainly rather than as [markdown](links) —
+and never wrap an attached file's name in link syntax, since attachments are sent separately.`,
 	directorySection: (channels: ChannelInfo[], _users: UserInfo[]) => {
 		const chatMappings =
 			channels.length > 0 ? channels.map((c) => `${c.id}\t${c.name}`).join("\n") : "(no chats loaded)";
@@ -188,6 +192,13 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// escapeHtml doesn't escape quotes (fine for text nodes); href="..." needs them
+// escaped too, or a URL containing a literal `"` could break out of the
+// attribute and inject arbitrary HTML.
+function escapeAttr(text: string): string {
+	return escapeHtml(text).replace(/"/g, "&quot;");
+}
+
 function toTelegramHtml(text: string): string {
 	// Fenced code blocks: ```lang\ncode\n``` → <pre><code>code</code></pre>
 	text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code: string) =>
@@ -195,6 +206,12 @@ function toTelegramHtml(text: string): string {
 	);
 	// Inline code: `code` → <code>code</code>
 	text = text.replace(/`([^`\n]+)`/g, (_, code: string) => `<code>${escapeHtml(code)}</code>`);
+	// Links: [text](url) → real anchor for http(s) URLs; otherwise the model is
+	// usually referencing a file sent separately via the attach tool, so drop the
+	// bracket syntax rather than leave it showing literally.
+	text = text.replace(/\[([^\]\n]+)\]\((\S+)\)/g, (_, label: string, url: string) =>
+		/^https?:\/\//i.test(url) ? `<a href="${escapeAttr(url)}">${escapeHtml(label)}</a>` : escapeHtml(label),
+	);
 	// Bold: **text**
 	text = text.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
 	// Italic: _text_ (word boundaries to avoid matching underscores in identifiers)
@@ -240,6 +257,8 @@ export class TelegramBot implements ChannelTransport {
 	private offset = 0;
 	private chatNames = new Map<string, string>();
 	readonly claim: TelegramClaimManager;
+	// Set once start() resolves getMe(). Used to build the t.me deep link for the claim QR code.
+	username: string | null = null;
 
 	constructor(
 		handler: IrisTelegramHandler,
@@ -563,6 +582,7 @@ export class TelegramBot implements ChannelTransport {
 			);
 		}
 
+		this.username = me.username ?? null;
 		log.logInfo(`[telegram] Connected as @${me.username ?? me.first_name ?? "unknown"}`);
 		log.logConnected();
 		void this.poll();
@@ -644,15 +664,24 @@ export class TelegramBot implements ChannelTransport {
 		// ==========================================================================
 
 		if (!this.claim.isClaimed()) {
-			// Only accept a claim token — ignore everything else
-			const result = this.claim.tryClaimWith(chatId, text);
+			// A claim QR code encodes a t.me/<bot>?start=<token> deep link — tapping it
+			// sends "/start <token>" rather than the bare token, so unwrap that here.
+			const startMatch = text.match(/^\/start(?:@\S+)?\s+(\S+)$/);
+			const candidate = startMatch ? startMatch[1] : text;
+			const result = this.claim.tryClaimWith(chatId, candidate);
 			if (result === "claimed") {
 				log.logInfo(`[telegram] Bot claimed by chat_id ${chatId}`);
 				await this.postMessage(channelId, "✅ Bot claimed. You're all set — start chatting!");
 			} else if (result === "expired") {
 				await this.postMessage(channelId, "❌ Token expired. Restart Iris to get a new one.");
+			} else {
+				// Invalid token or no pending token — let the sender know the bot is alive
+				// and waiting, rather than going silent (looks indistinguishable from broken/wrong bot).
+				await this.postMessage(
+					channelId,
+					"This bot hasn't been claimed yet. Check your terminal/`journalctl -u iris -f` for the one-time claim token, then send it here.",
+				);
 			}
-			// Invalid token or no pending token — silently ignore
 			return;
 		}
 
@@ -782,7 +811,15 @@ export function createTelegramContext(event: TelegramEvent, bot: TelegramBot, st
 		replaceMessage: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
 				try {
-					if (messageId) {
+					// If tool-call updates were posted in between, editing the original
+					// "Thinking..." message would put the final answer above them —
+					// post it fresh at the bottom instead so message order matches
+					// chronological order. With no intervening messages, editing in
+					// place (as before) keeps a simple exchange to a single message.
+					if (messageId && extraMessageIds.length > 0) {
+						await bot.deleteMessage(event.channel, messageId);
+						messageId = await bot.postMessage(event.channel, text);
+					} else if (messageId) {
 						await bot.finalizeMessage(event.channel, messageId, text);
 					} else {
 						messageId = await bot.postMessage(event.channel, text);

@@ -142,6 +142,27 @@ if [[ "$SETUP_MODE" == true && "$KEYVAULT_EXPLICIT" == false ]]; then
   echo ""
 fi
 
+# Re-run (no --setup) without an explicit --keyvault/--no-keyvault: infer the
+# storage method from the existing install instead of falling back to the
+# Key Vault path (NO_KEYVAULT's hardcoded default). That default previously
+# sent a plain re-run like `bootstrap.sh --secrets-mode=proxy` down the Key
+# Vault branch, which (a) demands an unwanted az login and (b) — far worse —
+# its non-setup "restore mode" only restores IRIS_PROVIDER/IRIS_MODEL, not
+# the LLM_API_KEY-derived vars, so re-running it clobbered the real provider
+# API key in /iris/.env with an empty string before the secrets-mode
+# migration could pick it up. Reading IRIS_KEY_VAULT back from the existing
+# .env keeps re-runs on whichever path the install actually uses.
+if [[ "$SETUP_MODE" == false && "$KEYVAULT_EXPLICIT" == false && -f "$IRIS_DIR/.env" ]]; then
+  EXISTING_KV_NAME=$(grep -m1 '^IRIS_KEY_VAULT=' "$IRIS_DIR/.env" | cut -d= -f2- || true)
+  if [[ -z "$EXISTING_KV_NAME" ]]; then
+    NO_KEYVAULT=true
+    log "Existing install has no Key Vault configured — using /iris/.env (pass --keyvault to opt in)."
+  else
+    KV_NAME="${KV_NAME:-$EXISTING_KV_NAME}"
+    log "Existing install uses Key Vault '$KV_NAME' — continuing with Azure login (pass --no-keyvault to switch to /iris/.env)."
+  fi
+fi
+
 docker_cmd() {
   if docker info &>/dev/null; then docker "$@"; else sudo docker "$@"; fi
 }
@@ -334,25 +355,14 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────
-# 3. GitHub login
-# ────────────────────────────────────────────────────────────
-log_h "GitHub login"
-if ! gh auth status &>/dev/null; then
-  log "Not logged in to GitHub. Running gh auth login..."
-  gh auth login
-fi
-GH_USER=$(gh api user --jq .login)
-log "GitHub user: $GH_USER"
-
-# ────────────────────────────────────────────────────────────
 # Shared: prompt for all secrets
 # Called in --setup mode (both paths) and in --no-keyvault
 # restore mode when /iris/.env does not yet exist.
 # Sets: IRIS_PROVIDER, IRIS_MODEL, LLM_API_KEY, FOUNDRY_ACCOUNT,
 #       AWS_ACCESS_KEY_INPUT, AWS_SECRET_KEY_INPUT, AWS_REGION_INPUT,
 #       AWS_PROFILE_INPUT, SLACK_APP_TOKEN, SLACK_BOT_TOKEN,
-#       GITHUB_TOKEN, RESEND_API_KEY, IRIS_BASE_DOMAIN,
-#       CERTBOT_EMAIL, GIT_USER_EMAIL
+#       GITHUB_TOKEN, IRIS_GITHUB_ORG, IRIS_GITHUB_REPO, RESEND_API_KEY,
+#       IRIS_BASE_DOMAIN, CERTBOT_EMAIL, GIT_USER_EMAIL
 # ────────────────────────────────────────────────────────────
 prompt_secrets() {
   # ── LLM Provider ──
@@ -569,22 +579,39 @@ prompt_secrets() {
     echo "  └─────────────────────────────────────────────────────────────────┘"
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
-    TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token (or paste BotFather's whole message)")
-    [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
-    # BotFather tokens are "<numeric bot id>:<35-char hash>"; if the whole chat
-    # message got pasted instead of just the token, pull the token out of it.
-    if [[ "$TELEGRAM_BOT_TOKEN" != *:* ]]; then
-      EXTRACTED=$(grep -oE '[0-9]{6,}:[A-Za-z0-9_-]{30,}' <<< "$TELEGRAM_BOT_TOKEN" | head -n1)
-      [[ -n "$EXTRACTED" ]] && TELEGRAM_BOT_TOKEN="$EXTRACTED"
-    fi
-    [[ "$TELEGRAM_BOT_TOKEN" != *:* ]] && die "Telegram Bot Token should look like '123456789:AA...'. Got: ${TELEGRAM_BOT_TOKEN:0:10}..."
-    log "  ✓ Got Telegram token: ${TELEGRAM_BOT_TOKEN:0:10}…${TELEGRAM_BOT_TOKEN: -4} (${#TELEGRAM_BOT_TOKEN} chars)"
+    while true; do
+      TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token (or paste BotFather's whole message)")
+      [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
+      # BotFather tokens are "<numeric bot id>:<35-char hash>"; if the whole chat
+      # message got pasted instead of just the token, pull the token out of it.
+      if [[ "$TELEGRAM_BOT_TOKEN" != *:* ]]; then
+        EXTRACTED=$(grep -oE '[0-9]{6,}:[A-Za-z0-9_-]{30,}' <<< "$TELEGRAM_BOT_TOKEN" | head -n1)
+        [[ -n "$EXTRACTED" ]] && TELEGRAM_BOT_TOKEN="$EXTRACTED"
+      fi
+      [[ "$TELEGRAM_BOT_TOKEN" != *:* ]] && die "Telegram Bot Token should look like '123456789:AA...'. Got: ${TELEGRAM_BOT_TOKEN:0:10}..."
+      log "  ✓ Got Telegram token: ${TELEGRAM_BOT_TOKEN:0:10}…${TELEGRAM_BOT_TOKEN: -4} (${#TELEGRAM_BOT_TOKEN} chars)"
+      log "Verifying token with Telegram..."
+      # Masked pastes give mobile users no feedback if the copy got mangled
+      # (truncated, extra newline, autocorrect) — hit getMe live so a bad
+      # token is caught here instead of surfacing as a runtime crash later.
+      TG_ME=$(curl -s --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" 2>/dev/null || true)
+      if [[ -n "$TG_ME" ]] && [[ "$(echo "$TG_ME" | jq -r '.ok // false' 2>/dev/null)" == "true" ]]; then
+        TG_USERNAME=$(echo "$TG_ME" | jq -r '.result.username // "unknown"')
+        log "✓ Verified: connected as @${TG_USERNAME}"
+        break
+      fi
+      TG_ERR=$(echo "${TG_ME:-}" | jq -r '.description // empty' 2>/dev/null || true)
+      log "⚠ Could not verify this token with Telegram${TG_ERR:+ (${TG_ERR})}."
+      confirm "Try a different token?" || die "Telegram Bot Token could not be verified."
+    done
   else
     log "Skipping Telegram — you can add TELEGRAM_BOT_TOKEN to /iris/.env later."
   fi
 
   # ── GitHub token ──
   GITHUB_TOKEN=""
+  IRIS_GITHUB_ORG=""
+  IRIS_GITHUB_REPO=""
   if confirm "Add GitHub token for repo access?"; then
     echo ""
     echo "  ┌─ GitHub Token Setup ────────────────────────────────────────────┐"
@@ -596,6 +623,21 @@ prompt_secrets() {
     echo ""
     read -r -p "[iris-bootstrap] Press Enter when your token is ready..."
     GITHUB_TOKEN=$(prompt_secret "GitHub token (github_pat_... or ghp_...)")
+
+    echo ""
+    echo "  This token needs a repo to push to: the one Iris commits her own"
+    echo "  skills, sub-agents, and self-edits to (GitHub is her long-term"
+    echo "  memory — see docs/overlay.md). Use a fork of iris-core, or your"
+    echo "  own private overlay repo — not this upstream checkout."
+    echo ""
+    GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
+    if [[ -n "$GH_ORG_REPO" ]]; then
+      IRIS_GITHUB_ORG="${GH_ORG_REPO%%/*}"
+      IRIS_GITHUB_REPO="${GH_ORG_REPO#*/}"
+    else
+      log "Warning: no org/repo set — Iris can't push skill commits until"
+      log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
+    fi
   fi
 
   # ── Email (optional) ──
@@ -625,7 +667,7 @@ prompt_secrets() {
 }
 
 # ────────────────────────────────────────────────────────────
-# 4. Secret configuration
+# 3. Secret configuration
 # ────────────────────────────────────────────────────────────
 GENERATED_MODELS_JSON=""
 
@@ -646,6 +688,8 @@ SLACK_APP_TOKEN=""
 SLACK_BOT_TOKEN=""
 TELEGRAM_BOT_TOKEN=""
 GITHUB_TOKEN=""
+IRIS_GITHUB_ORG=""
+IRIS_GITHUB_REPO=""
 RESEND_API_KEY=""
 LLM_API_KEY=""
 FOUNDRY_ACCOUNT=""
@@ -736,6 +780,8 @@ if [[ "$NO_KEYVAULT" == false ]]; then
     seed_secret "SLACK-BOT-TOKEN"    "$SLACK_BOT_TOKEN"
     [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && seed_secret "TELEGRAM-BOT-TOKEN" "$TELEGRAM_BOT_TOKEN"
     seed_secret "GITHUB-TOKEN"       "$GITHUB_TOKEN"
+    seed_secret "GITHUB-ORG"         "$IRIS_GITHUB_ORG"
+    seed_secret "GITHUB-REPO"        "$IRIS_GITHUB_REPO"
     seed_secret "RESEND-API-KEY"     "$RESEND_API_KEY"
     log "✓ Secrets seeded."
   else
@@ -947,7 +993,7 @@ MODELJSON
 fi
 
 # ────────────────────────────────────────────────────────────
-# 5. Public networking (only if IRIS_BASE_DOMAIN set)
+# 4. Public networking (only if IRIS_BASE_DOMAIN set)
 #    nginx/certbot install + base config for any domain;
 #    DNS + NSG automation is Azure-only.
 # ────────────────────────────────────────────────────────────
@@ -1045,7 +1091,7 @@ NGINX
 fi
 
 # ────────────────────────────────────────────────────────────
-# 6. Resolve Key Vault (skipped when --no-keyvault)
+# 5. Resolve Key Vault (skipped when --no-keyvault)
 # ────────────────────────────────────────────────────────────
 if [[ "$NO_KEYVAULT" == false ]]; then
   log_h "Key Vault"
@@ -1062,7 +1108,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
 fi
 
 # ────────────────────────────────────────────────────────────
-# 7. Fetch secrets from Key Vault (skipped when --no-keyvault)
+# 6. Fetch secrets from Key Vault (skipped when --no-keyvault)
 # ────────────────────────────────────────────────────────────
 if [[ "$NO_KEYVAULT" == false ]]; then
   log_h "Fetching secrets"
@@ -1080,6 +1126,8 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   MISTRAL_API_KEY=$(fetch_secret "MISTRAL-API-KEY")
   CUSTOM_API_KEY=$(fetch_secret "CUSTOM-API-KEY")
   GITHUB_TOKEN=$(fetch_secret "GITHUB-TOKEN")
+  IRIS_GITHUB_ORG=$(fetch_secret "GITHUB-ORG")
+  IRIS_GITHUB_REPO=$(fetch_secret "GITHUB-REPO")
   SLACK_APP_TOKEN=$(fetch_secret "SLACK-APP-TOKEN")
   SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
   TELEGRAM_BOT_TOKEN=$(fetch_secret "TELEGRAM-BOT-TOKEN")
@@ -1100,7 +1148,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
 fi
 
 # ────────────────────────────────────────────────────────────
-# 8. Workspace setup
+# 7. Workspace setup
 # ────────────────────────────────────────────────────────────
 log_h "Workspace"
 resolve_repo_dir
@@ -1155,6 +1203,16 @@ ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 
+# get-secret/set-secret are documented and invoked by many skills (send-email,
+# github, transcribe-audio, etc.) as bare commands, but nothing else puts a
+# skill's own directory on PATH — the sandbox executor spawns `sh -c "<cmd>"`
+# with the plain inherited PATH. Symlinking them into /usr/local/bin (same as
+# iris-secret above) makes the documented bare-command usage actually work,
+# instead of relying on the model discovering the "not found" failure and
+# falling back to the skill's absolute path every time.
+sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret" /usr/local/bin/get-secret
+sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret" /usr/local/bin/set-secret
+
 if [[ -n "$GENERATED_MODELS_JSON" && -f "$GENERATED_MODELS_JSON" ]]; then
   cp "$GENERATED_MODELS_JSON" "$IRIS_DIR/data/models.json"
 elif [[ -f "$REPO_DIR/data/models.json" ]]; then
@@ -1204,6 +1262,8 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "TELEGRAM_BOT_TOKEN=$(e "${TELEGRAM_BOT_TOKEN:-}")"
   echo ""
   echo "GITHUB_TOKEN=$(e "${GITHUB_TOKEN:-}")"
+  echo "IRIS_GITHUB_ORG=$(e "${IRIS_GITHUB_ORG:-}")"
+  echo "IRIS_GITHUB_REPO=$(e "${IRIS_GITHUB_REPO:-}")"
   echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"
   echo ""
   echo "AZURE_SUBSCRIPTION_ID=$(e "${SUBSCRIPTION_ID:-}")"
@@ -1229,11 +1289,19 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
     echo "IRIS_API_TOKEN=$(e "$IRIS_API_TOKEN")"
   fi
 } | sudo tee "$IRIS_DIR/.env" > /dev/null
+# sudo tee creates the file as root; iris.service runs as User=$TARGET_USER
+# and reads this file itself via dotenv/config at process startup (there's no
+# systemd EnvironmentFile= — the unit never touches it, so ownership matters).
+# Without this chown, iris.service can't read its own config: dotenv silently
+# loads nothing, every var falls back to hardcoded defaults, and anything
+# resolved through the broker (IRIS_SECRET_BROKER_URL) or Telegram/Slack
+# breaks with no obvious error tying it back to a permissions problem.
+sudo chown "$TARGET_USER:$TARGET_USER" "$IRIS_DIR/.env"
 sudo chmod 600 "$IRIS_DIR/.env"
 log "✓ /iris/.env written"
 
 # ────────────────────────────────────────────────────────────
-# 9. Build iris-runtime
+# 8. Build iris-runtime
 # ────────────────────────────────────────────────────────────
 log_h "Building iris-runtime"
 RUNTIME_DIR="$REPO_DIR/iris-runtime"
@@ -1288,6 +1356,9 @@ IRIS_SECRET_KEY_FILE=${IRIS_DIR}/broker/secret.key
 IRIS_SECRET_STORE_FILE=${IRIS_DIR}/broker/secrets.json.enc
 IRIS_BROKER_SERVICES_FILE=${IRIS_DIR}/broker/services.json
 BROKERENV
+    if [[ "$IRIS_PROVIDER" == "azure-foundry" && -n "${FOUNDRY_ACCOUNT:-}" ]]; then
+      echo "AZURE_FOUNDRY_ACCOUNT=${FOUNDRY_ACCOUNT}" | sudo tee -a "$IRIS_DIR/broker/broker.env" > /dev/null
+    fi
     sudo chown -R iris-broker:iris-broker "$IRIS_DIR/broker"
     sudo chmod 700 "$IRIS_DIR/broker"
     sudo chmod 600 "$IRIS_DIR/broker/secret.key" "$IRIS_DIR/broker/broker.env"
@@ -1652,6 +1723,29 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "  │                                                                 │"
     log "  │  Token expires in 10 minutes.                                  │"
     log "  └─────────────────────────────────────────────────────────────────┘"
+
+    # Resolve the bot's @username so the QR code can be a t.me deep link
+    # (scan -> chat opens with "/start <token>" pre-filled -> tap Send) instead
+    # of just the raw token (scan -> manually copy/paste).
+    BOT_USERNAME=$(curl -sf "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | jq -r '.result.username // empty' 2>/dev/null || true)
+    if [[ -n "$BOT_USERNAME" ]]; then
+      CLAIM_QR_PAYLOAD="https://t.me/${BOT_USERNAME}?start=${CLAIM_TOKEN}"
+      QR_HINT="scan to open the bot with the token pre-filled"
+    else
+      CLAIM_QR_PAYLOAD="$CLAIM_TOKEN"
+      QR_HINT="scan and paste the token into the chat"
+    fi
+
+    if [[ -d "${RUNTIME_DIR}/node_modules/qrcode-terminal" ]]; then
+      log ""
+      log "  (${QR_HINT})"
+      while IFS= read -r qr_line; do log "  $qr_line"; done < <(
+        cd "$RUNTIME_DIR" && node -e "require('qrcode-terminal').generate(process.argv[1], { small: true })" "$CLAIM_QR_PAYLOAD"
+      )
+    else
+      log ""
+      log "  Tip: run 'sudo journalctl -u iris -n 50' to see this token as a scannable QR code."
+    fi
   elif [[ "$CLAIM_STATUS" == "true" ]]; then
     log ""
     log "  ⚠ Telegram bot is already claimed from a previous run (state file: $CLAIM_FILE)."
@@ -1659,9 +1753,11 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "    IRIS_TELEGRAM_FORCE_RECLAIM=true sudo systemctl restart iris"
   elif [[ ! -r "$CLAIM_FILE" ]]; then
     log ""
-    log "  ⚠ Could not read $CLAIM_FILE after 30s — likely a permissions issue between"
-    log "    the account running this script (${TARGET_USER}) and iris.service's User=."
-    log "    Check ownership with: ls -la ${IRIS_DIR}/data/data/ && sudo systemctl status iris"
+    log "  ⚠ Could not read $CLAIM_FILE after 30s — either Telegram never connected, or"
+    log "    iris.service (User=${TARGET_USER}) can't read its own /iris/.env (dotenv fails"
+    log "    silently, so every setting falls back to hardcoded defaults, including a"
+    log "    disabled Telegram transport)."
+    log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/data/ && sudo journalctl -u iris -n 30"
   else
     log ""
     log "  ⚠ No Telegram claim token appeared after 30s. Check: sudo journalctl -u iris -n 50"

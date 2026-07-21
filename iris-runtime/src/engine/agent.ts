@@ -522,10 +522,33 @@ function createRunner(
 		}
 	})();
 
+	// pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders)
+	// falls back to echoing the raw config string when the env var it names isn't
+	// set: `process.env[config] || config`. models.json's custom providers (azure-foundry,
+	// deepseek, mistral, custom) configure "apiKey" as an env var name (e.g.
+	// "MISTRAL_API_KEY"), so once store/proxy mode scrubs that var from process.env
+	// after migrating the real key to the secret store, getApiKeyAndHeaders reports
+	// `ok: true, apiKey: "MISTRAL_API_KEY"` — the literal env var name, not a real
+	// key — and our broker fallback below never runs. Detect that specific echo so
+	// we treat it as unresolved instead of sending the env var's own name as the key.
+	const configuredApiKeyField = ((): string | undefined => {
+		if (!existsSync(workspaceModelsJson)) return undefined;
+		try {
+			const parsed = JSON.parse(readFileSync(workspaceModelsJson, "utf8")) as {
+				providers?: Record<string, { apiKey?: string }>;
+			};
+			return parsed.providers?.[provider]?.apiKey;
+		} catch {
+			return undefined;
+		}
+	})();
+
 	// getApiKey: ModelRegistry handles env var lookup + auth storage for any provider
 	const getApiKey = async (): Promise<string> => {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok && auth.apiKey) return auth.apiKey;
+		const isUnresolvedEchoedConfig =
+			auth.ok && Boolean(configuredApiKeyField) && auth.apiKey === configuredApiKeyField;
+		if (auth.ok && auth.apiKey && !isUnresolvedEchoedConfig) return auth.apiKey;
 		// Secrets provider (store/broker in store/proxy modes; env-backed
 		// otherwise) — this is what keeps the LLM key working once it no longer
 		// lives in .env/process.env.
@@ -812,6 +835,72 @@ function createRunner(
 		}
 	}
 
+	/**
+	 * Pre-call sanity check: if a prior run was interrupted mid tool-call (e.g. a long-running
+	 * bash command that blew past IRIS_LLM_TIMEOUT_SECS and got aborted), the session can be
+	 * left with a trailing assistant tool_call that never received a matching tool_result.
+	 * Every subsequent LLM call then re-sends that malformed history, which most providers
+	 * reject outright (e.g. "400 status code (no body)") — and because the resulting error
+	 * message carries no usable content, the threshold-based auto-compactor's own summarizer
+	 * call fails the same way, producing an endless loop of empty compactions instead of
+	 * actually recovering. Close out any dangling tool_calls with a synthetic error result,
+	 * and drop empty-content assistant stubs left behind by prior aborted/errored attempts,
+	 * so the next request is always well-formed.
+	 */
+	function sanitizeDanglingToolCalls(): void {
+		const messages = agent.state.messages as any[];
+
+		let toolCallIdx = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role === "assistant" && Array.isArray(m.content) && m.content.some((c: any) => c.type === "toolCall")) {
+				toolCallIdx = i;
+				break;
+			}
+		}
+
+		if (toolCallIdx !== -1) {
+			const toolCalls = (messages[toolCallIdx].content as any[]).filter((c) => c.type === "toolCall");
+			const resolvedIds = new Set<string>();
+			for (let i = toolCallIdx + 1; i < messages.length; i++) {
+				const m = messages[i];
+				if (m.role === "toolResult" && typeof m.toolCallId === "string") {
+					resolvedIds.add(m.toolCallId);
+				}
+			}
+			const dangling = toolCalls.filter((tc) => !resolvedIds.has(tc.id));
+			if (dangling.length > 0) {
+				log.logWarning(
+					`[${channelId}] Closing ${dangling.length} dangling tool_call(s) with no result (interrupted run)`,
+					dangling.map((tc) => tc.name).join(", "),
+				);
+				const syntheticResults = dangling.map((tc) => ({
+					role: "toolResult",
+					toolCallId: tc.id,
+					toolName: tc.name,
+					content: [
+						{
+							type: "text",
+							text: "This tool call was interrupted before it produced a result (the run was aborted or the process restarted mid-execution). Treat it as failed and retry if needed.",
+						},
+					],
+					isError: true,
+					timestamp: Date.now(),
+				}));
+				messages.splice(toolCallIdx + 1, 0, ...syntheticResults);
+			}
+		}
+
+		// Drop empty-content assistant stubs (aborted/errored attempts with nothing to say) —
+		// pure noise left over from the interrupted run, not something we want re-sent forever.
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role === "assistant" && Array.isArray(m.content) && m.content.length === 0) {
+				messages.splice(i, 1);
+			}
+		}
+	}
+
 	return {
 		async run(
 			ctx: MessageContext,
@@ -992,6 +1081,11 @@ function createRunner(
 					);
 				}
 			});
+
+			// Pre-call structural check: close out any dangling tool_calls left behind by a
+			// prior interrupted run before we touch token estimates below — see
+			// sanitizeDanglingToolCalls() for why this matters.
+			sanitizeDanglingToolCalls();
 
 			// Pre-run auto-compaction: if the estimated context exceeds IRIS_COMPACT_THRESHOLD
 			// (default 60%) of the model window, compact down toward IRIS_COMPACT_TARGET
