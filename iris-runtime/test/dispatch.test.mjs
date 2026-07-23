@@ -111,6 +111,17 @@ test("mention: admin commands run only in admin mode, swallowed elsewhere", asyn
 	assert.equal(calls.events.length, 0);
 });
 
+test("mention: clear is accepted as an alias for reset (#109)", async () => {
+	const { calls, mention } = makeBot({
+		channels: { CADM: { mode: "admin" } },
+		isRunning: () => true,
+	});
+	mention({ text: "<@UBOT> clear", channel: "CADM", user: "U1", ts: "1000.0001" });
+	await settle();
+	assert.deepEqual(calls.resets, ["CADM"]);
+	assert.equal(calls.events.length, 0);
+});
+
 test("mention: stop while idle posts _Nothing running_ instead of handleStop", async () => {
 	const { calls, mention } = makeBot({
 		channels: { CADM: { mode: "admin" } },
