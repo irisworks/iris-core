@@ -17,7 +17,7 @@ import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
-import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
+import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
 import * as log from "./log.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
@@ -917,8 +917,14 @@ function createRunner(
 			await mkdir(channelDir, { recursive: true });
 
 			// Sync messages from log.jsonl that arrived while we were offline or busy
-			// Exclude the current message (it will be added via prompt())
-			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
+			// Exclude the current message (it will be added via prompt()), and anything
+			// at/before the last reset watermark (otherwise a /reset gets undone here — #109)
+			const syncedCount = syncLogToSessionManager(
+				sessionManager,
+				channelDir,
+				ctx.message.ts,
+				readResetWatermark(channelDir),
+			);
 			if (syncedCount > 0) {
 				log.logInfo(`[${channelId}] Synced ${syncedCount} messages from log.jsonl`);
 			}
@@ -1266,9 +1272,12 @@ function createRunner(
 			agent.reset();
 			// Release VM if this is a pool-mode session (next exec will boot a fresh one)
 			void releaseExecutor(executor);
-			// Truncate the context file so future loads start fresh
+			// Truncate the context file so future loads start fresh, and record a
+			// watermark so the next run's log.jsonl sync doesn't replay pre-reset
+			// history back in (log.jsonl itself is intentionally left alone — #109)
 			try {
 				writeFileSync(contextFile, "");
+				writeResetWatermark(channelDir);
 				log.logInfo(`[${channelId}] Context reset — cleared ${contextFile}`);
 			} catch (err) {
 				log.logWarning(`[${channelId}] Failed to clear context file`, err instanceof Error ? err.message : String(err));
