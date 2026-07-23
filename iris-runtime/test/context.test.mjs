@@ -11,6 +11,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "../dist/engine/context.js";
 
 /** Minimal stand-in for pi-coding-agent's SessionManager — only the two methods syncLogToSessionManager uses. */
@@ -83,4 +84,55 @@ test("syncLogToSessionManager: a reset watermark stops pre-reset log.jsonl histo
 	const text = sessionManager.entries[0].message.content[0].text;
 	assert.match(text, /fresh start/);
 	assert.doesNotMatch(text, /secret plan/);
+});
+
+// ============================================================================
+// SessionManager in-memory staleness (the deeper half of #109): channel
+// runners are cached one-per-channel for the process lifetime (getOrCreateRunner
+// in agent.ts), so the SessionManager instance reset() operates on is the same
+// long-lived object every message in that channel reuses. SessionManager keeps
+// its entries purely in memory (getEntries()/buildSessionContext() never touch
+// disk) — a bare fs.writeFileSync() truncating context.jsonl out from under it
+// doesn't clear that in-memory state at all, so agent.ts's reset() used to be a
+// no-op for the live process: the very next message would rebuild
+// agent.state.messages from the untouched entries and restore the full
+// pre-reset conversation immediately, no restart required. The fix calls
+// sessionManager.setSessionFile() after truncating, which forces a reload from
+// the (now-empty) file and re-establishes a fresh session header.
+// ============================================================================
+
+test("SessionManager: a bare file truncation does NOT clear a live instance's in-memory entries", () => {
+	const channelDir = mkdtempSync(join(tmpdir(), "iris-context-test-"));
+	const contextFile = join(channelDir, "context.jsonl");
+	const sessionManager = SessionManager.open(contextFile, channelDir);
+	sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "old message" }], timestamp: Date.now() });
+
+	writeFileSync(contextFile, ""); // what reset() used to do, alone
+
+	assert.equal(sessionManager.getEntries().length, 1); // still there — this was the bug
+	assert.equal(sessionManager.buildSessionContext().messages.length, 1);
+});
+
+test("SessionManager: setSessionFile() after truncation reloads and clears in-memory entries (the fix)", () => {
+	const channelDir = mkdtempSync(join(tmpdir(), "iris-context-test-"));
+	const contextFile = join(channelDir, "context.jsonl");
+	const sessionManager = SessionManager.open(contextFile, channelDir);
+	sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "old message" }], timestamp: Date.now() });
+
+	writeFileSync(contextFile, "");
+	sessionManager.setSessionFile(contextFile); // what reset() does now
+
+	assert.equal(sessionManager.getEntries().length, 0);
+	assert.equal(sessionManager.buildSessionContext().messages.length, 0);
+
+	// And the file itself stays well-formed for a subsequent append (a fresh session header,
+	// not orphaned entries pointing at a parent that no longer exists in the file). Persistence
+	// to disk is deferred until an assistant message appears, so append one too.
+	sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "genuinely new" }], timestamp: Date.now() });
+	sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: "reply" }], timestamp: Date.now() });
+	assert.equal(sessionManager.getEntries().length, 2);
+	const fileLines = readFileSync(contextFile, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+	assert.equal(fileLines[0].type, "session");
+	assert.ok(fileLines.some((l) => l.type === "message" && JSON.stringify(l.message).includes("genuinely new")));
+	assert.ok(fileLines.some((l) => l.type === "message" && JSON.stringify(l.message).includes("reply")));
 });

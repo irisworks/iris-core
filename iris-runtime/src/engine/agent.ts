@@ -1272,11 +1272,19 @@ function createRunner(
 			agent.reset();
 			// Release VM if this is a pool-mode session (next exec will boot a fresh one)
 			void releaseExecutor(executor);
-			// Truncate the context file so future loads start fresh, and record a
-			// watermark so the next run's log.jsonl sync doesn't replay pre-reset
-			// history back in (log.jsonl itself is intentionally left alone — #109)
+			// Truncate the context file so future loads start fresh. Runners are cached
+			// per channel (see getOrCreateRunner) and live for the process's lifetime, so
+			// `sessionManager` here is the same long-lived instance every message in this
+			// channel reuses — SessionManager keeps its entries in memory and never re-reads
+			// the file on its own, so the writeFileSync above was previously a no-op as far
+			// as the live session was concerned: buildSessionContext() on the next message
+			// would rebuild agent.state.messages straight from the untouched in-memory
+			// entries, restoring the full pre-reset conversation immediately, no restart or
+			// log.jsonl involved. setSessionFile() forces it to reload from the
+			// now-truncated file and re-establish a fresh session header (#109).
 			try {
 				writeFileSync(contextFile, "");
+				sessionManager.setSessionFile(contextFile);
 				writeResetWatermark(channelDir);
 				log.logInfo(`[${channelId}] Context reset — cleared ${contextFile}`);
 			} catch (err) {
