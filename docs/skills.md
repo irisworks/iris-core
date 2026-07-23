@@ -49,6 +49,18 @@ Domain and business skills — cost dashboards, finance trackers, CRM integratio
 belong in your install's [overlay](overlay.md). The test: *does this skill help
 Iris run the platform, or is it a task capability an operator happens to want?*
 
+## Bare-command usage
+
+If a `SKILL.md` documents its executable as a bare command (`send-email ...`
+rather than `/iris/data/skills/send-email/send-email ...`), that executable
+must be symlinked onto `PATH` in `bootstrap.sh` (`/usr/local/bin`, alongside
+`get-secret`/`set-secret`/`iris-secret`) — the sandbox executor spawns
+`sh -c "<cmd>"` with the plain inherited `PATH`, which does not include a
+skill's own directory. Without the symlink, the bare form still "works" in
+that the model recovers by falling back to the absolute path on a `command not
+found` error, but that's a wasted call on every single invocation. Name the
+symlink after the documented command, not the source filename, if they differ.
+
 ## Writing a skill
 
 Ask Iris. The `self-extend` skill lets her scaffold, test, and commit new skills
