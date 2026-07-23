@@ -28,8 +28,12 @@ search-web "stock market today S&P 500"
 
 ## Configuration
 
-Requires the `PERPLEXITY-API-KEY` secret, resolved via `get-secret`. On the
-default zero-cloud install, set it as an env var in `/iris/.env`:
+Requires the `PERPLEXITY-API-KEY` secret, resolved via `get-secret`.
+`bootstrap.sh` prompts for it as an optional step ("Set up web search
+(Perplexity)?") — skip it there and add it later by re-running with
+`--setup`, or set it directly.
+
+On the default zero-cloud install, set it as an env var in `/iris/.env`:
 
 ```bash
 PERPLEXITY_API_KEY=your-api-key-here

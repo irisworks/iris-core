@@ -121,8 +121,8 @@ key (and, for proxy, the `iris-broker` user + `iris-broker.service` systemd
 unit), then runs `iris-secret import-env /iris/.env --prune`, which moves the
 known credential vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `IRIS_SLACK_APP_TOKEN`, `IRIS_SLACK_BOT_TOKEN`,
-`TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `RESEND_API_KEY`, `AZURE_FOUNDRY_KEY`,
-`DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`) into
+`TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `RESEND_API_KEY`, `PERPLEXITY_API_KEY`,
+`AZURE_FOUNDRY_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`) into
 the store and rewrites `.env` without them. Idempotent; unknown vars are left
 alone, and anything not yet migrated keeps resolving via the env fallback.
 

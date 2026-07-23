@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `bootstrap.sh` now prompts for a Perplexity API key ("Set up web search (Perplexity)?", default No) alongside the existing optional Resend/GitHub prompts, seeding it as `PERPLEXITY-API-KEY` (Key Vault path) or writing `PERPLEXITY_API_KEY` to `/iris/.env` (zero-cloud path) — previously the `search-web` skill's key had to be added by hand after install, with no bootstrap step at all. Added to `secret-store.ts`'s `SENSITIVE_ENV_VARS` and `docs/secrets.md`'s migration list so `iris-secret import-env` and store/proxy mode pick it up like every other bootstrap-seeded credential.
+
 ### Fixed
 
 - `install.sh` resolved the latest release tag via `git ls-remote` before checking whether `git` was installed — only the later `git clone`/`git -C` calls were guarded by the "install git if missing" check. On a fresh VM without `git` (e.g. Oracle Cloud's default Ubuntu image), this hit Ubuntu's `command-not-found` handler, which tries a network lookup to suggest a package; on hosts with restrictive outbound firewall rules (Oracle's default security list allows inbound SSH only), that lookup hangs indefinitely instead of failing fast, making the installer appear stuck at "Resolving latest release tag" with no error. The git-presence check now runs before the first `git` invocation.
+- `bootstrap.sh`'s "Add GitHub token for repo access?" prompt defaulted to Yes (`confirm` with no explicit default arg falls back to `y`) while every other optional integration (Slack aside, which is a core transport) — Resend, and now Perplexity — defaults to No. A GitHub PAT isn't needed for a basic install (it's only for Iris's self-extension/PR features), so accepting the default at an unattended or fast-clicked `--setup` run opted users into a flow they likely didn't intend. Now defaults to No, matching the rest of the optional-integration prompts.
 
 ## [1.1.0] - 2026-07-22
 
