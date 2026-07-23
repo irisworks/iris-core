@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- `bootstrap.sh` only symlinked `get-secret`/`set-secret` onto `PATH` (`/usr/local/bin`), even though `schedule`, `self-heal`, `send-email`, `serve-public`, and `status` are documented and invoked the same way — as bare commands — with the same missing-PATH problem: every bare call failed `command not found` and relied on the model recovering via the skill's absolute path. `search-web` and `transcribe-audio` had a second gap on top of that: their documented command name doesn't match their script's filename (`search.sh`, `transcribe-audio.sh`), so `bootstrap.sh` now symlinks all seven onto `PATH`, naming the two mismatched ones after the documented command rather than the source file. `docs/skills.md` documents the convention so new skills don't regress it. Also removes `skills/serve-public/serve-public.sh`, a byte-identical, unreferenced duplicate of `serve-public/serve-public`.
+
 - `install.sh` resolved the latest release tag via `git ls-remote` before checking whether `git` was installed — only the later `git clone`/`git -C` calls were guarded by the "install git if missing" check. On a fresh VM without `git` (e.g. Oracle Cloud's default Ubuntu image), this hit Ubuntu's `command-not-found` handler, which tries a network lookup to suggest a package; on hosts with restrictive outbound firewall rules (Oracle's default security list allows inbound SSH only), that lookup hangs indefinitely instead of failing fast, making the installer appear stuck at "Resolving latest release tag" with no error. The git-presence check now runs before the first `git` invocation.
 
 ## [1.1.0] - 2026-07-22
