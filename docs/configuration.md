@@ -78,7 +78,7 @@ block. To add one without bootstrap, add a block by hand — see
 
 ## MCP servers
 
-External toolsets connect via `<workspace>/data/mcp.json` (optional,
+External toolsets connect via `<workspace>/meta/mcp.json` (optional,
 hot-reloaded per message; secrets referenced as `${VAR}` from `.env`) — see
 [MCP Servers](mcp.md).
 

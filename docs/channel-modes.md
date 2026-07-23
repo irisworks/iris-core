@@ -6,7 +6,7 @@ description: Configure how Iris behaves per Slack channel — from mention-only 
 # Channel Modes
 
 How Iris behaves in a Slack channel is configured per channel in
-`<workspace>/data/channels.json`. Keys are channel IDs; prefix wildcards like `D*`
+`<workspace>/meta/channels.json`. Keys are channel IDs; prefix wildcards like `D*`
 are supported. An exact channel ID always wins over wildcards; when several
 wildcards match, the longest prefix wins (e.g. `DA*` beats `D*`).
 
