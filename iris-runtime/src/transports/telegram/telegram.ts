@@ -691,7 +691,9 @@ export class TelegramBot implements ChannelTransport {
 		// Handle bot commands
 		if (text.startsWith("/")) {
 			const cmd = text.split(/\s/)[0].toLowerCase().replace(/@[^@]*$/, "");
-			if (cmd === "/reset") {
+			// `/clear` is accepted as an alias for `/reset` — the conventional name in
+			// other chat/CLI tools (Claude Code, ChatGPT) that users reach for instead (#109).
+			if (cmd === "/reset" || cmd === "/clear") {
 				await this.handler.handleReset(channelId, this);
 				return;
 			}
