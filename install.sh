@@ -21,6 +21,11 @@ IRIS_DIR="${IRIS_DIR:-/iris}"
 IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}"
 REPO_DIR="$IRIS_DIR/repo"
 
+if ! command -v git >/dev/null 2>&1; then
+	echo "[iris-install] git not found — installing..."
+	sudo apt-get update -y -qq && sudo apt-get install -y -qq git
+fi
+
 if [ -n "${IRIS_CORE_REF:-}" ]; then
 	echo "[iris-install] Using IRIS_CORE_REF override: $IRIS_CORE_REF"
 else
@@ -34,11 +39,6 @@ else
 fi
 
 echo "[iris-install] Installing Iris into $REPO_DIR (ref: $IRIS_CORE_REF)"
-
-if ! command -v git >/dev/null 2>&1; then
-	echo "[iris-install] git not found — installing..."
-	sudo apt-get update -y -qq && sudo apt-get install -y -qq git
-fi
 
 sudo mkdir -p "$IRIS_DIR"
 sudo chown "$(id -un):$(id -gn)" "$IRIS_DIR"
