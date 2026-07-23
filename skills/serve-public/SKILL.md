@@ -93,6 +93,7 @@ echo "[serve-public] Done — https://${FQDN} is live"
 
 - Requires nginx and certbot installed (bootstrap.sh handles this)
 - Requires port 80/443 open on NSG (bootstrap.sh handles this — Azure only; on other clouds, e.g. Oracle Cloud's default images with OS-level `iptables` rules, open 80/443 in both the cloud console and the VM's own firewall manually — see [Troubleshooting](../../docs/troubleshooting.md))
+- If the exposed URL is unreachable after opening the cloud-level port, check `iptables` directly (`sudo iptables -L -n`), not just `ufw status` — `ufw` may not be installed, or may not be the active firewall frontend, while a distro-shipped `iptables` rule set (e.g. Oracle's default image) still blocks the port underneath it
 - Wildcard DNS `*.<IRIS_BASE_DOMAIN>` must already point to this VM (bootstrap.sh handles this)
 - Re-running with the same name is safe — updates the port and renews the cert if needed
 - For WebSocket support, the config includes `Upgrade` and `Connection` headers
