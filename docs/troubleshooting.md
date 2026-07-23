@@ -27,7 +27,7 @@ sudo systemctl start iris
 | `iris.service` fails to start | Missing env vars | Check `/iris/.env` and `journalctl -u iris` |
 | Settings ignored after install — broker unreachable, Telegram/Slack silent, provider/model wrong — with no error | `/iris/.env` owned by `root` (not `$TARGET_USER`), so `iris.service` can't read its own config; `dotenv` fails silently and every var falls back to a hardcoded default | `sudo chown $USER:$USER /iris/.env` (or re-run current `bootstrap.sh`, which now `chown`s it after writing) |
 | Re-running `bootstrap.sh` (no `--setup`) forces an unwanted `az login` or wipes the LLM key from `/iris/.env` | Older bootstrap defaulted plain re-runs into the Key Vault path even on `/iris/.env` installs | Fixed in current `bootstrap.sh` — re-runs infer the path from the existing `IRIS_KEY_VAULT`; pass `--no-keyvault` / `--keyvault` to force it explicitly |
-| Slack messages ignored | Wrong channel mode | Check `data/channels.json` — default mode needs an `@iris` mention outside DMs |
+| Slack messages ignored | Wrong channel mode | Check `meta/channels.json` — default mode needs an `@iris` mention outside DMs |
 | Telegram bot silent | Bot not claimed | Send the claim token printed at startup — see [Setup](SETUP.md#telegram-setup) |
 | `Timed out waiting for LLM response` | Provider rate limits | Retries are automatic; tune `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_TIMEOUT_SECS` |
 | Slack reply arrives as an `iris-reply.md` file with an error notice | Slack rejected the message (`msg_too_long`) even after automatic re-splitting — usually extremely formatting-dense content (Slack counts `&`, `<`, `>` as their escaped entities) | The full reply is in the attached file; lower `IRIS_SLACK_MAX_CHARS` if it recurs |

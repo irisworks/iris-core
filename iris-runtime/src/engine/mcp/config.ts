@@ -1,5 +1,5 @@
 /**
- * MCP server configuration: <workspace>/data/mcp.json
+ * MCP server configuration: <workspace>/meta/mcp.json
  *
  * Loading is fail-safe by design: an absent file means zero servers, a
  * malformed file or invalid entry is recorded as an error and skipped —
@@ -43,7 +43,7 @@ export interface McpConfig {
 }
 
 export function mcpConfigPath(workingDir: string): string {
-	return join(workingDir, "data", "mcp.json");
+	return join(workingDir, "meta", "mcp.json");
 }
 
 const ENV_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
