@@ -48,6 +48,13 @@ variable "slack_bot_token" {
   sensitive   = true
 }
 
+variable "telegram_bot_token" {
+  description = "Agent-specific Telegram bot token (mint a separate bot for this agent — never Iris's own TELEGRAM_BOT_TOKEN, or both processes will poll getUpdates with the same credentials and 409 each other). Empty (default) explicitly clears whatever /iris/.env would otherwise inject via --env-file, so this agent stays bridge-only for Telegram unless given its own token."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "webui_dir" {
   description = "Optional path to a webui source directory to mount at /workspace/webui (agent can edit files live)"
   type        = string
@@ -76,6 +83,11 @@ variable "iris_model" {
   description = "Model id for the agent runtime (IRIS_MODEL). Only needed with secrets_mode store/proxy, where the container no longer inherits it from /iris/.env."
   type        = string
   default     = ""
+}
+
+variable "image_dependency" {
+  description = "id of the shared null_resource.iris_runtime_image (terraform/main.tf), passed through so this module's container waits on — and rebuilds after — the one shared image build instead of running its own redundant `npm run build && docker build` per agent."
+  type        = string
 }
 
 variable "secrets_mode" {

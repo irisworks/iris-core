@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
+import { callAgentBridge, loadAgentRegistry, parseAgentMention } from "../../engine/bridge.js";
 import { parseVerboseCommand } from "../../engine/dispatch.js";
 import { registerSessionRequest, resolveSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "../../engine/store.js";
@@ -405,6 +406,31 @@ export class TelegramBot implements ChannelTransport {
 		return this.postMessage(channelId, text);
 	}
 
+	/**
+	 * Deterministic `@agentname` bridge shortcut — mirrors web.ts's `?agent=`
+	 * handling and slack.ts's equivalent. If `text` opens with a name
+	 * registered in agents.json, forward it to that sub-agent's bridge and
+	 * post the reply directly, skipping Iris's own LLM turn entirely. Returns
+	 * true if handled (caller should return without dispatching further);
+	 * false if there was no leading mention or it didn't match a known agent.
+	 */
+	private async tryHandleAgentMention(text: string, user: string, channelId: string): Promise<boolean> {
+		const registry = loadAgentRegistry(this.workingDir);
+		const mention = parseAgentMention(text, registry);
+		if (!mention) return false;
+
+		const query = mention.query.trim() || text;
+		try {
+			const reply = await callAgentBridge(mention.entry.bridge_url, query, user);
+			await this.postMessage(channelId, reply);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			log.logWarning(`[bridge] @${mention.name} request failed`, msg);
+			await this.postMessage(channelId, `⚠️ Couldn't reach @${mention.name}: ${msg}`);
+		}
+		return true;
+	}
+
 	async uploadFile(channelId: string, filePath: string, title?: string): Promise<void> {
 		const { chatId, threadId } = this.decodeChannel(channelId);
 		const fileName = title ?? basename(filePath);
@@ -689,6 +715,11 @@ export class TelegramBot implements ChannelTransport {
 
 		// Bot is claimed — only the owner gets through
 		if (!this.claim.isOwner(chatId)) return;
+
+		// Deterministic @agentname bridge shortcut — bypasses Iris's own LLM turn
+		// entirely when the message opens with a registered sub-agent's name;
+		// falls through to normal command/message handling below on no match.
+		if (await this.tryHandleAgentMention(text, String(msg.from?.id ?? "unknown"), channelId)) return;
 
 		// Handle bot commands
 		if (text.startsWith("/")) {

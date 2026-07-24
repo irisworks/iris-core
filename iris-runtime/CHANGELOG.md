@@ -4,11 +4,74 @@
 
 ### Added
 
+- Deterministic `@agentname` bridge routing for Slack and Telegram
+  (`parseAgentMention()` in `iris-runtime/src/engine/bridge.ts`, wired into
+  `slack.ts`'s `app_mention`/`message` handlers and `telegram.ts`'s
+  `handleUpdate`). A message opening with a name registered in `agents.json`
+  now bypasses Iris's own LLM turn entirely — the transport calls
+  `callAgentBridge()` directly and posts the reply itself on the same
+  channel/thread — mirroring how the Web UI transport already worked via its
+  `?agent=` param. Previously Slack/Telegram had no `@mention` detection code
+  at all; delegation only happened when Iris's LLM inferred intent from her
+  own system prompt (`engine/agent.ts`), which still runs as a fallback for
+  messages that don't use a leading `@name` prefix or don't match a known
+  agent. `docs/sub-agents.md` and `skills/spawn-agent/SKILL.md` previously
+  described `@agentname` as literal-text HTTP routing for all transports,
+  which was only ever true for the Web UI — corrected to describe the actual
+  per-transport behavior.
+- `spawn-agent` simplified: the default path now provisions a plain systemd
+  service (`agents/service-bootstrap.template.sh`) instead of a Terraform-managed
+  Docker container — no image build, no `terraform apply`, active in about a
+  second, reusing the same already-built `iris-runtime` binary Iris herself
+  runs. Docker/Terraform (`terraform/modules/agent`) becomes an explicit
+  `--mode=docker` opt-in for agents that need container isolation. Bridge
+  registration (`/iris/data/agents.json`) is now an automatic, unconditional
+  step of `spawn-agent` via a new shared helper, `agents/lib/register-bridge.sh`
+  (`flock`-protected read-merge-write, plus auto bridge-port assignment) —
+  previously nothing in the skill actually wrote this file, so `@agentname`
+  routing silently didn't work despite `bridge_port` being configured on the
+  container. `github-commit` is now gated on a GitHub PAT actually being
+  configured (`agents/lib/register-bridge.sh has-pat`) and skipped cleanly
+  when absent, rather than attempted unconditionally. Self-heal and starter
+  skills are no longer mandatory scaffolding — `--with-self-heal` and
+  `--with-skill=<name>` add them only when explicitly requested. Also fixes
+  `terraform/modules/agent`'s `null_resource.build_image`, which ran a full
+  `npm run build && docker build` on every single new agent (a fresh Terraform
+  resource address each time) even though the resulting `iris-runtime:local`
+  image is identical across agents; the build is now a single shared
+  `null_resource.iris_runtime_image` in `terraform/main.tf` (gated behind
+  `var.enable_docker_agents`, default `false`, so non-docker installs never
+  pay the cost), with each agent module depending on it instead of rebuilding.
 - Verbose tool-call/thinking output on Slack and Telegram is now off by default. Previously every `tool_execution_end` and chain-of-thought chunk was posted as a Slack thread reply or, on Telegram (no real threads), a new flat message in the same chat — every tool-heavy run spammed the conversation. Runs now show a single status line that updates in place as Iris works (`ctx.setStatus`, a new optional `MessageContext` capability, reusing each transport's existing `updateMessage`) and gets replaced by the final answer, same as the existing "Thinking..." placeholder pattern. Full per-tool-call detail, thinking dumps, and the per-run usage summary are still available by toggling verbose mode: `verbose on`/`off`/`status` on Slack (any DM or `@iris` mention — deliberately not gated behind admin mode, since this is a UX preference, not a destructive command like `stop`/`compact`/`reset`) or `/verbose on|off|status` on Telegram. Global default via `IRIS_VERBOSE_TOOLS`; per-channel override persisted to that channel's `settings.json`.
 - `bootstrap.sh` now prompts for a Perplexity API key ("Set up web search (Perplexity)?", default No) alongside the existing optional Resend/GitHub prompts, seeding it as `PERPLEXITY-API-KEY` (Key Vault path) or writing `PERPLEXITY_API_KEY` to `/iris/.env` (zero-cloud path) — previously the `search-web` skill's key had to be added by hand after install, with no bootstrap step at all. Added to `secret-store.ts`'s `SENSITIVE_ENV_VARS` and `docs/secrets.md`'s migration list so `iris-secret import-env` and store/proxy mode pick it up like every other bootstrap-seeded credential.
 
 ### Fixed
 
+- Sub-agents could end up authenticating with Iris's own Slack/Telegram bot
+  credentials, causing two processes to fight over the same Socket Mode
+  connection / Telegram `getUpdates` poll (Telegram returns 409 "terminated
+  by other getUpdates request" to whichever loses) — symptom: the sub-agent
+  intermittently stops responding, with no obvious error. Root cause:
+  `terraform/modules/agent/main.tf`'s `docker run` always passed `--env-file
+  /iris/.env` (secrets_mode `"env"`, the default), injecting
+  `IRIS_SLACK_APP_TOKEN`/`IRIS_SLACK_BOT_TOKEN`/`TELEGRAM_BOT_TOKEN` into
+  every container regardless of that agent's own `slack_app_token`/
+  `slack_bot_token` module variables — leaving them unset did nothing to
+  clear what `--env-file` had already injected, and there was no per-agent
+  Telegram token variable at all. The module (and the equivalent manual
+  `agents/bootstrap.template.sh`) now always pass these three explicitly,
+  even empty, which — applied after `--env-file` — clears them back out
+  unless the agent was given its own distinct value; added a new
+  `telegram_bot_token` variable alongside the existing Slack ones. (Caveat:
+  on Key-Vault-profile installs, this alone isn't sufficient if the vault
+  holds a secret under the exact same name as Iris's own token — see the
+  comment in `terraform/modules/agent/main.tf` and `docs/sub-agents.md` for
+  the `secrets_mode = "store"/"proxy"` mitigation.) `agents/service-bootstrap.template.sh`'s
+  header comment wrongly claimed this new service-mode path inherits
+  `/iris/.env` "the same way iris.service does" — it doesn't (different
+  `WorkingDirectory`, so dotenv resolves nothing there), which is intentional
+  and safe; corrected the comment and added the same credential-isolation
+  warning next to its optional Slack/Telegram `Environment=` example.
 - `bootstrap.sh` silently exited (no error message, straight back to the shell prompt) immediately after picking a provider whenever `/iris/.env` already existed but had no matching credential line yet — hit on any re-run where you switch to `azure-foundry` or `custom` after a prior install with a different provider. Under the script's `set -euo pipefail`, `EXISTING_FOUNDRY_KEY=$(grep ... "$IRIS_DIR/.env" | head -1 | cut -d= -f2-)` (and the equivalent `custom`-provider and Foundry-account-from-`models.json` lookups) exited non-zero via `grep` finding no match, and `pipefail` propagated that through `head`/`cut` even though they succeeded — `set -e` then killed the script since the assignment sits in the `if`'s body, not its condition, with no `die()` call to explain why. All four lookups now end in `|| true` so a missing existing-credential line is treated as "nothing to reuse" instead of a fatal error.
 - `/reset`/`/clear` didn't actually clear anything for the running process. Channel runners (and the `SessionManager` each one owns) are cached one-per-channel for the life of the `iris` process (`getOrCreateRunner`) — `SessionManager` keeps its entries purely in memory and never re-reads `context.jsonl` on its own, so `reset()`'s `writeFileSync(contextFile, "")` was truncating a file nobody in the live process was about to re-read: the very next message rebuilt `agent.state.messages` straight from the untouched in-memory entries via `buildSessionContext()`, restoring the full pre-reset conversation immediately — no restart, no `log.jsonl` involved. `reset()` now also calls `sessionManager.setSessionFile(contextFile)`, which forces a reload from the now-empty file and re-establishes a fresh session header.
 - With that fixed, a second issue became reachable: `syncLogToSessionManager()` (runs before every reply to pick up messages logged in `log.jsonl` while Iris was offline/busy — `log.jsonl` is the channel's permanent, never-pruned record and is deliberately left alone by reset) would see the now-genuinely-empty session and treat every line in `log.jsonl` as unsynced, replaying the entire pre-reset conversation straight back in anyway. Symptom of both bugs together: `last_prompt.jsonl` (a raw debug dump of the live session, not itself a cause) kept showing old conversation history after a reset, and reset conversations silently ballooned back to full size — worsening the smaller-model reliability/latency issues in #109. `reset()` now writes a `.reset-watermark` timestamp per channel, and `syncLogToSessionManager()` skips any `log.jsonl` entry at or before it, so only genuinely new post-reset messages replay.

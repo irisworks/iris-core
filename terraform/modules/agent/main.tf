@@ -28,25 +28,12 @@ resource "random_password" "api_token" {
 }
 
 # ─────────────────────────────────────────────
-# Build iris-runtime Docker image from source
-# ─────────────────────────────────────────────
-resource "null_resource" "build_image" {
-  triggers = {
-    package_json = filemd5("${var.iris_repo_dir}/iris-runtime/package.json")
-  }
-
-  provisioner "local-exec" {
-    command = <<-SHELL
-      set -e
-      cd ${var.iris_repo_dir}/iris-runtime
-      npm run build
-      docker build -t ${local.image_tag} .
-    SHELL
-  }
-}
-
-# ─────────────────────────────────────────────
 # Directory structure
+#
+# The iris-runtime:local image itself is built once, shared across every
+# agent module instance, by the top-level null_resource.iris_runtime_image in
+# terraform/main.tf — pass its id in as var.image_dependency so this module
+# depends on it without owning its own (redundant) build step.
 # ─────────────────────────────────────────────
 resource "null_resource" "agent_dirs" {
   triggers = {
@@ -70,7 +57,7 @@ resource "null_resource" "agent_dirs" {
 # Agent container
 # ─────────────────────────────────────────────
 resource "null_resource" "agent" {
-  depends_on = [null_resource.build_image, null_resource.agent_dirs]
+  depends_on = [null_resource.agent_dirs]
 
   lifecycle {
     precondition {
@@ -83,11 +70,39 @@ resource "null_resource" "agent" {
     agent_name = var.agent_name
     image_tag  = local.image_tag
     api_token  = var.unique_api_token ? random_password.api_token[0].result : ""
+    # References the shared build's id (not a resource reference, so not a
+    # valid depends_on target) — including it here gives Terraform an
+    # implicit data dependency: this container is only (re)created after
+    # null_resource.iris_runtime_image in terraform/main.tf has run.
+    image_ready = var.image_dependency
   }
 
   provisioner "local-exec" {
     command = <<-SHELL
       set -e
+      # IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN / TELEGRAM_BOT_TOKEN below are
+      # always passed explicitly, even empty. --env-file (secrets_mode == "env")
+      # injects Iris's own copies of all three from /iris/.env into every
+      # container regardless of this module's variables; explicit -e flags are
+      # applied after --env-file, so an empty value here overrides and clears
+      # them unless this agent was given its own distinct value. Never set
+      # var.slack_app_token/slack_bot_token/telegram_bot_token to Iris's real
+      # tokens — mint a separate Slack app / Telegram bot per agent, or two
+      # processes end up authenticating with the same bot credentials
+      # (duplicate Socket Mode connections / Telegram getUpdates 409 conflicts,
+      # agent intermittently not responding).
+      #
+      # Caveat on Key-Vault-profile installs: iris-runtime resolves these three
+      # via getSecretProvider().get("IRIS-SLACK-APP-TOKEN" etc.), which — in
+      # secrets_mode "env" (this module's default) — falls back to `az keyvault
+      # secret show` whenever IRIS_KEY_VAULT is set and the env var is empty
+      # (engine/secrets.ts's envSecretProvider). Clearing the env var here is
+      # NOT sufficient if var.key_vault_name points at the same vault Iris's
+      # own tokens are stored in under those exact names — the agent can still
+      # resolve them via Key Vault. For installs where that isolation matters,
+      # use secrets_mode = "store" or "proxy" with unique_api_token = true
+      # instead, which requires this agent's `secrets` allow-list in
+      # agents.json to explicitly name anything it may read (see docs/secrets.md).
       docker rm -f ${local.container_name} 2>/dev/null || true
       docker run -d \
         --name ${local.container_name} \
@@ -104,8 +119,9 @@ resource "null_resource" "agent" {
         -e IRIS_KEY_VAULT=${var.key_vault_name} \
         -e IRIS_API_URL=${var.iris_api_url} \
         ${var.unique_api_token ? "-e IRIS_API_TOKEN=${random_password.api_token[0].result}" : ""} \
-        ${var.slack_app_token != "" ? "-e IRIS_SLACK_APP_TOKEN=${var.slack_app_token}" : ""} \
-        ${var.slack_bot_token != "" ? "-e IRIS_SLACK_BOT_TOKEN=${var.slack_bot_token}" : ""} \
+        -e IRIS_SLACK_APP_TOKEN=${var.slack_app_token} \
+        -e IRIS_SLACK_BOT_TOKEN=${var.slack_bot_token} \
+        -e TELEGRAM_BOT_TOKEN=${var.telegram_bot_token} \
         ${var.bridge_port > 0 ? "-e IRIS_BRIDGE_PORT=${var.bridge_port} -p 127.0.0.1:${var.bridge_port}:${var.bridge_port}" : ""} \
         -e IRIS_EVENTS_DIR=/iris/data/events \
         -v ${local.agent_dir}/data:/workspace \

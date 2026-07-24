@@ -1,9 +1,18 @@
 # ============================================================
 # Sub-Agent Definitions
 # ============================================================
-# Two module types are available:
+# NOTE: the `spawn-agent` skill's DEFAULT flow does not touch this file at
+# all — it provisions a plain systemd service (agents/service-bootstrap.template.sh),
+# no Terraform, no Docker. This file only matters for `spawn-agent --mode=docker`,
+# the advanced opt-in for agents that specifically need container isolation.
+# See docs/sub-agents.md.
 #
-# ── Docker agent (trusted internal use) ──────────────────────
+# Two module types are available here:
+#
+# ── Docker agent (trusted internal use, spawn-agent --mode=docker) ───
+# First, set enable_docker_agents = true (terraform.tfvars or -var) so the
+# shared image build in main.tf actually runs — it's gated off by default.
+#
 # module "my_agent" {
 #   source = "./modules/agent"
 #
@@ -12,7 +21,18 @@
 #   iris_api_url     = "http://172.18.0.1:3000"
 #   bridge_port      = 4100
 #   unique_api_token = true   # opt-in per-agent token (IRIS-120), see below
+#   image_dependency = null_resource.iris_runtime_image[0].id  # shared build, see main.tf
 # }
+#
+# By default this agent is bridge-only for Slack/Telegram: slack_app_token,
+# slack_bot_token, and telegram_bot_token all default to "" and that empty
+# value explicitly overrides whatever /iris/.env would otherwise inject via
+# --env-file, so the container starts with no chat-platform credentials at
+# all. To connect this agent directly to Slack or Telegram (Pattern A), set
+# the relevant variable to a SEPARATE bot's token — never Iris's own
+# IRIS_SLACK_APP_TOKEN/IRIS_SLACK_BOT_TOKEN/TELEGRAM_BOT_TOKEN, or both
+# processes will authenticate as the same bot and fight over the same
+# Socket Mode connection / Telegram getUpdates poll.
 #
 # output "my_agent_api_token" {
 #   value     = module.my_agent.api_token
