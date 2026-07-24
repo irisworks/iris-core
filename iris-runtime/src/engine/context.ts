@@ -37,12 +37,16 @@ interface LogMessage {
  * @param sessionManager - The SessionManager to sync to
  * @param channelDir - Path to channel directory containing log.jsonl
  * @param excludeSlackTs - Slack timestamp of current message (will be added via prompt(), not sync)
+ * @param sinceDate - ISO timestamp watermark (see readResetWatermark); log.jsonl entries at or
+ *   before it are skipped so a `/reset`/`/clear` isn't immediately undone by replaying the
+ *   channel's pre-reset history back into the freshly-cleared session (#109).
  * @returns Number of messages synced
  */
 export function syncLogToSessionManager(
 	sessionManager: SessionManager,
 	channelDir: string,
 	excludeSlackTs?: string,
+	sinceDate?: string,
 ): number {
 	const logFile = join(channelDir, "log.jsonl");
 
@@ -103,6 +107,10 @@ export function syncLogToSessionManager(
 			const date = logMsg.date;
 			if (!slackTs || !date) continue;
 
+			// Skip anything logged at/before the last reset — it's pre-reset history,
+			// not a message that arrived while Iris was offline/busy (#109).
+			if (sinceDate && date <= sinceDate) continue;
+
 			// Skip the current message being processed (will be added via prompt())
 			if (excludeSlackTs && slackTs === excludeSlackTs) continue;
 
@@ -139,6 +147,36 @@ export function syncLogToSessionManager(
 	}
 
 	return newMessages.length;
+}
+
+// ============================================================================
+// Reset watermark
+//
+// `/reset`/`/clear` truncate context.jsonl but deliberately leave log.jsonl
+// alone (it's the channel's permanent record). Without a watermark, the next
+// run's syncLogToSessionManager call sees an empty session, treats every line
+// in log.jsonl as unsynced, and replays the whole pre-reset conversation
+// straight back into the freshly-cleared context (#109). The watermark records
+// when the last reset happened so that replay is scoped to messages logged
+// after it.
+// ============================================================================
+
+const RESET_WATERMARK_FILE = ".reset-watermark";
+
+/** Record that a reset just happened, so future log.jsonl syncs skip everything before it. */
+export function writeResetWatermark(channelDir: string): void {
+	writeFileSync(join(channelDir, RESET_WATERMARK_FILE), new Date().toISOString());
+}
+
+/** ISO timestamp of the channel's last reset, if any. */
+export function readResetWatermark(channelDir: string): string | undefined {
+	const path = join(channelDir, RESET_WATERMARK_FILE);
+	if (!existsSync(path)) return undefined;
+	try {
+		return readFileSync(path, "utf-8").trim() || undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 // ============================================================================
