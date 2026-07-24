@@ -28,6 +28,18 @@ without per-step confirmation.
 
 ## Default flow — service mode (no Terraform, no Docker)
 
+Every `agents/...` path below is relative to the repo checkout, not to Iris's
+own working directory (`/iris/data`, where she actually runs from) — `cd`
+there first, same convention as `skills/github/SKILL.md` /
+`skills/terraform/SKILL.md`:
+```bash
+cd "${IRIS_REPO_DIR:-/iris/repo}"
+```
+Skipping this sends every relative path below looking in the wrong place
+(seen in production: `ls agents/lib/` and `cat agents/service-bootstrap.template.sh`
+came back empty from `/iris/data`, and the actual files were only found after
+a `find /iris -name ...` turned up `/iris/repo/agents/...`).
+
 ### Step 1 — Scaffold
 
 Create `agents/<name>/`:
@@ -59,9 +71,14 @@ concern from making it exist right now.
 ```bash
 PORT=$(agents/lib/register-bridge.sh next-port)
 cp agents/service-bootstrap.template.sh agents/<name>/bootstrap.sh
-# fill in AGENT_NAME=<name> and BRIDGE_PORT=$PORT in the copy
+sed -i "s/<your-agent>/<name>/g; s/<port>/${PORT}/g" agents/<name>/bootstrap.sh
 bash agents/<name>/bootstrap.sh
 ```
+Use one `sed` pass for both placeholders, not two separate edits to the same
+file — two concurrent edits to `bootstrap.sh` race on the read-modify-write,
+and the loser's substitution gets silently clobbered back to the placeholder
+(seen in production: `AGENT_NAME` reverted to `<your-agent>`, producing
+`Invalid unit name "iris-agent-<your-agent>"` on start).
 This reuses the same already-built `iris-runtime` binary Iris herself runs
 (see `bootstrap.sh`'s "Build iris-runtime" step) — no per-agent build, no
 container. The unit (`iris-agent-<name>.service`) is active in about a
@@ -113,8 +130,12 @@ channel/thread.
 ```bash
 systemctl status iris-agent-<name> --no-pager
 journalctl -u iris-agent-<name> -n 20
-curl -s http://127.0.0.1:<port>/health
+curl -s http://127.0.0.1:$((<port>+100))/health
 ```
+`/health` is served by the internal API (`engine/api.ts`), which listens on
+`IRIS_API_PORT` (`BRIDGE_PORT+100`, set by the template) — not `<port>`
+itself. `<port>` is the bridge server, which only implements `POST /bridge`
+and 404s on anything else, including `GET /health`.
 
 Done. `@<name>` works in the next message.
 
@@ -161,8 +182,13 @@ Same `agents/lib/register-bridge.sh register` call as the default flow
 ```bash
 docker ps | grep iris-<name>
 docker logs iris-<name> --tail 20
-curl -s http://localhost:<port>/health
+docker exec iris-<name> curl -s http://127.0.0.1:3000/health
 ```
+The module only publishes `bridge_port` to the host (see
+`terraform/modules/agent/main.tf`'s `docker run -p`) — the internal API's
+`IRIS_API_PORT` (default 3000 inside the container) is never mapped out, so
+`curl localhost:<port>/health` from the host can't reach it either way; check
+from inside the container instead.
 
 ## Optional flags, added at creation time
 

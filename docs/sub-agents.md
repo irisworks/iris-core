@@ -171,6 +171,20 @@ re-introduced later if needed). Commits made along the way (scaffold files,
 `terraform/agents.tf`) are skipped entirely when no GitHub PAT is configured
 in the environment, rather than attempted and left to fail.
 
+Every `agents/...` path the skill runs (`agents/lib/register-bridge.sh`,
+`agents/service-bootstrap.template.sh`, the new agent's own scaffold) is
+relative to the repo checkout, not to Iris's own working directory
+(`/iris/data`) — the skill opens with `cd "${IRIS_REPO_DIR:-/iris/repo}"`
+for exactly this reason; skip that and every relative path below it resolves
+against the wrong directory. Filling in a copied `bootstrap.sh`'s
+`AGENT_NAME`/`BRIDGE_PORT` placeholders must also happen as a single `sed`
+pass, not as two separate edits to the same file — concurrent edits race on
+the read-modify-write and one substitution can get silently clobbered back to
+its placeholder. And when verifying a freshly spawned agent, its `/health`
+lives on the internal API port (`IRIS_API_PORT`, `BRIDGE_PORT+100` for
+service mode), not the bridge port — the bridge server only implements
+`POST /bridge` and 404s on anything else, including `GET /health`.
+
 ## Internal HTTP API
 
 The runtime exposes an internal API (default `127.0.0.1:3000`, always on — see
