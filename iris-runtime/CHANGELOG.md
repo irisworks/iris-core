@@ -55,6 +55,17 @@
 
 ### Fixed
 
+- `skills/spawn-agent/SKILL.md`'s Step 3 told callers to "fill in AGENT_NAME
+  and BRIDGE_PORT" in the copied bootstrap script with no prescribed method;
+  doing it as two concurrent edits to the same file raced and silently
+  clobbered one substitution back to its placeholder (`AGENT_NAME` reverted
+  to `<your-agent>`, producing `Invalid unit name "iris-agent-<your-agent>"`
+  on start). Step now specifies a single `sed` pass for both placeholders.
+  Its Step 5 verify also curled `<port>/health`, but `<port>` is the bridge
+  server (`POST /bridge` only, 404s on anything else) — `/health` is served
+  by the internal API on `IRIS_API_PORT` (`BRIDGE_PORT+100`). Fixed for both
+  service mode and `--mode=docker` (the latter isn't host-reachable at all;
+  verify via `docker exec ... curl`).
 - `BridgeTransport.replaceMessage()` (how the engine delivers a run's final
   answer) was a no-op, so a bridge-only sub-agent's HTTP caller never got its
   response and the request hung until the 60s timeout even though the agent
