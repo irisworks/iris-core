@@ -61,3 +61,12 @@
 #   use_jailer   = true
 # }
 # ============================================================
+
+module "crossword_agent" {
+  source = "./modules/agent"
+
+  agent_name     = "crossword"
+  key_vault_name = var.key_vault_name
+  iris_api_url   = "http://172.18.0.1:3000"
+  bridge_port    = 4100
+}
