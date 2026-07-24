@@ -30,9 +30,9 @@ export class TelegramClaimManager {
 	private state: ClaimState;
 
 	constructor(workingDir: string) {
-		const dataDir = join(workingDir, "data");
-		if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
-		this.filePath = join(dataDir, "telegram-owner.json");
+		const metaDir = join(workingDir, "meta");
+		if (!existsSync(metaDir)) mkdirSync(metaDir, { recursive: true });
+		this.filePath = join(metaDir, "telegram-owner.json");
 		this.state = this.load();
 	}
 

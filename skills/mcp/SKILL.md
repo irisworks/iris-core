@@ -1,12 +1,12 @@
 ---
 name: mcp
-description: Add, remove, and test MCP (Model Context Protocol) servers by editing data/mcp.json. Tools from connected servers appear automatically as mcp__<server>__<tool>.
+description: Add, remove, and test MCP (Model Context Protocol) servers by editing meta/mcp.json. Tools from connected servers appear automatically as mcp__<server>__<tool>.
 ---
 
 # Skill: mcp
 
 Connect external toolsets to yourself via the Model Context Protocol. Servers
-configured in `<workspace>/data/mcp.json` are connected by the runtime and
+configured in `<workspace>/meta/mcp.json` are connected by the runtime and
 their tools become directly callable by you, named `mcp__<server>__<tool>`.
 The config hot-reloads before each message — no restart needed. Current
 per-server status is always visible in your system prompt under
@@ -14,7 +14,7 @@ per-server status is always visible in your system prompt under
 
 ## Config format
 
-`<workspace>/data/mcp.json` (next to `channels.json`):
+`<workspace>/meta/mcp.json` (next to `channels.json`):
 
 ```json
 {
@@ -47,7 +47,7 @@ process).
    A new `.env` var requires `sudo systemctl restart iris` to enter the
    process environment (the only case needing a restart; mcp.json edits
    themselves hot-reload).
-2. Edit `data/mcp.json` with your edit/write tools.
+2. Edit `meta/mcp.json` with your edit/write tools.
 3. Verify (see below), then call one harmless tool end-to-end.
 
 ## Verifying

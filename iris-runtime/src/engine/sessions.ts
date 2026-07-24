@@ -4,7 +4,7 @@
  * Sessions are keyed by UUID and link Slack threads (and optionally email) to
  * a persistent agent context directory (SESSION-<uuid>/).
  *
- * sessions.json lives at workingDir/data/sessions.json.
+ * sessions.json lives at workingDir/meta/sessions.json.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -39,7 +39,7 @@ export interface Session {
 // ============================================================================
 
 function getSessionsPath(workingDir: string): string {
-	return join(workingDir, "data", "sessions.json");
+	return join(workingDir, "meta", "sessions.json");
 }
 
 export function loadSessions(workingDir: string): Map<string, Session> {
@@ -54,8 +54,8 @@ export function loadSessions(workingDir: string): Map<string, Session> {
 }
 
 function saveSessions(workingDir: string, sessions: Map<string, Session>): void {
-	const dataDir = join(workingDir, "data");
-	if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
+	const metaDir = join(workingDir, "meta");
+	if (!existsSync(metaDir)) mkdirSync(metaDir, { recursive: true });
 	writeFileSync(getSessionsPath(workingDir), JSON.stringify(Array.from(sessions.values()), null, 2));
 }
 

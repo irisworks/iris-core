@@ -1721,7 +1721,7 @@ fi
 if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   # Poll for the claim state file — Iris needs a few seconds to connect to Telegram
   # and write it, so a single fixed sleep was flaky. Retry for up to 30s.
-  CLAIM_FILE="${IRIS_DIR}/data/data/telegram-owner.json"
+  CLAIM_FILE="${IRIS_DIR}/data/meta/telegram-owner.json"
   CLAIM_TOKEN=""
   CLAIM_STATUS="false"
   for _ in $(seq 1 15); do
@@ -1777,7 +1777,7 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "    iris.service (User=${TARGET_USER}) can't read its own /iris/.env (dotenv fails"
     log "    silently, so every setting falls back to hardcoded defaults, including a"
     log "    disabled Telegram transport)."
-    log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/data/ && sudo journalctl -u iris -n 30"
+    log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/meta/ && sudo journalctl -u iris -n 30"
   else
     log ""
     log "  ⚠ No Telegram claim token appeared after 30s. Check: sudo journalctl -u iris -n 50"

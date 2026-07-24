@@ -32,7 +32,7 @@ import {
 const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
 
 /**
- * Passthrough/relay configuration (data/channels.json, mode "passthrough"):
+ * Passthrough/relay configuration (meta/channels.json, mode "passthrough"):
  *   url          — external endpoint messages are forwarded to (required)
  *   secretName   — API key resolved via the get-secret skill; falls back to
  *                  the PASSTHROUGH_API_KEY env var when unset
@@ -246,7 +246,7 @@ export class SlackBot implements ChannelTransport {
 	private queues = new Map<string, ChannelQueue>();
 	private allowedChannels = new Set<string>(); // If non-empty, only respond to these channel IDs
 
-	// Channel behaviour loaded from workingDir/data/channels.json.
+	// Channel behaviour loaded from workingDir/meta/channels.json.
 	// Keyed by channel ID or prefix wildcard (e.g. "D*"); resolved via resolveChannelConfig().
 	private channelConfigs = new Map<string, ResolvedChannelConfig>();
 	private passthroughSecretCache = new Map<string, string>(); // secretName -> resolved value
@@ -278,7 +278,7 @@ export class SlackBot implements ChannelTransport {
 	// ==========================================================================
 
 	private loadChannelModes(): void {
-		const channelsPath = join(this.workingDir, "data", "channels.json");
+		const channelsPath = join(this.workingDir, "meta", "channels.json");
 		if (!existsSync(channelsPath)) return;
 		try {
 			const raw = JSON.parse(readFileSync(channelsPath, "utf-8")) as Record<string, RawChannelEntry>;
