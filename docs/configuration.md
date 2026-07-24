@@ -62,7 +62,9 @@ since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
 (see the Fixed entry in `iris-runtime/CHANGELOG.md` — do not switch Mistral's
 `api` back to `"mistral"`). Both ship ready-to-use model entries in the
 template (`deepseek-chat` / `deepseek-reasoner`, `devstral-medium-latest` /
-`mistral-large-latest`).
+`mistral-large-latest` / `mistral-medium-latest`). `mistral-medium-latest` (Mistral Medium 3.5 — 256k context window, text+image input)
+is the largest-context model in the Mistral lineup; `devstral-medium-latest` and
+`mistral-large-latest` remain selectable.
 
 For any other OpenAI-compatible endpoint (Kimi/Moonshot direct, a self-hosted
 vLLM/Ollama gateway, etc.), pick `custom` — bootstrap asks for a short provider

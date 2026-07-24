@@ -373,7 +373,7 @@ prompt_secrets() {
     echo "  3) azure-foundry   — Azure AI Foundry (Azure OpenAI, Kimi)"
     echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)"
     echo "  5) deepseek        — DeepSeek V3 / R1"
-    echo "  6) mistral         — Mistral Large / Devstral"
+    echo "  6) mistral         — Mistral Large / Medium / Devstral"
     echo "  7) custom          — any other OpenAI-compatible endpoint (Kimi/Moonshot direct, self-hosted, etc.)"
     read -r -p "[iris-bootstrap] Choice [1]: " provider_choice
     case "${provider_choice:-1}" in
@@ -946,8 +946,9 @@ MODELJSON
       "apiKey": "MISTRAL_API_KEY",
       "compat": { "supportsStore": false },
       "models": [
-        { "id": "devstral-medium-latest", "name": "Devstral Medium", "reasoning": false, "input": ["text"],          "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
-        { "id": "mistral-large-latest", "name": "Mistral Large",  "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
+        { "id": "devstral-medium-latest", "name": "Devstral Medium",    "reasoning": false, "input": ["text"],          "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "mistral-large-latest",   "name": "Mistral Large",      "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "mistral-medium-latest",  "name": "Mistral Medium 3.5", "reasoning": false, "input": ["text","image"], "contextWindow": 256000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
     }
   }

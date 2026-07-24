@@ -97,6 +97,15 @@
           "contextWindow": 128000,
           "maxTokens": 16384,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        },
+        {
+          "id": "mistral-medium-latest",
+          "name": "Mistral Medium 3.5",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 256000,
+          "maxTokens": 16384,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         }
       ]
     },
