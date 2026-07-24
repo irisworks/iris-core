@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
 import { callAgentBridge, loadAgentRegistry, parseAgentMention } from "../../engine/bridge.js";
+import { parseVerboseCommand } from "../../engine/dispatch.js";
 import { registerSessionRequest, resolveSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "../../engine/store.js";
 import { TelegramClaimManager } from "./telegram-claim.js";
@@ -150,6 +151,7 @@ export interface IrisTelegramHandler {
 	handleStop(channelId: string, bot: TelegramBot): Promise<void>;
 	handleCompact(channelId: string, bot: TelegramBot): Promise<void>;
 	handleReset(channelId: string, bot: TelegramBot): Promise<void>;
+	handleVerboseCommand(channelId: string, bot: TelegramBot, action: "on" | "off" | "status"): Promise<void>;
 }
 
 // ============================================================================
@@ -736,6 +738,19 @@ export class TelegramBot implements ChannelTransport {
 				await this.handler.handleStop(channelId, this);
 				return;
 			}
+			if (cmd === "/verbose") {
+				// Slice past the first token as it actually appears in `text` (which may carry
+				// a "@botname" suffix in group chats) — not `cmd`, which has that suffix already
+				// stripped and would otherwise leave "@botname" stuck onto the argument.
+				const firstTokenLength = text.split(/\s/)[0].length;
+				const arg = text.slice(firstTokenLength).trim().toLowerCase();
+				const action = parseVerboseCommand(arg ? `verbose ${arg}` : "verbose");
+				if (action) {
+					await this.handler.handleVerboseCommand(channelId, this, action);
+					return;
+				}
+				// Unrecognized argument (e.g. "/verbose foo") falls through as a regular message
+			}
 			// Unknown commands fall through as regular messages
 		}
 
@@ -836,6 +851,19 @@ export function createTelegramContext(event: TelegramEvent, bot: TelegramBot, st
 				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
 				if (shouldLog && messageId) {
 					bot.logBotResponse(event.channel, text, messageId);
+				}
+			});
+			await updatePromise;
+		},
+
+		setStatus: async (label: string) => {
+			updatePromise = updatePromise.then(async () => {
+				try {
+					if (messageId) {
+						await bot.updateMessage(event.channel, messageId, label);
+					}
+				} catch (err) {
+					log.logWarning("Telegram setStatus error", err instanceof Error ? err.message : String(err));
 				}
 			});
 			await updatePromise;

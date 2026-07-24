@@ -83,6 +83,10 @@ Already cloned? `bash bootstrap.sh --setup --no-keyvault` does the same without 
   buttons. Off by default; see [docs/web-ui.md](docs/web-ui.md).
 - **Control commands:** `stop`, `compact`, `reset` in an admin-mode Slack DM;
   `/stop`, `/compact`, `/reset` on Telegram; buttons in the web UI.
+- **Verbose tool output:** off by default — a run shows one status line that
+  updates in place instead of a per-tool-call/thinking dump. Toggle with
+  `verbose on|off|status` (Slack, any DM/mention) or `/verbose on|off|status`
+  (Telegram); see [Channel Modes](docs/channel-modes.md#verbose-tool-output).
 
 ## Channel Modes
 
@@ -136,6 +140,7 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 | `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
+| `IRIS_VERBOSE_TOOLS` | — (quiet) | Default verbose tool-call/thinking output on Slack/Telegram; overridable per channel with `verbose on/off/status` (Slack) or `/verbose on/off/status` (Telegram) |
 | `IRIS_WEBUI_PORT` / `IRIS_WEBUI_PASSWORD` | — (off) / — | Enable the built-in web UI on this port; shared-secret login (set it before exposing beyond loopback) |
 | `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in encrypted store / injection-proxy credential broker (see `docs/secrets.md`) |
 | `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | External secret broker for `GET /secrets/:name` (the bundled iris-broker in `proxy` mode, Vault, Infisical, or any HTTP service speaking the contract); default backend is env vars, then Key Vault if `IRIS_KEY_VAULT` is set |

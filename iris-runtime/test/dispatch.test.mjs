@@ -14,6 +14,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createSession, loadSessions } from "../dist/engine/sessions.js";
 import { resolveChannelDir } from "../dist/engine/store.js";
+import { parseVerboseCommand } from "../dist/engine/dispatch.js";
 import { fillQueue, makeBot, settle } from "./helpers.mjs";
 
 // ============================================================================
@@ -131,6 +132,59 @@ test("mention: stop while idle posts _Nothing running_ instead of handleStop", a
 	await settle();
 	assert.equal(calls.stops.length, 0);
 	assert.deepEqual(calls.posted, [{ channel: "CADM", text: "_Nothing running_" }]);
+});
+
+// ============================================================================
+// Verbose toggle (parseVerboseCommand + the mention/DM interception, which —
+// unlike stop/compact/reset — is NOT gated behind admin mode)
+// ============================================================================
+
+test("parseVerboseCommand: on/off/status, case-insensitive, trimmed, non-matches", () => {
+	assert.equal(parseVerboseCommand("verbose on"), "on");
+	assert.equal(parseVerboseCommand("  Verbose ON  "), "on");
+	assert.equal(parseVerboseCommand("verbose off"), "off");
+	assert.equal(parseVerboseCommand("VERBOSE OFF"), "off");
+	assert.equal(parseVerboseCommand("verbose"), "status");
+	assert.equal(parseVerboseCommand("verbose status"), "status");
+	assert.equal(parseVerboseCommand("verbose maybe"), false);
+	assert.equal(parseVerboseCommand("stop"), false);
+	assert.equal(parseVerboseCommand(""), false);
+});
+
+test("mention: verbose on/off/status works in dm mode too, not just admin mode", async () => {
+	const { calls, mention } = makeBot({
+		channels: { CDM: { mode: "dm" } },
+	});
+	mention({ text: "<@UBOT> verbose on", channel: "CDM", user: "U1", ts: "1000.0001" });
+	mention({ text: "<@UBOT> verbose off", channel: "CDM", user: "U1", ts: "1000.0002" });
+	mention({ text: "<@UBOT> verbose", channel: "CDM", user: "U1", ts: "1000.0003" });
+	await settle();
+	assert.deepEqual(calls.verbose, [
+		{ channelId: "CDM", action: "on" },
+		{ channelId: "CDM", action: "off" },
+		{ channelId: "CDM", action: "status" },
+	]);
+	assert.equal(calls.events.length, 0); // intercepted, never dispatched as chat
+});
+
+test("message: verbose on works from a plain DM (dm mode), unlike stop/compact/reset", async () => {
+	const { calls, message } = makeBot({
+		channels: { DPLAIN: { mode: "dm" } },
+	});
+	message({ text: "verbose on", channel: "DPLAIN", user: "U1", ts: "1000.0001", channel_type: "im" });
+	await settle();
+	assert.deepEqual(calls.verbose, [{ channelId: "DPLAIN", action: "on" }]);
+	assert.equal(calls.events.length, 0);
+});
+
+test("message: bare top-level 'verbose on' with no mention/DM is not intercepted as a control command", async () => {
+	const { calls, message } = makeBot({
+		channels: { CLEADS: { mode: "leads" } },
+	});
+	message({ text: "verbose on", channel: "CLEADS", user: "U1", ts: "1000.0001" });
+	await settle();
+	assert.equal(calls.verbose.length, 0);
+	assert.equal(calls.events.length, 1); // falls through as ordinary chat text (leads dispatches all top-level)
 });
 
 test("mention: thread mode responds only inside registered session threads", async () => {

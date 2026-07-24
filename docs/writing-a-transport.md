@@ -84,6 +84,7 @@ interface MessageContext {
 	deleteMessage: () => Promise<void>;
 	getAccumulatedText: () => string;
 	onToolEvent?: (event: ToolEvent) => void;
+	setStatus?: (label: string) => Promise<void>;
 }
 ```
 
@@ -122,6 +123,19 @@ already receives for the same tool_execution_start/end moments. Slack and
 Telegram don't implement it — mrkdwn/plain-text has nothing better to do
 with structure than flatten it — and that's a legitimate, permanent choice,
 not a gap to fill later.
+
+`setStatus` is also optional: it edits the run's placeholder message in
+place with a short status line (e.g. `_→ running bash..._`), giving a live
+"Iris is doing something" signal without posting a new message per tool
+call. Slack and Telegram both implement it by calling their own
+`updateMessage` against the placeholder id `createContext` already tracks —
+no new platform API needed. This is what backs the `verbose off` (default)
+mode described in [Channel Modes](channel-modes.md#verbose-tool-output):
+`agent.ts` calls `setStatus` on every `tool_execution_start` regardless of
+the verbose setting, and only gates the heavier per-tool-call/thinking
+detail dump behind it. Bridge has no single editable placeholder to update,
+so it simply doesn't implement `setStatus` — same optional-capability
+pattern as `onToolEvent`.
 
 ## `TransportPromptProfile` — no platform text in the engine
 

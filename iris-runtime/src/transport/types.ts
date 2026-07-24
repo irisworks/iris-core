@@ -68,6 +68,14 @@ export interface MessageContext {
 	 * the raw event instead of a pre-formatted string.
 	 */
 	onToolEvent?: (event: ToolEvent) => void;
+	/**
+	 * Edit the run's placeholder message in place with a short status line
+	 * (e.g. "_→ running bash..._"). Optional — transports with no single
+	 * editable placeholder (Bridge) can skip it. This is what gives quiet-mode
+	 * runs a live "Iris is doing something" signal without the full verbose
+	 * tool-call/thinking dump.
+	 */
+	setStatus?: (label: string) => Promise<void>;
 }
 
 export interface ToolEvent {

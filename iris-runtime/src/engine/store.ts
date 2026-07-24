@@ -3,6 +3,10 @@ import { appendFile, writeFile } from "fs/promises";
 import { join } from "path";
 import * as log from "./log.js";
 
+interface ChannelSettings {
+	verboseTools?: boolean;
+}
+
 export interface Attachment {
 	original: string; // original filename from uploader
 	local: string; // path relative to working dir (e.g., "slack/C12345/attachments/1732531234567_file.png")
@@ -90,6 +94,33 @@ export class ChannelStore {
 			mkdirSync(dir, { recursive: true });
 		}
 		return dir;
+	}
+
+	private readChannelSettings(channelId: string): ChannelSettings {
+		const settingsPath = join(this.getChannelDir(channelId), "settings.json");
+		if (!existsSync(settingsPath)) return {};
+		try {
+			return JSON.parse(readFileSync(settingsPath, "utf-8")) as ChannelSettings;
+		} catch (err) {
+			log.logWarning("Failed to read channel settings.json", err instanceof Error ? err.message : String(err));
+			return {};
+		}
+	}
+
+	private async writeChannelSettings(channelId: string, settings: ChannelSettings): Promise<void> {
+		const settingsPath = join(this.getChannelDir(channelId), "settings.json");
+		await writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf-8");
+	}
+
+	/** Per-channel verbose-tool-output override, toggled via the `verbose on|off` control command. */
+	getVerboseOverride(channelId: string): boolean | undefined {
+		return this.readChannelSettings(channelId).verboseTools;
+	}
+
+	async setVerboseOverride(channelId: string, value: boolean): Promise<void> {
+		const settings = this.readChannelSettings(channelId);
+		settings.verboseTools = value;
+		await this.writeChannelSettings(channelId, settings);
 	}
 
 	/**
