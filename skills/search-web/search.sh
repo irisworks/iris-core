@@ -11,10 +11,12 @@ if [[ -z "$QUERY" ]]; then
   exit 1
 fi
 
-# Get API key from Key Vault
+# Get API key (resolution backend — env var, Key Vault, store, or broker —
+# is chosen server-side by iris-runtime; see docs/secrets.md)
 API_KEY=$(bash /iris/data/skills/get-secret/get-secret PERPLEXITY-API-KEY 2>/dev/null) || {
-  echo "Error: PERPLEXITY-API-KEY not found in Key Vault" >&2
-  echo "Set it with: az keyvault secret set --vault-name $IRIS_KEY_VAULT --name PERPLEXITY-API-KEY --value <key>" >&2
+  echo "Error: PERPLEXITY-API-KEY not found" >&2
+  echo "Set it with: printf '%s' '<key>' | set-secret PERPLEXITY-API-KEY" >&2
+  echo "On the zero-cloud default (env mode), add PERPLEXITY_API_KEY=<key> to /iris/.env and restart iris.service instead — env vars are only read at process startup." >&2
   exit 1
 }
 

@@ -12,6 +12,17 @@ everything in `.env` is loaded into the runtime's environment, agent shell
 commands inherit that environment, and a single `env` or `cat /iris/.env` in a
 tool call can leak every credential into the conversation.
 
+`.env` is only read once, at process startup (`dotenv/config`, plus whatever
+systemd exported at spawn). Editing the file after the fact — whether by hand
+or via the agent's own shell/file tools — does not change the running
+process's environment; `iris.service` must be restarted before a new or
+updated value is resolvable. Note that `set-secret`/`PUT /secrets/:name` has
+no writable backend in env mode and returns 503 rather than touching `.env`
+(see the API table below), so anything that ends up in `.env` got there by a
+direct file write, not through the secrets API. `store`/`proxy` mode doesn't
+have this restart gap: the encrypted store file is re-read on every lookup,
+so secrets added there apply immediately.
+
 Pick a mode at bootstrap (`bootstrap.sh --secrets-mode=store` or
 `--secrets-mode=proxy`) or set `IRIS_SECRETS_MODE` in `/iris/.env` and follow
 the migration section below.
