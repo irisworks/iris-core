@@ -70,6 +70,21 @@ export function parseAdminCommand(text: string): "stop" | "compact" | "reset" | 
 }
 
 /**
+ * Whether (lowercased, trimmed) text toggles verbose tool-call/thinking
+ * output. Deliberately NOT part of `DispatchDecision`/`resolveDispatch` —
+ * unlike `stop`/`compact`/`reset`, this isn't gated behind admin mode; it's a
+ * UX preference, not a destructive action, so callers intercept it directly
+ * from any DM or explicit mention regardless of the channel's configured mode.
+ */
+export function parseVerboseCommand(text: string): "on" | "off" | "status" | false {
+	const cmd = text.toLowerCase().trim();
+	if (cmd === "verbose on") return "on";
+	if (cmd === "verbose off") return "off";
+	if (cmd === "verbose" || cmd === "verbose status") return "status";
+	return false;
+}
+
+/**
  * Resolve what an inbound message should do, given its channel's dispatch
  * config. Session lookups/creation happen here (synchronous, disk-backed —
  * same as the code this replaces) so callers never touch sessions.ts

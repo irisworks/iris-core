@@ -51,6 +51,7 @@ export interface Engine {
 	handleStop(channelId: string, transport: EngineTransport): Promise<void>;
 	handleCompact(channelId: string, transport: EngineTransport): Promise<void>;
 	handleReset(channelId: string, transport: EngineTransport): Promise<void>;
+	handleVerboseCommand(channelId: string, transport: EngineTransport, action: "on" | "off" | "status"): Promise<void>;
 }
 
 export function createEngine(config: EngineConfig): Engine {
@@ -74,6 +75,22 @@ export function createEngine(config: EngineConfig): Engine {
 
 	function isRunning(channelId: string): boolean {
 		return channelStates.get(channelId)?.running ?? false;
+	}
+
+	/**
+	 * Effective verbose-tool-output setting: per-channel override, else the
+	 * IRIS_VERBOSE_TOOLS default (quiet unless set). Only Slack and Telegram
+	 * get this quiet-by-default treatment — Bridge just accumulates text for
+	 * the session API regardless, and the Web UI already has its own
+	 * "thread"/auxiliary panel (thinking, usage summary, errors) that predates
+	 * this toggle and isn't meant to be muted by it, so both stay at the old
+	 * always-verbose behavior.
+	 */
+	function resolveVerbose(channelId: string, store: ChannelStore, transportId: string): boolean {
+		if (transportId !== "slack" && transportId !== "telegram") return true;
+		const override = store.getVerboseOverride(channelId);
+		if (override !== undefined) return override;
+		return process.env.IRIS_VERBOSE_TOOLS === "true";
 	}
 
 	return {
@@ -125,6 +142,18 @@ export function createEngine(config: EngineConfig): Engine {
 			await transport.postMessage(channelId, "_Context cleared — starting fresh_");
 		},
 
+		async handleVerboseCommand(channelId: string, transport: EngineTransport, action: "on" | "off" | "status"): Promise<void> {
+			const state = getState(channelId);
+			if (action === "status") {
+				const verbose = state.store.getVerboseOverride(channelId) ?? (process.env.IRIS_VERBOSE_TOOLS === "true");
+				await transport.postMessage(channelId, `_Verbose tool output: ${verbose ? "on" : "off"}_`);
+				return;
+			}
+			const value = action === "on";
+			await state.store.setVerboseOverride(channelId, value);
+			await transport.postMessage(channelId, `_Verbose tool output: ${value ? "on" : "off"}_`);
+		},
+
 		async handleEvent(event: TransportEvent, transport: EngineTransport, isEvent?: boolean): Promise<void> {
 			const state = getState(event.channel);
 
@@ -141,7 +170,7 @@ export function createEngine(config: EngineConfig): Engine {
 				// Run the agent
 				await ctx.setTyping(true);
 				await ctx.setWorking(true);
-				const result = await state.runner.run(ctx, state.store);
+				const result = await state.runner.run(ctx, state.store, undefined, resolveVerbose(event.channel, state.store, ctx.transportId));
 				await ctx.setWorking(false);
 
 				// Resolve pending session API request (POST /sessions/:id/message bridge pattern)

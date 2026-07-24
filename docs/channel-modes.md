@@ -44,6 +44,21 @@ named mode.
 }
 ```
 
+## Verbose tool output
+
+By default (`IRIS_VERBOSE_TOOLS` unset), a run shows one status line that
+updates in place as Iris works (e.g. `_→ running bash..._`), then gets
+replaced by the final answer — no per-tool-call thread replies (Slack) or
+flat messages (Telegram), no chain-of-thought dump, no per-run cost summary.
+
+Toggle it with `verbose on` / `verbose off` / `verbose status` on Slack, or
+`/verbose on|off|status` on Telegram. Unlike `stop`/`compact`/`reset`, this
+is **not** gated behind `admin` mode — it's a UX preference, not a
+destructive action, so it works from any DM or explicit `@iris` mention in
+any channel mode. The setting persists per channel (in that channel's
+`settings.json`) until toggled again; `IRIS_VERBOSE_TOOLS=true` in `/iris/.env`
+changes the default for channels that haven't set their own override.
+
 ## Passthrough configuration
 
 Passthrough channels forward every message — top-level channel messages,

@@ -46,6 +46,7 @@ export interface AgentRunner {
 		ctx: MessageContext,
 		store: ChannelStore,
 		pendingMessages?: PendingMessage[],
+		verbose?: boolean,
 	): Promise<{ stopReason: string; errorMessage?: string }>;
 	abort(): void;
 	/** Summarise old messages into a single compaction entry and replace in-context */
@@ -652,6 +653,7 @@ function createRunner(
 		},
 		stopReason: "stop",
 		errorMessage: undefined as string | undefined,
+		verbose: false,
 	};
 
 	// Subscribe to events ONCE
@@ -683,6 +685,7 @@ function createRunner(
 			});
 			if (!isSessionChannel) {
 				queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
+				queue.enqueue(() => ctx.setStatus?.(`_→ ${label}..._`) ?? Promise.resolve(), "tool status");
 			}
 		} else if (event.type === "tool_execution_end") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_end" };
@@ -710,7 +713,9 @@ function createRunner(
 			if (argsFormatted) threadMessage += `\`\`\`\n${argsFormatted}\n\`\`\`\n`;
 			threadMessage += `*Result:*\n\`\`\`\n${resultStr}\n\`\`\``;
 
-			queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+			if (runState.verbose) {
+				queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+			}
 			ctx.onToolEvent?.({
 				id: agentEvent.toolCallId,
 				toolName: agentEvent.toolName,
@@ -770,11 +775,13 @@ function createRunner(
 				const MAX_THINKING = 2900;
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
-					const truncated =
-						thinking.length > MAX_THINKING
-							? thinking.substring(0, MAX_THINKING) + "\n\n_(thinking truncated)_"
-							: thinking;
-					queue.enqueueMessage(`_${truncated}_`, "thread", "thinking thread", false);
+					if (runState.verbose) {
+						const truncated =
+							thinking.length > MAX_THINKING
+								? thinking.substring(0, MAX_THINKING) + "\n\n_(thinking truncated)_"
+								: thinking;
+						queue.enqueueMessage(`_${truncated}_`, "thread", "thinking thread", false);
+					}
 				}
 
 				if (text.trim()) {
@@ -907,6 +914,7 @@ function createRunner(
 			ctx: MessageContext,
 			_store: ChannelStore,
 			_pendingMessages?: PendingMessage[],
+			verbose?: boolean,
 		): Promise<{ stopReason: string; errorMessage?: string }> {
 			// Resolve the transport's prompt profile — registered by the transport module
 			const profile = getPromptProfile(ctx.transportId);
@@ -983,6 +991,7 @@ function createRunner(
 				userName: ctx.message.userName,
 				channelName: ctx.channelName,
 			};
+			runState.verbose = verbose ?? false;
 			runState.pendingTools.clear();
 			runState.totalUsage = {
 				input: 0,
@@ -1232,8 +1241,10 @@ function createRunner(
 
 			if (runState.totalUsage.cost.total > 0) {
 				const summary = log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
-				runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
-				await queueChain;
+				if (runState.verbose) {
+					runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
+					await queueChain;
+				}
 			}
 
 			// Auto-compact if context is >= 70% full and run completed normally
