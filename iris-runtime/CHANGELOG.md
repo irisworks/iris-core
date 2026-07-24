@@ -4,6 +4,13 @@
 
 ### Added
 
+- Skills may now declare `secrets: [NAME, ...]` in their `SKILL.md`
+  frontmatter — the secret names their script actually resolves (#125).
+  `search-web`, `github`, `send-email`, and `transcribe-audio` declare
+  theirs. `spawn-agent` reads these when a skill is attached to a new
+  sub-agent and carries them into that agent's `agents.json` `secrets`
+  allow-list, instead of the skill failing silently the first time it's
+  invoked. See `docs/skills.md`.
 - Deterministic `@agentname` bridge routing for Slack and Telegram
   (`parseAgentMention()` in `iris-runtime/src/engine/bridge.ts`, wired into
   `slack.ts`'s `app_mention`/`message` handlers and `telegram.ts`'s
@@ -48,6 +55,31 @@
 
 ### Fixed
 
+- `BridgeTransport.replaceMessage()` (how the engine delivers a run's final
+  answer) was a no-op, so a bridge-only sub-agent's HTTP caller never got its
+  response and the request hung until the 60s timeout even though the agent
+  had already generated the reply. `postMessage()` now resolves the pending
+  request too, for callers that post directly. `startBridgeServer()` also
+  leaked its 60s per-request timer when event-file writes failed (missed
+  `clearTimeout`), and now returns the underlying `http.Server` so it can
+  actually be shut down (tests; no behavior change for `main.ts`'s call).
+- `agents/service-bootstrap.template.sh` gave every sub-agent zero LLM key,
+  no `models.json`, and left `IRIS_API_PORT` unset (colliding with Iris's own
+  port 3000, `EADDRINUSE`). It now resolves the correct provider's key from
+  `/iris/.env` (per-provider env var name, not a uniform guess) as its own
+  `Environment=` line, symlinks `models.json`, and assigns each agent a
+  distinct `IRIS_API_PORT`.
+- `@agentname` bridge requests reused a fresh random ID per call, so every
+  mention landed in a new sub-agent session directory with no memory of the
+  prior turn. `callAgentBridge()` now accepts a stable conversation key
+  (Slack channel+thread, Telegram channel, web session), reused as the
+  session ID across repeated mentions from the same origin.
+- `agents/service-bootstrap.template.sh` (host/systemd sub-agents) now
+  resolves `IRIS_PROVIDER`/`IRIS_MODEL` from `/iris/.env` at bootstrap time
+  and embeds them as literal `Environment=` lines, and its warning against
+  `EnvironmentFile=/iris/.env` now explains systemd's last-wins merge order —
+  a prior fix's `Environment=TELEGRAM_BOT_TOKEN=` clear was silently undone
+  by exactly this pattern on a live agent.
 - Sub-agents could end up authenticating with Iris's own Slack/Telegram bot
   credentials, causing two processes to fight over the same Socket Mode
   connection / Telegram `getUpdates` poll (Telegram returns 409 "terminated

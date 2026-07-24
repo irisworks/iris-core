@@ -22,6 +22,7 @@ skills/
 ---
 name: send-email
 description: Send an email via the configured provider.
+secrets: [RESEND-API-KEY]
 ---
 
 # Skill: send-email
@@ -29,6 +30,15 @@ description: Send an email via the configured provider.
 Usage: send-email --to <addr> --subject <s> --body <b>
 ...
 ```
+
+`secrets:` is optional frontmatter — a list of secret names (`get-secret`
+names, e.g. `PERPLEXITY-API-KEY`) this skill's script actually resolves at
+runtime. It's how `spawn-agent` decides which credentials a new sub-agent
+needs: when a skill with a `secrets:` list is attached to an agent
+(`--with-skill=<name>`), those names get carried into the agent's
+`agents.json` allow-list and, on env-mode installs, into its systemd unit —
+see [Sub-agents](sub-agents.md). A skill with no `secrets:` field is assumed
+to need none.
 
 ## Load order and overrides
 

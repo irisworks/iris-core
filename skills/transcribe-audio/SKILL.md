@@ -1,6 +1,7 @@
 ---
 name: transcribe-audio
 description: Transcribe an audio file (m4a, mp3, wav, ogg, webm) to text using OpenAI Whisper API. Use when a user shares a voice note or audio attachment.
+secrets: [OPENAI-API-KEY]
 ---
 
 # Skill: transcribe-audio

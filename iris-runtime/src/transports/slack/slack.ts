@@ -728,8 +728,9 @@ export class SlackBot implements ChannelTransport {
 		if (!mention) return false;
 
 		const query = mention.query.trim() || text;
+		const conversationKey = `slack-${channel}${threadTs ? `-${threadTs}` : ""}`;
 		try {
-			const reply = await callAgentBridge(mention.entry.bridge_url, query, user);
+			const reply = await callAgentBridge(mention.entry.bridge_url, query, user, undefined, conversationKey);
 			if (threadTs) {
 				await this.postInThread(channel, threadTs, reply);
 			} else {

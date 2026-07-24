@@ -57,6 +57,11 @@ creation, not after a separate manual registration step.
   an explicit `?agent=` query param on its WebSocket connection
   (`transports/web/web.ts`), not a parsed `@name`.
 
+Each transport passes a stable conversation key (Slack channel+thread,
+Telegram channel, web session) into `callAgentBridge()`, so repeated
+`@mentions` from the same origin reuse the same sub-agent session and its
+prior turns — a fresh conversation elsewhere gets a fresh session.
+
 In every case, the sub-agent's own process never touches Slack/Telegram/the
 Web UI directly — whichever transport originally received the message (already
 holding its channel/thread context) is the one that posts the reply, using its
@@ -78,6 +83,16 @@ via `GET /secrets/:name` — and a per-agent `token` so the API can tell agents 
 Omitted or empty `secrets` = no access. Iris herself (not a sub-agent) is
 unrestricted. See [get-secret](skills.md) and [Configuration](configuration.md) for
 the resolution backends.
+
+**Deciding the allow-list is `spawn-agent`'s job, not a manual afterthought.**
+A skill's `SKILL.md` frontmatter may declare `secrets: [NAME, ...]` — the
+secret names its script actually resolves (see [Skills](skills.md)). When
+`spawn-agent` attaches a skill to a new agent, it collects every attached
+skill's `secrets:` entries and passes them to
+`agents/lib/register-bridge.sh register`'s `secrets_csv` argument, which
+merges them into this `secrets` array. Skip this and the skill fails the
+moment it's invoked (a 403 from `GET /secrets/:name`), not at spawn time —
+the agent looks fully set up until then.
 
 With the host's `IRIS_SECRETS_MODE` set to `store` or `proxy`,
 `terraform/modules/agent`'s `secrets_mode` variable (default `"env"`, matching
@@ -128,6 +143,17 @@ default — set `slack_app_token`/`slack_bot_token`/`telegram_bot_token` to a
 distinct bot's credentials only when Pattern A is actually wanted. The
 equivalent applies to `agents/bootstrap.template.sh` and to
 `agents/service-bootstrap.template.sh`'s `Environment=` lines.
+
+**This ordering guarantee does not extend to a systemd unit.** Docker
+guarantees `-e` overrides apply after `--env-file`, but systemd merges
+`Environment=`/`EnvironmentFile=` in unit-file order, last-one-per-variable
+wins — an `EnvironmentFile=/iris/.env` line added after an explicit
+`Environment=TELEGRAM_BOT_TOKEN=` clear silently restores the real token from
+the file. Never add `EnvironmentFile=/iris/.env` to a service-mode sub-agent's
+unit at all; if it needs a specific value out of `/iris/.env` (an LLM key,
+`IRIS_PROVIDER`), resolve it once at bootstrap time and embed the resolved
+value as its own literal `Environment=` line, the way
+`agents/service-bootstrap.template.sh` resolves `IRIS_PROVIDER`/`IRIS_MODEL`.
 
 The `iris-runtime:local` Docker image used by `--mode=docker` agents is built
 once, by a single shared `null_resource.iris_runtime_image` in `terraform/main.tf`,

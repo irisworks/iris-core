@@ -355,7 +355,7 @@ export class WebTransport implements ChannelTransport {
 			const id = randomToken();
 			this.broadcast(channelId, { type: "thinking", id });
 			try {
-				const text = await callAgentBridge(entry.bridge_url, body.text, "web");
+				const text = await callAgentBridge(entry.bridge_url, body.text, "web", undefined, `web-${channelId}`);
 				this.broadcast(channelId, { type: "final", id, text });
 			} catch (err) {
 				this.broadcast(channelId, { type: "error", message: err instanceof Error ? err.message : String(err) });

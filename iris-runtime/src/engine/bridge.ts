@@ -73,9 +73,12 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 
 /**
  * Start the bridge HTTP server on the given port.
- * Called by sub-agents (not by Iris herself).
+ * Called by sub-agents (not by Iris herself). Returns the underlying server
+ * so callers that need to shut it down (tests) can — main.ts's own call
+ * ignores the return value, matching the process-lifetime behavior before
+ * this existed.
  */
-export function startBridgeServer(port: number, workingDir: string): void {
+export function startBridgeServer(port: number, workingDir: string): import("http").Server {
 	const BRIDGE_TIMEOUT_MS = 60_000; // 60 seconds max for sub-agent to respond
 
 	const server = createServer(async (req, res) => {
@@ -102,8 +105,9 @@ export function startBridgeServer(port: number, workingDir: string): void {
 		log.logInfo(`[bridge] Received request ${requestId}: ${text.substring(0, 60)}`);
 
 		// Register pending request BEFORE writing event file to avoid race
+		let timer: ReturnType<typeof setTimeout>;
 		const responsePromise = new Promise<string>((resolve, reject) => {
-			const timer = setTimeout(() => {
+			timer = setTimeout(() => {
 				pendingRequests.delete(requestId);
 				reject(new Error(`Bridge request ${requestId} timed out after ${BRIDGE_TIMEOUT_MS / 1000}s`));
 			}, BRIDGE_TIMEOUT_MS);
@@ -121,6 +125,7 @@ export function startBridgeServer(port: number, workingDir: string): void {
 				text,
 			}));
 		} catch (err) {
+			clearTimeout(timer!);
 			pendingRequests.delete(requestId);
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] Failed to write event file: ${msg}`);
@@ -150,6 +155,8 @@ export function startBridgeServer(port: number, workingDir: string): void {
 	server.on("error", (err) => {
 		log.logWarning("[bridge] Server error", err.message);
 	});
+
+	return server;
 }
 
 // ============================================================================
@@ -215,16 +222,35 @@ export function parseAgentMention(
 }
 
 /**
+ * Sanitize a caller-supplied conversation key into a safe requestId — it
+ * becomes part of a `BRIDGE-{id}` channelId, which store.ts joins directly
+ * onto a filesystem path, so anything outside [\w-] gets collapsed.
+ */
+function sanitizeBridgeKey(key: string): string {
+	return key.replace(/[^\w-]/g, "-").slice(0, 128) || randomBytes(8).toString("hex");
+}
+
+/**
  * Forward a message to a sub-agent via its bridge server.
  * Returns the agent's response text, or throws on timeout/error.
+ *
+ * `conversationKey`, when given, is reused as the bridge requestId (and thus
+ * the sub-agent's `BRIDGE-{id}` session directory) instead of a fresh random
+ * one — so repeated `@mentions` from the same origin conversation (a Slack
+ * channel/thread, a Telegram chat, a web session) land in the same sub-agent
+ * session and keep its `context.jsonl` history, rather than starting a blank
+ * session on every single message. Omit it only for one-off calls that
+ * should never share history (there are currently none — every transport
+ * call site passes one).
  */
 export async function callAgentBridge(
 	bridgeUrl: string,
 	text: string,
 	user: string,
 	timeoutMs = 120_000,
+	conversationKey?: string,
 ): Promise<string> {
-	const requestId = randomBytes(8).toString("hex");
+	const requestId = conversationKey ? sanitizeBridgeKey(conversationKey) : randomBytes(8).toString("hex");
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);

@@ -65,25 +65,48 @@ bash agents/<name>/bootstrap.sh
 This reuses the same already-built `iris-runtime` binary Iris herself runs
 (see `bootstrap.sh`'s "Build iris-runtime" step) — no per-agent build, no
 container. The unit (`iris-agent-<name>.service`) is active in about a
-second.
+second. `service-bootstrap.template.sh` already resolves and embeds the
+current `IRIS_PROVIDER`/`IRIS_MODEL`/LLM key and symlinks `models.json`, so
+the agent can generate a response with no further action — but see below for
+any *other* secret a skill you're attaching needs.
+
+**Decide which secrets this agent needs, from the skills it's actually
+getting.** If `--with-skill=<name>` scaffolded a skill (or a starter skill was
+copied by hand) whose `SKILL.md` frontmatter declares a `secrets:` list — e.g.
+`search-web`'s `secrets: [PERPLEXITY-API-KEY]` — that secret must reach this
+agent or the skill fails at the exact moment it's invoked, not at spawn time.
+Don't guess or skip this: read every attached skill's frontmatter and collect
+its `secrets:` entries. For each one, in an env-mode install, resolve it from
+`/iris/.env` and add it to `agents/<name>/bootstrap.sh` as its own literal
+`Environment=` line — the same pattern the template already uses for the LLM
+key, never `EnvironmentFile=/iris/.env` (see the template's own warning for
+why). In a store/proxy-mode install, skip the literal env var and instead pass
+it through the `secrets` allow-list in the next step — the agent resolves it
+itself via `get-secret`/the internal broker route, credential-store agnostic
+either way.
 
 ### Step 4 — Patch it into the bridge (always, unconditional)
 
 ```bash
-agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>"
+agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>" "" "<SECRET-A,SECRET-B>"
 ```
-This writes/merges the entry into `/iris/data/agents.json` under an `flock`,
-without disturbing any other agent's entry. There is no flag to skip this
-step; it's what makes `@<name>` work immediately — on Slack/Telegram, a
-**leading** `@<name>` prefix is matched deterministically against this
-registry and bypasses Iris's own LLM turn entirely for that message
-(`parseAgentMention()` in `iris-runtime/src/engine/bridge.ts`, wired into
-`slack.ts`/`telegram.ts`); an unmatched or non-leading `@name` falls through
-to Iris's normal intent-based routing instead (her system prompt already
-tells her to delegate by inferred intent, no @mention required — see
-`engine/agent.ts`). Either way, the sub-agent's own process never touches
-Slack/Telegram directly — whichever transport received the message posts the
-reply itself, on the same channel/thread.
+The 5th argument is the comma-separated `secrets` allow-list from the step
+above (omit or leave empty if no attached skill declares any) — it's what lets
+this agent's own `get-secret` calls resolve them at all; without it, `GET
+/secrets/:name` 403s regardless of which backend (store, proxy, external
+broker, Key Vault) the install uses. This writes/merges the entry into
+`/iris/data/agents.json` under an `flock`, without disturbing any other
+agent's entry. There is no flag to skip this step; it's what makes `@<name>`
+work immediately — on Slack/Telegram, a **leading** `@<name>` prefix is
+matched deterministically against this registry and bypasses Iris's own LLM
+turn entirely for that message (`parseAgentMention()` in
+`iris-runtime/src/engine/bridge.ts`, wired into `slack.ts`/`telegram.ts`); an
+unmatched or non-leading `@name` falls through to Iris's normal intent-based
+routing instead (her system prompt already tells her to delegate by inferred
+intent, no @mention required — see `engine/agent.ts`). Either way, the
+sub-agent's own process never touches Slack/Telegram directly — whichever
+transport received the message posts the reply itself, on the same
+channel/thread.
 
 ### Step 5 — Verify
 
