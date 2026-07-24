@@ -48,6 +48,13 @@ variable "slack_bot_token" {
   sensitive   = true
 }
 
+variable "telegram_bot_token" {
+  description = "Agent-specific Telegram bot token (mint a separate bot for this agent — never Iris's own TELEGRAM_BOT_TOKEN, or both processes will poll getUpdates with the same credentials and 409 each other). Empty (default) explicitly clears whatever /iris/.env would otherwise inject via --env-file, so this agent stays bridge-only for Telegram unless given its own token."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "webui_dir" {
   description = "Optional path to a webui source directory to mount at /workspace/webui (agent can edit files live)"
   type        = string

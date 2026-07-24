@@ -4,6 +4,21 @@
 
 ### Added
 
+- Deterministic `@agentname` bridge routing for Slack and Telegram
+  (`parseAgentMention()` in `iris-runtime/src/engine/bridge.ts`, wired into
+  `slack.ts`'s `app_mention`/`message` handlers and `telegram.ts`'s
+  `handleUpdate`). A message opening with a name registered in `agents.json`
+  now bypasses Iris's own LLM turn entirely — the transport calls
+  `callAgentBridge()` directly and posts the reply itself on the same
+  channel/thread — mirroring how the Web UI transport already worked via its
+  `?agent=` param. Previously Slack/Telegram had no `@mention` detection code
+  at all; delegation only happened when Iris's LLM inferred intent from her
+  own system prompt (`engine/agent.ts`), which still runs as a fallback for
+  messages that don't use a leading `@name` prefix or don't match a known
+  agent. `docs/sub-agents.md` and `skills/spawn-agent/SKILL.md` previously
+  described `@agentname` as literal-text HTTP routing for all transports,
+  which was only ever true for the Web UI — corrected to describe the actual
+  per-transport behavior.
 - `spawn-agent` simplified: the default path now provisions a plain systemd
   service (`agents/service-bootstrap.template.sh`) instead of a Terraform-managed
   Docker container — no image build, no `terraform apply`, active in about a
@@ -31,6 +46,31 @@
 
 ### Fixed
 
+- Sub-agents could end up authenticating with Iris's own Slack/Telegram bot
+  credentials, causing two processes to fight over the same Socket Mode
+  connection / Telegram `getUpdates` poll (Telegram returns 409 "terminated
+  by other getUpdates request" to whichever loses) — symptom: the sub-agent
+  intermittently stops responding, with no obvious error. Root cause:
+  `terraform/modules/agent/main.tf`'s `docker run` always passed `--env-file
+  /iris/.env` (secrets_mode `"env"`, the default), injecting
+  `IRIS_SLACK_APP_TOKEN`/`IRIS_SLACK_BOT_TOKEN`/`TELEGRAM_BOT_TOKEN` into
+  every container regardless of that agent's own `slack_app_token`/
+  `slack_bot_token` module variables — leaving them unset did nothing to
+  clear what `--env-file` had already injected, and there was no per-agent
+  Telegram token variable at all. The module (and the equivalent manual
+  `agents/bootstrap.template.sh`) now always pass these three explicitly,
+  even empty, which — applied after `--env-file` — clears them back out
+  unless the agent was given its own distinct value; added a new
+  `telegram_bot_token` variable alongside the existing Slack ones. (Caveat:
+  on Key-Vault-profile installs, this alone isn't sufficient if the vault
+  holds a secret under the exact same name as Iris's own token — see the
+  comment in `terraform/modules/agent/main.tf` and `docs/sub-agents.md` for
+  the `secrets_mode = "store"/"proxy"` mitigation.) `agents/service-bootstrap.template.sh`'s
+  header comment wrongly claimed this new service-mode path inherits
+  `/iris/.env` "the same way iris.service does" — it doesn't (different
+  `WorkingDirectory`, so dotenv resolves nothing there), which is intentional
+  and safe; corrected the comment and added the same credential-isolation
+  warning next to its optional Slack/Telegram `Environment=` example.
 - `/reset`/`/clear` didn't actually clear anything for the running process. Channel runners (and the `SessionManager` each one owns) are cached one-per-channel for the life of the `iris` process (`getOrCreateRunner`) — `SessionManager` keeps its entries purely in memory and never re-reads `context.jsonl` on its own, so `reset()`'s `writeFileSync(contextFile, "")` was truncating a file nobody in the live process was about to re-read: the very next message rebuilt `agent.state.messages` straight from the untouched in-memory entries via `buildSessionContext()`, restoring the full pre-reset conversation immediately — no restart, no `log.jsonl` involved. `reset()` now also calls `sessionManager.setSessionFile(contextFile)`, which forces a reload from the now-empty file and re-establishes a fresh session header.
 - With that fixed, a second issue became reachable: `syncLogToSessionManager()` (runs before every reply to pick up messages logged in `log.jsonl` while Iris was offline/busy — `log.jsonl` is the channel's permanent, never-pruned record and is deliberately left alone by reset) would see the now-genuinely-empty session and treat every line in `log.jsonl` as unsynced, replaying the entire pre-reset conversation straight back in anyway. Symptom of both bugs together: `last_prompt.jsonl` (a raw debug dump of the live session, not itself a cause) kept showing old conversation history after a reset, and reset conversations silently ballooned back to full size — worsening the smaller-model reliability/latency issues in #109. `reset()` now writes a `.reset-watermark` timestamp per channel, and `syncLogToSessionManager()` skips any `log.jsonl` entry at or before it, so only genuinely new post-reset messages replay.
 - `/clear` is now accepted as an alias for `/reset` on Telegram (slash command) and Slack (bare admin-command text) — previously only `/reset` cleared history, so `/clear` (the convention in Claude Code, ChatGPT, etc.) silently fell through as an ordinary chat message instead (#109).

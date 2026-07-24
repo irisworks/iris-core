@@ -4,6 +4,7 @@ import { execFileSync } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
+import { callAgentBridge, loadAgentRegistry, parseAgentMention } from "../../engine/bridge.js";
 import { admitsBotMessage, parseAdminCommand, resolveDispatch, type InboundMessage } from "../../engine/dispatch.js";
 import {
 	DEFAULT_CHANNEL_CONFIG,
@@ -706,6 +707,41 @@ export class SlackBot implements ChannelTransport {
 		return result.ts as string;
 	}
 
+	/**
+	 * Deterministic `@agentname` bridge shortcut — mirrors web.ts's `?agent=`
+	 * handling. If `text` opens with a name registered in agents.json, forward
+	 * it to that sub-agent's bridge and post the reply directly, skipping
+	 * Iris's own LLM turn entirely for this message. Returns true if handled
+	 * (caller should return without dispatching further); false if there was
+	 * no leading mention or it didn't match a known agent, in which case the
+	 * message falls through to normal dispatch/Iris's intent-based routing.
+	 */
+	private async tryHandleAgentMention(text: string, user: string, channel: string, threadTs?: string): Promise<boolean> {
+		const registry = loadAgentRegistry(this.workingDir);
+		const mention = parseAgentMention(text, registry);
+		if (!mention) return false;
+
+		const query = mention.query.trim() || text;
+		try {
+			const reply = await callAgentBridge(mention.entry.bridge_url, query, user);
+			if (threadTs) {
+				await this.postInThread(channel, threadTs, reply);
+			} else {
+				await this.postMessage(channel, reply);
+			}
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			log.logWarning(`[bridge] @${mention.name} request failed`, msg);
+			const errorText = `⚠️ Couldn't reach @${mention.name}: ${msg}`;
+			if (threadTs) {
+				await this.postInThread(channel, threadTs, errorText);
+			} else {
+				await this.postMessage(channel, errorText);
+			}
+		}
+		return true;
+	}
+
 	async uploadFile(channel: string, filePath: string, title?: string): Promise<void> {
 		if (this.isVirtualChannel(channel)) return;
 		const effectiveChannelId = channel.startsWith("SESSION-")
@@ -806,7 +842,7 @@ export class SlackBot implements ChannelTransport {
 
 	private setupEventHandlers(): void {
 		// Channel @mentions
-		this.socketClient.on("app_mention", ({ event, ack }) => {
+		this.socketClient.on("app_mention", async ({ event, ack }) => {
 			// Every exit path must ack or Slack redelivers the envelope; the finally
 			// below guarantees exactly one ack even if the handler throws.
 			let acked = false;
@@ -853,6 +889,11 @@ export class SlackBot implements ChannelTransport {
 				// Only respond to allowed channels (if filter is configured)
 				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) return;
 
+				// Deterministic @agentname bridge shortcut — bypasses Iris's own LLM
+				// turn entirely when the message opens with a registered sub-agent's
+				// name; falls through to normal dispatch below on no match.
+				if (await this.tryHandleAgentMention(slackEvent.text, slackEvent.user, e.channel, e.thread_ts)) return;
+
 				const dispatchConfig = this.getDispatchConfig(e.channel);
 				const input: InboundMessage = {
 					channel: e.channel,
@@ -898,7 +939,7 @@ export class SlackBot implements ChannelTransport {
 		});
 
 		// All messages (for logging) + DMs (for triggering)
-		this.socketClient.on("message", ({ event, ack }) => {
+		this.socketClient.on("message", async ({ event, ack }) => {
 			// Every exit path must ack or Slack redelivers the envelope; the finally
 			// below guarantees exactly one ack even if the handler throws.
 			let acked = false;
@@ -1000,6 +1041,9 @@ export class SlackBot implements ChannelTransport {
 
 				// Only respond to allowed channels (if filter is configured)
 				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) return;
+
+				// Deterministic @agentname bridge shortcut (see app_mention above).
+				if (await this.tryHandleAgentMention(slackEvent.text, slackEvent.user, e.channel, e.thread_ts)) return;
 
 				const input: InboundMessage = {
 					channel: e.channel,

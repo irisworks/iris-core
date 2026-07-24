@@ -73,9 +73,17 @@ second.
 agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>"
 ```
 This writes/merges the entry into `/iris/data/agents.json` under an `flock`,
-without disturbing any other agent's entry — see `iris-runtime/src/engine/bridge.ts`
-for how Iris resolves `@<name>` to this `bridge_url`. There is no flag to skip
-this step; it's what makes `@<name>` work immediately.
+without disturbing any other agent's entry. There is no flag to skip this
+step; it's what makes `@<name>` work immediately — on Slack/Telegram, a
+**leading** `@<name>` prefix is matched deterministically against this
+registry and bypasses Iris's own LLM turn entirely for that message
+(`parseAgentMention()` in `iris-runtime/src/engine/bridge.ts`, wired into
+`slack.ts`/`telegram.ts`); an unmatched or non-leading `@name` falls through
+to Iris's normal intent-based routing instead (her system prompt already
+tells her to delegate by inferred intent, no @mention required — see
+`engine/agent.ts`). Either way, the sub-agent's own process never touches
+Slack/Telegram directly — whichever transport received the message posts the
+reply itself, on the same channel/thread.
 
 ### Step 5 — Verify
 
@@ -157,3 +165,14 @@ None of these are asked about or invoked unless explicitly requested.
   starting at 4200 — no need to pick one by hand.
 - Container name (docker mode): `iris-<agent-name>`. Service name (default
   mode): `iris-agent-<agent-name>`.
+- Bridge-only agents (the default, both modes) never need Slack/Telegram
+  credentials — the bridge is a plain HTTP listener. If an agent should also
+  connect directly to Slack/Telegram itself (Pattern A, `agents/README.md`),
+  mint it a **separate** bot — never reuse Iris's own `IRIS_SLACK_APP_TOKEN` /
+  `IRIS_SLACK_BOT_TOKEN` / `TELEGRAM_BOT_TOKEN`. Identical credentials on two
+  processes means both fight over the same Socket Mode connection / Telegram
+  `getUpdates` poll, and the symptom is the agent intermittently not
+  responding rather than a clear error. `--mode=docker`'s Terraform module
+  always clears these three by default (empty `-e` override) specifically to
+  stop `--env-file /iris/.env` from leaking Iris's own tokens into a
+  bridge-only container — see `docs/sub-agents.md`.

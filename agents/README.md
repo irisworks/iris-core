@@ -55,10 +55,20 @@ The agent connects directly to Slack via Socket Mode.
 Slack ──── iris-runtime (Docker) ──── LLM
 ```
 
-Required env vars: `IRIS_SLACK_APP_TOKEN` (`xapp-...`), `IRIS_SLACK_BOT_TOKEN` (`xoxb-...`).
-See the commented Pattern A section in `bootstrap.template.sh`. (Service-mode
-agents can use this pattern too — set the same two vars as `Environment=` lines
-in the systemd unit instead of container `-e` flags.)
+Required env vars: `IRIS_SLACK_APP_TOKEN` (`xapp-...`), `IRIS_SLACK_BOT_TOKEN` (`xoxb-...`),
+or `TELEGRAM_BOT_TOKEN` for Telegram's equivalent. See the commented Pattern A
+section in `bootstrap.template.sh`. (Service-mode agents can use this pattern
+too — set the same vars as `Environment=` lines in the systemd unit instead of
+container `-e` flags.)
+
+**These must be a separate bot minted specifically for this agent** — never
+Iris's own `IRIS_SLACK_APP_TOKEN`/`IRIS_SLACK_BOT_TOKEN`/`TELEGRAM_BOT_TOKEN`.
+Two processes authenticating as the same bot fight over the same Socket Mode
+connection / Telegram `getUpdates` poll; the symptom is the agent
+intermittently not responding, not a clear error. `terraform/modules/agent`
+always clears these three by default (empty `-e` override) so a bridge-only
+agent can't accidentally inherit them via `--env-file /iris/.env` — only set
+them to a distinct bot's real values when Pattern A is actually wanted.
 
 ### Pattern B — Bridge Agent
 

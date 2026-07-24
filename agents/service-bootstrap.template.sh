@@ -15,8 +15,15 @@
 #
 # Prerequisites:
 #   - iris-runtime already built: iris.service itself won't run otherwise
-#   - /iris/.env populated (by bootstrap.sh --setup) — this agent inherits it
-#     the same way iris.service does (dotenv, no EnvironmentFile=)
+#   - /iris/.env populated (by bootstrap.sh --setup) — for reference only.
+#     Unlike iris.service, this agent does NOT inherit /iris/.env: dotenv's
+#     default config resolves relative to process.cwd(), and this unit's
+#     WorkingDirectory is ${AGENT_DATA_DIR} (not /iris where the file lives),
+#     so nothing here loads it. That's intentional — the agent comes up
+#     bridge-only, with no Slack/Telegram credentials, no LLM API key, unless
+#     something below adds it explicitly via Environment=. Do not add
+#     `EnvironmentFile=/iris/.env` to the unit to "fix" this — see the
+#     Slack/Telegram warning below for why.
 
 set -euo pipefail
 
@@ -74,9 +81,18 @@ sudo systemctl status "${SERVICE_NAME}" --no-pager -l | head -10
 # ──────────────────────────────────────────────────────────
 # Optional additions (uncomment / add as Environment= lines above):
 #
-# Slack (agent connects directly instead of running bridge-only):
+# Slack/Telegram (agent connects directly instead of running bridge-only):
 #   Environment=IRIS_SLACK_APP_TOKEN=xapp-...
 #   Environment=IRIS_SLACK_BOT_TOKEN=xoxb-...
+#   Environment=TELEGRAM_BOT_TOKEN=123456:AA...
+#
+#   IMPORTANT: these must be a SEPARATE Slack app / Telegram bot minted for
+#   this agent specifically — never paste in Iris's own real
+#   IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN / TELEGRAM_BOT_TOKEN from
+#   /iris/.env. Two processes authenticating as the same bot compete for the
+#   same Socket Mode connection / Telegram getUpdates poll — one of them
+#   (usually this agent) will intermittently stop responding, which looks
+#   like a hang or a random silent failure rather than an obvious error.
 #
 # self-heal escalation (added automatically by `spawn-agent --with-self-heal`):
 #   Environment=IRIS_API_URL=http://127.0.0.1:3000

@@ -24,6 +24,16 @@
 #   image_dependency = null_resource.iris_runtime_image[0].id  # shared build, see main.tf
 # }
 #
+# By default this agent is bridge-only for Slack/Telegram: slack_app_token,
+# slack_bot_token, and telegram_bot_token all default to "" and that empty
+# value explicitly overrides whatever /iris/.env would otherwise inject via
+# --env-file, so the container starts with no chat-platform credentials at
+# all. To connect this agent directly to Slack or Telegram (Pattern A), set
+# the relevant variable to a SEPARATE bot's token — never Iris's own
+# IRIS_SLACK_APP_TOKEN/IRIS_SLACK_BOT_TOKEN/TELEGRAM_BOT_TOKEN, or both
+# processes will authenticate as the same bot and fight over the same
+# Socket Mode connection / Telegram getUpdates poll.
+#
 # output "my_agent_api_token" {
 #   value     = module.my_agent.api_token
 #   sensitive = true

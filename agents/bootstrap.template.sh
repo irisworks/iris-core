@@ -40,10 +40,23 @@ IRIS_PROVIDER=$(grep "^IRIS_PROVIDER" /iris/.env | cut -d= -f2- || echo "anthrop
 IRIS_MODEL=$(grep    "^IRIS_MODEL"    /iris/.env | cut -d= -f2- || echo "claude-sonnet-4-6")
 
 # ──────────────────────────────────────────────────────────
-# Pattern A: Slack agent — uncomment and fill in token names.
+# Pattern A: Slack/Telegram agent — uncomment and fill in token names.
+#
+# IMPORTANT: these must be a SEPARATE Slack app / Telegram bot minted for
+# this agent specifically — never Iris's own IRIS_SLACK_APP_TOKEN /
+# IRIS_SLACK_BOT_TOKEN / TELEGRAM_BOT_TOKEN. `--env-file /iris/.env` below
+# already puts Iris's real tokens into this container's environment
+# (regardless of whether Pattern A is used); if APP_TOKEN/BOT_TOKEN/
+# TG_BOT_TOKEN below are left unset (the default, Pattern B / bridge-only),
+# the -e overrides in the docker run command explicitly clear them back out.
+# If you instead set these to Iris's own token values, this agent and Iris
+# will both try to authenticate as the same bot — duplicate Socket Mode
+# connections / Telegram getUpdates 409 conflicts — and one of them will
+# intermittently stop responding.
 # ──────────────────────────────────────────────────────────
 # APP_TOKEN="${<AGENT>_SLACK_APP_TOKEN:-}"
 # BOT_TOKEN="${<AGENT>_SLACK_BOT_TOKEN:-}"
+# TG_BOT_TOKEN="${<AGENT>_TELEGRAM_BOT_TOKEN:-}"
 #
 # if [[ -z "$APP_TOKEN" || -z "$BOT_TOKEN" ]]; then
 #   echo "ERROR: <AGENT>_SLACK_APP_TOKEN / <AGENT>_SLACK_BOT_TOKEN not set" >&2
@@ -68,6 +81,9 @@ docker run -d --name "$CONTAINER_NAME" \
   -e IRIS_PROVIDER="$IRIS_PROVIDER" \
   -e IRIS_MODEL="$IRIS_MODEL" \
   -e IRIS_LLM_TIMEOUT_SECS=600 \
+  -e IRIS_SLACK_APP_TOKEN="${APP_TOKEN:-}" \
+  -e IRIS_SLACK_BOT_TOKEN="${BOT_TOKEN:-}" \
+  -e TELEGRAM_BOT_TOKEN="${TG_BOT_TOKEN:-}" \
   -v "/iris/agents/${AGENT_NAME}/data:/workspace" \
   -v "/iris/repo/agents/${AGENT_NAME}/MEMORY.md:/workspace/MEMORY.md:ro" \
   -v "/iris/repo/agents/${AGENT_NAME}/CONSTITUTION.md:/workspace/CONSTITUTION.md:ro" \
@@ -75,9 +91,19 @@ docker run -d --name "$CONTAINER_NAME" \
   -v "/iris/data/models.json:/workspace/models.json:ro" \
   iris-runtime:local --sandbox=host /workspace
   #
-  # Pattern A — add these two lines inside the docker run above:
-  # -e IRIS_SLACK_APP_TOKEN="$APP_TOKEN" \
-  # -e IRIS_SLACK_BOT_TOKEN="$BOT_TOKEN" \
+  # The three -e overrides above (IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN /
+  # TELEGRAM_BOT_TOKEN) are always passed, even empty — --env-file /iris/.env
+  # injects Iris's own real tokens regardless of Pattern A/B, and Docker
+  # applies -e after --env-file, so these clear them back out unless
+  # APP_TOKEN/BOT_TOKEN/TG_BOT_TOKEN were set above (Pattern A). Do not
+  # remove these three lines even if you're only using Pattern B.
+  #
+  # Caveat on Key-Vault-profile installs: if IRIS_KEY_VAULT is also set below
+  # and the vault happens to store a secret under the exact name
+  # IRIS-SLACK-APP-TOKEN/IRIS-SLACK-BOT-TOKEN/TELEGRAM-BOT-TOKEN (Iris's own),
+  # engine/secrets.ts's env-mode fallback will still resolve it via Key Vault
+  # even with the env var cleared here. Use secrets_mode store/proxy with an
+  # allow-list (docs/secrets.md) if that isolation matters for this agent.
   #
   # Azure Key Vault (if agent uses get-secret skill):
   # -e IRIS_KEY_VAULT=<your-vault-name> \

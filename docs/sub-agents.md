@@ -28,16 +28,39 @@ rootfs destroyed with the VM.
 
 ## The bridge
 
-Sub-agents register in `agents.json` with a `bridge_url`; mentioning `@agentname`
-routes the request over HTTP to that agent's bridge server, which processes it and
-returns the reply. Escalations flow the other way: a sub-agent that can't self-heal
-POSTs to Iris's `/escalate` endpoint.
+Sub-agents register in `agents.json` with a `bridge_url`; a message addressed to
+that agent routes over HTTP to its bridge server, which processes it and returns
+the reply. Escalations flow the other way: a sub-agent that can't self-heal POSTs
+to Iris's `/escalate` endpoint.
 
 `spawn-agent` writes this registration itself — via `agents/lib/register-bridge.sh
 register`, under an `flock` so concurrent spawns can't clobber each other's entries
 — as an unconditional step of both the default service-mode flow and `--mode=docker`.
 There is no flag to skip it: `@agentname` is meant to work immediately after
 creation, not after a separate manual registration step.
+
+**How `@agentname` is actually detected differs by transport:**
+
+- **Slack and Telegram**: a **leading** `@name` prefix (start of message, after
+  trimming whitespace) is matched deterministically against `agents.json` —
+  `parseAgentMention()` in `iris-runtime/src/engine/bridge.ts`, wired into
+  `slack.ts`'s `app_mention`/`message` handlers and `telegram.ts`'s
+  `handleUpdate` — and on a match, Iris's own LLM turn is skipped entirely for
+  that message: the transport calls `callAgentBridge()` directly and posts the
+  reply itself on the same channel/thread. A `@name` that doesn't match a
+  known agent, or one that appears mid-message rather than as a prefix, falls
+  through unchanged to Iris's normal handling — including the **intent-based**
+  routing built into her own system prompt (`engine/agent.ts`: "route by
+  intent, no @mention required, call the sub-agent's bridge via bash"), which
+  still runs her LLM and lets it decide whether to delegate.
+- **Web UI**: deterministic too, but not text-based — the browser client sets
+  an explicit `?agent=` query param on its WebSocket connection
+  (`transports/web/web.ts`), not a parsed `@name`.
+
+In every case, the sub-agent's own process never touches Slack/Telegram/the
+Web UI directly — whichever transport originally received the message (already
+holding its channel/thread context) is the one that posts the reply, using its
+own credentials.
 
 Each agent entry may also declare a `secrets` allow-list — the names it may request
 via `GET /secrets/:name` — and a per-agent `token` so the API can tell agents apart:
@@ -86,6 +109,25 @@ the allow-list enforced its own token.
 Treat `agents.json` as a secrets file once `token` fields are in it: keep file
 permissions tight and never commit it to version control (the token values are
 random strings that secret scanners won't reliably flag).
+
+**Credential isolation for Slack/Telegram.** A sub-agent that only needs to be
+reachable via the bridge (the default, both service-mode and `--mode=docker`)
+needs no Slack/Telegram credentials at all — the bridge server is a plain HTTP
+listener, unrelated to either platform. If an agent should *also* connect
+directly to Slack/Telegram itself (Pattern A in `agents/README.md`), it needs
+its own **separate** bot: never reuse Iris's own `IRIS_SLACK_APP_TOKEN` /
+`IRIS_SLACK_BOT_TOKEN` / `TELEGRAM_BOT_TOKEN`. Two processes authenticating as
+the same bot compete for the same Socket Mode connection / Telegram
+`getUpdates` poll (Telegram returns 409 "terminated by other getUpdates
+request" to whichever loses), and the symptom looks like the agent
+intermittently not responding rather than an obvious error. `--mode=docker`'s
+Terraform module (`terraform/modules/agent`) always passes these three as
+explicit, empty-by-default `-e` overrides specifically so `--env-file
+/iris/.env` can't leak Iris's own tokens into a bridge-only container by
+default — set `slack_app_token`/`slack_bot_token`/`telegram_bot_token` to a
+distinct bot's credentials only when Pattern A is actually wanted. The
+equivalent applies to `agents/bootstrap.template.sh` and to
+`agents/service-bootstrap.template.sh`'s `Environment=` lines.
 
 The `iris-runtime:local` Docker image used by `--mode=docker` agents is built
 once, by a single shared `null_resource.iris_runtime_image` in `terraform/main.tf`,

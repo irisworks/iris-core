@@ -189,6 +189,32 @@ export function loadAgentRegistry(workingDir: string): AgentRegistry {
 }
 
 /**
+ * Detect a deterministic `@agentname` prefix on an inbound chat message and
+ * resolve it against the agent registry — used by the Slack/Telegram
+ * transports to bypass Iris's own LLM turn entirely for an explicit mention,
+ * mirroring how the Web UI transport already skips straight to
+ * `callAgentBridge()` for its `?agent=` param (web.ts). Only matches a
+ * *leading* mention (start of message, after trimming whitespace) — a
+ * `@name` appearing mid-sentence is left alone and falls through to Iris's
+ * normal handling (including the intent-based bridge routing described in
+ * her own system prompt, agent.ts), since scanning the whole message would
+ * misfire on ordinary text that happens to mention someone by `@handle`.
+ * Agent name matching is case-insensitive; an unmatched or unknown name
+ * returns null so the caller falls through unchanged.
+ */
+export function parseAgentMention(
+	text: string,
+	registry: AgentRegistry,
+): { name: string; entry: AgentEntry; query: string } | null {
+	const m = text.trim().match(/^@([\w-]+)[:,]?\s*([\s\S]*)$/);
+	if (!m) return null;
+	const [, mentioned, query] = m;
+	const name = Object.keys(registry).find((n) => n.toLowerCase() === mentioned.toLowerCase());
+	if (!name) return null;
+	return { name, entry: registry[name], query };
+}
+
+/**
  * Forward a message to a sub-agent via its bridge server.
  * Returns the agent's response text, or throws on timeout/error.
  */
