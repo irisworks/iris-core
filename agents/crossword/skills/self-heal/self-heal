@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REASON=""
+AGENT="${AGENT_NAME:-crossword}"
+SEVERITY="error"
+CONTEXT=""
+IRIS_EVENTS_DIR="${IRIS_EVENTS_DIR:-/iris/data/events}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reason)   REASON="$2";   shift 2 ;;
+    --severity) SEVERITY="$2"; shift 2 ;;
+    --context)  CONTEXT="$2";  shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -z "$REASON" ]] && { echo "self-heal: --reason is required" >&2; exit 1; }
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EVENT_ID="selfheal-$(date +%s)-$(head -c4 /dev/urandom | xxd -p)"
+
+EVENT_FILE="${IRIS_EVENTS_DIR}/${EVENT_ID}.json"
+
+jq -n \
+  --arg type "immediate" \
+  --arg channelId "SELFHEAL-${AGENT}" \
+  --arg user "$AGENT" \
+  --arg reason "$REASON" \
+  --arg context "$CONTEXT" \
+  --arg severity "$SEVERITY" \
+  --arg timestamp "$TIMESTAMP" \
+  --arg agent "$AGENT" \
+  '{
+    type: $type,
+    channelId: $channelId,
+    user: $user,
+    text: ("🚨 Self-heal escalation from @" + $agent + " [" + $severity + "]: " + $reason + (if $context != "" then "\n\nContext: " + $context else "" end)),
+    meta: { severity: $severity, agent: $agent, reason: $reason, context: $context, timestamp: $timestamp }
+  }' > "$EVENT_FILE"
+
+echo "[self-heal] Escalation event written: $EVENT_FILE"
