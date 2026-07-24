@@ -1,6 +1,7 @@
 ---
 name: search-web
 description: Search the web using Perplexity AI API. Returns sourced, up-to-date information.
+secrets: [PERPLEXITY-API-KEY]
 ---
 
 # Skill: search-web

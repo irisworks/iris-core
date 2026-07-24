@@ -84,6 +84,16 @@ Omitted or empty `secrets` = no access. Iris herself (not a sub-agent) is
 unrestricted. See [get-secret](skills.md) and [Configuration](configuration.md) for
 the resolution backends.
 
+**Deciding the allow-list is `spawn-agent`'s job, not a manual afterthought.**
+A skill's `SKILL.md` frontmatter may declare `secrets: [NAME, ...]` — the
+secret names its script actually resolves (see [Skills](skills.md)). When
+`spawn-agent` attaches a skill to a new agent, it collects every attached
+skill's `secrets:` entries and passes them to
+`agents/lib/register-bridge.sh register`'s `secrets_csv` argument, which
+merges them into this `secrets` array. Skip this and the skill fails the
+moment it's invoked (a 403 from `GET /secrets/:name`), not at spawn time —
+the agent looks fully set up until then.
+
 With the host's `IRIS_SECRETS_MODE` set to `store` or `proxy`,
 `terraform/modules/agent`'s `secrets_mode` variable (default `"env"`, matching
 today's behavior) stops passing the whole `--env-file /iris/.env` to the

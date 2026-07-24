@@ -1,6 +1,7 @@
 ---
 name: github
 description: Commit and push repo changes to GitHub using the standard Iris workflow.
+secrets: [GITHUB-TOKEN]
 ---
 
 # Skill: github

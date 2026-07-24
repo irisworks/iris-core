@@ -1,6 +1,7 @@
 ---
 name: send-email
 description: Send an email via Resend API from ${IRIS_EMAIL_FROM:-iris@example.com}. Use when human escalation is needed or to deliver results outside Slack/Telegram.
+secrets: [RESEND-API-KEY]
 ---
 
 # Skill: send-email

@@ -4,6 +4,13 @@
 
 ### Added
 
+- Skills may now declare `secrets: [NAME, ...]` in their `SKILL.md`
+  frontmatter — the secret names their script actually resolves (#125).
+  `search-web`, `github`, `send-email`, and `transcribe-audio` declare
+  theirs. `spawn-agent` reads these when a skill is attached to a new
+  sub-agent and carries them into that agent's `agents.json` `secrets`
+  allow-list, instead of the skill failing silently the first time it's
+  invoked. See `docs/skills.md`.
 - Deterministic `@agentname` bridge routing for Slack and Telegram
   (`parseAgentMention()` in `iris-runtime/src/engine/bridge.ts`, wired into
   `slack.ts`'s `app_mention`/`message` handlers and `telegram.ts`'s
