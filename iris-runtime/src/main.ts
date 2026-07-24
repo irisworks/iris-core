@@ -264,7 +264,11 @@ const slackBot = SLACK_ENABLED
 	: null;
 if (slackBot) transports.push(slackBot);
 
-const tgBot = TELEGRAM_BOT_TOKEN ? new TelegramBot(telegramHandler, { token: TELEGRAM_BOT_TOKEN, workingDir }) : null;
+// `let` (not `const`): if Telegram start() fails below we drop the transport
+// and null this reference so the downstream claim/QR/SIGINT block is skipped
+// and `routeEvent` (which keys off the `transports` array) stops dispatching
+// to a dead bot (#90).
+let tgBot = TELEGRAM_BOT_TOKEN ? new TelegramBot(telegramHandler, { token: TELEGRAM_BOT_TOKEN, workingDir }) : null;
 if (tgBot) transports.push(tgBot);
 
 // Bridge is always available — sub-agents and the internal API can drive runs
@@ -334,37 +338,57 @@ if (webTransport) {
 }
 
 if (tgBot) {
-	await tgBot.start();
-
-	// Force reclaim — reset owner so a new user can claim
-	if (process.env.IRIS_TELEGRAM_FORCE_RECLAIM === "true") {
-		tgBot.claim.reset();
-		log.logInfo("[telegram] Force reclaim — previous owner cleared.");
+	// Const alias for the closures below: `tgBot` is `let` so the start()
+	// failure path can null it, but a const alias keeps the SIGINT/SIGTERM
+	// handlers' narrowing sound under strict null checks.
+	const telegram = tgBot;
+	try {
+		await telegram.start();
+	} catch (err) {
+		// Invalid/revoked TELEGRAM_BOT_TOKEN or no network path to
+		// api.telegram.org. Previously start() threw here and crashed the whole
+		// iris process, taking Slack/bridge/web down with it. Drop the transport
+		// so routeEvent stops dispatching to it and continue with the rest (#90).
+		log.logWarning(
+			"[telegram] Failed to start Telegram transport; Telegram disabled.",
+			err instanceof Error ? err.message : String(err),
+		);
+		const idx = transports.indexOf(telegram);
+		if (idx !== -1) transports.splice(idx, 1);
+		tgBot = null;
 	}
 
-	// If bot is unclaimed, generate a claim token and print it to the terminal
-	if (!tgBot.claim.isClaimed()) {
-		const token = tgBot.claim.generateToken();
-		log.logInfo("[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:");
-		log.logInfo("");
-		log.logInfo(`    ${token}`);
-		log.logInfo("");
-		if (tgBot.username) {
-			// Deep link opens a chat with the bot with "/start <token>" pre-filled —
-			// scanning it and hitting Send claims the bot without typing anything.
-			const claimLink = `https://t.me/${tgBot.username}?start=${token}`;
-			log.logInfo("[telegram] Or scan this QR code to open the bot with the token pre-filled:");
-			qrcodeTerminal.generate(claimLink, { small: true }, (qr) => console.log(qr));
-		} else {
-			log.logInfo("[telegram] Or scan this QR code and paste the token into the chat:");
-			qrcodeTerminal.generate(token, { small: true }, (qr) => console.log(qr));
+	if (tgBot) {
+		// Force reclaim — reset owner so a new user can claim
+		if (process.env.IRIS_TELEGRAM_FORCE_RECLAIM === "true") {
+			telegram.claim.reset();
+			log.logInfo("[telegram] Force reclaim — previous owner cleared.");
 		}
-		log.logInfo("[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.");
-		log.logInfo("[telegram] To force re-claim later, set IRIS_TELEGRAM_FORCE_RECLAIM=true and restart.");
-	}
 
-	process.on("SIGINT", () => { tgBot.stop(); });
-	process.on("SIGTERM", () => { tgBot.stop(); });
+		// If bot is unclaimed, generate a claim token and print it to the terminal
+		if (!telegram.claim.isClaimed()) {
+			const token = telegram.claim.generateToken();
+			log.logInfo("[telegram] Bot is unclaimed. Send this token to your bot on Telegram to claim it:");
+			log.logInfo("");
+			log.logInfo(`    ${token}`);
+			log.logInfo("");
+			if (telegram.username) {
+				// Deep link opens a chat with the bot with "/start <token>" pre-filled —
+				// scanning it and hitting Send claims the bot without typing anything.
+				const claimLink = `https://t.me/${telegram.username}?start=${token}`;
+				log.logInfo("[telegram] Or scan this QR code to open the bot with the token pre-filled:");
+				qrcodeTerminal.generate(claimLink, { small: true }, (qr) => console.log(qr));
+			} else {
+				log.logInfo("[telegram] Or scan this QR code and paste the token into the chat:");
+				qrcodeTerminal.generate(token, { small: true }, (qr) => console.log(qr));
+			}
+			log.logInfo("[telegram] Token expires in 10 minutes. Restart Iris to generate a new one.");
+			log.logInfo("[telegram] To force re-claim later, set IRIS_TELEGRAM_FORCE_RECLAIM=true and restart.");
+		}
+
+		process.on("SIGINT", () => { telegram.stop(); });
+		process.on("SIGTERM", () => { telegram.stop(); });
+	}
 } else {
 	log.logInfo("Telegram token not set — Telegram transport disabled");
 }
