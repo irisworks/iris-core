@@ -60,7 +60,7 @@ export const LEGACY_MODES: ReadonlySet<string> = new Set([
 	"passthrough",
 ]);
 
-/** One raw data/channels.json entry, keyed by channel ID or prefix wildcard. */
+/** One raw meta/channels.json entry, keyed by channel ID or prefix wildcard. */
 export interface RawChannelEntry {
 	mode: string;
 	requireMentionForTopLevel?: boolean;
@@ -146,7 +146,7 @@ export function resolveWildcard<T>(configs: Map<string, T>, channelId: string): 
 	return best;
 }
 
-/** Default config for a channel with no data/channels.json entry: legacy "dm". */
+/** Default config for a channel with no meta/channels.json entry: legacy "dm". */
 export const DEFAULT_CHANNEL_CONFIG: ResolvedChannelConfig = {
 	legacyMode: "dm",
 	requireMentionForTopLevel: false,

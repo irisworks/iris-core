@@ -37,6 +37,7 @@ export const SENSITIVE_ENV_VARS = [
 	"TELEGRAM_BOT_TOKEN",
 	"GITHUB_TOKEN",
 	"RESEND_API_KEY",
+	"PERPLEXITY_API_KEY",
 ] as const;
 
 export type SecretsMode = "env" | "store" | "proxy";

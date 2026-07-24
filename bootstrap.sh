@@ -362,7 +362,7 @@ fi
 #       AWS_ACCESS_KEY_INPUT, AWS_SECRET_KEY_INPUT, AWS_REGION_INPUT,
 #       AWS_PROFILE_INPUT, SLACK_APP_TOKEN, SLACK_BOT_TOKEN,
 #       GITHUB_TOKEN, IRIS_GITHUB_ORG, IRIS_GITHUB_REPO, RESEND_API_KEY,
-#       IRIS_BASE_DOMAIN, CERTBOT_EMAIL, GIT_USER_EMAIL
+#       PERPLEXITY_API_KEY, IRIS_BASE_DOMAIN, CERTBOT_EMAIL, GIT_USER_EMAIL
 # ────────────────────────────────────────────────────────────
 prompt_secrets() {
   # ── LLM Provider ──
@@ -613,7 +613,7 @@ prompt_secrets() {
   GITHUB_TOKEN=""
   IRIS_GITHUB_ORG=""
   IRIS_GITHUB_REPO=""
-  if confirm "Add GitHub token for repo access?"; then
+  if confirm "Add GitHub token for repo access?" "n"; then
     echo ""
     echo "  ┌─ GitHub Token Setup ────────────────────────────────────────────┐"
     echo "  │  1. https://github.com/settings/tokens                        │"
@@ -645,6 +645,12 @@ prompt_secrets() {
   RESEND_API_KEY=""
   if confirm "Set up email sending (Resend.com)?" "n"; then
     RESEND_API_KEY=$(prompt_secret "Resend API key (re_...)")
+  fi
+
+  # ── Web search (optional) ──
+  PERPLEXITY_API_KEY=""
+  if confirm "Set up web search (Perplexity)?" "n"; then
+    PERPLEXITY_API_KEY=$(prompt_secret "Perplexity API key (pplx-...)")
   fi
 
   # ── Domain (optional) ──
@@ -692,6 +698,7 @@ GITHUB_TOKEN=""
 IRIS_GITHUB_ORG=""
 IRIS_GITHUB_REPO=""
 RESEND_API_KEY=""
+PERPLEXITY_API_KEY=""
 LLM_API_KEY=""
 FOUNDRY_ACCOUNT=""
 AWS_ACCESS_KEY_INPUT=""
@@ -784,6 +791,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
     seed_secret "GITHUB-ORG"         "$IRIS_GITHUB_ORG"
     seed_secret "GITHUB-REPO"        "$IRIS_GITHUB_REPO"
     seed_secret "RESEND-API-KEY"     "$RESEND_API_KEY"
+    seed_secret "PERPLEXITY-API-KEY" "$PERPLEXITY_API_KEY"
     log "✓ Secrets seeded."
   else
     # Restore mode — defaults only
@@ -1133,6 +1141,7 @@ if [[ "$NO_KEYVAULT" == false ]]; then
   SLACK_BOT_TOKEN=$(fetch_secret "SLACK-BOT-TOKEN")
   TELEGRAM_BOT_TOKEN=$(fetch_secret "TELEGRAM-BOT-TOKEN")
   RESEND_API_KEY=$(fetch_secret "RESEND-API-KEY")
+  PERPLEXITY_API_KEY=$(fetch_secret "PERPLEXITY-API-KEY")
   AWS_ACCESS_KEY_ID=$(fetch_secret "AWS-ACCESS-KEY-ID")
   AWS_SECRET_ACCESS_KEY=$(fetch_secret "AWS-SECRET-ACCESS-KEY")
   AWS_REGION=$(fetch_secret "AWS-REGION")
@@ -1204,15 +1213,24 @@ ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 
-# get-secret/set-secret are documented and invoked by many skills (send-email,
-# github, transcribe-audio, etc.) as bare commands, but nothing else puts a
-# skill's own directory on PATH — the sandbox executor spawns `sh -c "<cmd>"`
-# with the plain inherited PATH. Symlinking them into /usr/local/bin (same as
-# iris-secret above) makes the documented bare-command usage actually work,
-# instead of relying on the model discovering the "not found" failure and
-# falling back to the skill's absolute path every time.
-sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret" /usr/local/bin/get-secret
-sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret" /usr/local/bin/set-secret
+# Skill scripts are documented and invoked by other skills as bare commands,
+# but nothing else puts a skill's own directory on PATH — the sandbox executor
+# spawns `sh -c "<cmd>"` with the plain inherited PATH. Symlinking them into
+# /usr/local/bin (same as iris-secret above) makes the documented bare-command
+# usage actually work, instead of relying on the model discovering the "not
+# found" failure and falling back to the skill's absolute path every time.
+# search-web/transcribe-audio's documented command name doesn't match their
+# script's filename (search.sh / transcribe-audio.sh), so those two symlinks
+# are named after the documented command, not the source file.
+sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret"     /usr/local/bin/get-secret
+sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret"     /usr/local/bin/set-secret
+sudo ln -sfn "$REPO_DIR/skills/schedule/schedule"         /usr/local/bin/schedule
+sudo ln -sfn "$REPO_DIR/skills/self-heal/self-heal"       /usr/local/bin/self-heal
+sudo ln -sfn "$REPO_DIR/skills/send-email/send-email"     /usr/local/bin/send-email
+sudo ln -sfn "$REPO_DIR/skills/serve-public/serve-public" /usr/local/bin/serve-public
+sudo ln -sfn "$REPO_DIR/skills/status/status"             /usr/local/bin/status
+sudo ln -sfn "$REPO_DIR/skills/search-web/search.sh"           /usr/local/bin/search-web
+sudo ln -sfn "$REPO_DIR/skills/transcribe-audio/transcribe-audio.sh" /usr/local/bin/transcribe-audio
 
 if [[ -n "$GENERATED_MODELS_JSON" && -f "$GENERATED_MODELS_JSON" ]]; then
   cp "$GENERATED_MODELS_JSON" "$IRIS_DIR/data/models.json"
@@ -1266,6 +1284,7 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
   echo "IRIS_GITHUB_ORG=$(e "${IRIS_GITHUB_ORG:-}")"
   echo "IRIS_GITHUB_REPO=$(e "${IRIS_GITHUB_REPO:-}")"
   echo "RESEND_API_KEY=$(e "${RESEND_API_KEY:-}")"
+  echo "PERPLEXITY_API_KEY=$(e "${PERPLEXITY_API_KEY:-}")"
   echo ""
   echo "AZURE_SUBSCRIPTION_ID=$(e "${SUBSCRIPTION_ID:-}")"
   echo "IRIS_KEY_VAULT=$(e "${KV_NAME:-}")"
@@ -1702,7 +1721,7 @@ fi
 if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   # Poll for the claim state file — Iris needs a few seconds to connect to Telegram
   # and write it, so a single fixed sleep was flaky. Retry for up to 30s.
-  CLAIM_FILE="${IRIS_DIR}/data/data/telegram-owner.json"
+  CLAIM_FILE="${IRIS_DIR}/data/meta/telegram-owner.json"
   CLAIM_TOKEN=""
   CLAIM_STATUS="false"
   for _ in $(seq 1 15); do
@@ -1758,7 +1777,7 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     log "    iris.service (User=${TARGET_USER}) can't read its own /iris/.env (dotenv fails"
     log "    silently, so every setting falls back to hardcoded defaults, including a"
     log "    disabled Telegram transport)."
-    log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/data/ && sudo journalctl -u iris -n 30"
+    log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/meta/ && sudo journalctl -u iris -n 30"
   else
     log ""
     log "  ⚠ No Telegram claim token appeared after 30s. Check: sudo journalctl -u iris -n 50"

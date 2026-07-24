@@ -153,7 +153,7 @@ function migrateChannelDirs(dir: string): void {
 
 		// Skip already-structured dirs and special dirs
 		if (
-			name === "slack" || name === "telegram" || name === "data" ||
+			name === "slack" || name === "telegram" || name === "data" || name === "meta" ||
 			name === "events" || name === "sessions" ||
 			name.startsWith("SESSION-") || name.startsWith("BRIDGE-") ||
 			name.startsWith("ESCALATE-") || name.startsWith("SELFHEAL-") ||
@@ -179,6 +179,20 @@ function migrateChannelDirs(dir: string): void {
 	}
 
 	if (migrated > 0) log.logInfo(`[migrate] Moved ${migrated} channel director${migrated === 1 ? "y" : "ies"} to transport subdirectories`);
+}
+
+// ============================================================================
+// Migration — rename the workingDir/data/ metadata subfolder to meta/
+// (workingDir is itself named "data" on most installs, e.g. /iris/data,
+// so workingDir/data/ read back as a confusing "data/data" stutter)
+// ============================================================================
+
+function migrateMetaDir(dir: string): void {
+	const oldDir = join(dir, "data");
+	const newDir = join(dir, "meta");
+	if (!existsSync(oldDir) || existsSync(newDir)) return;
+	renameSync(oldDir, newDir);
+	log.logInfo("[migrate] data/ → meta/ (workingDir metadata subfolder)");
 }
 
 // ============================================================================
@@ -226,6 +240,9 @@ log.logInfo(`iris-runtime: provider=${provider} model=${model} environment=${env
 
 // Migrate flat channel dirs to slack/ and telegram/ subdirectories
 migrateChannelDirs(workingDir);
+
+// Migrate workingDir/data/ metadata subfolder to workingDir/meta/
+migrateMetaDir(workingDir);
 
 // ============================================================================
 // Transports — constructed from env: Slack if tokens, Telegram if token,

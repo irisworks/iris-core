@@ -29,7 +29,7 @@ import {
 	type TransportPromptProfile,
 	type UserInfo,
 } from "../transport/types.js";
-import type { ChannelStore } from "./store.js";
+import { resolveChannelPath, type ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
 
 // Model is now configurable via getOrCreateRunner() — no longer hardcoded here.
@@ -187,7 +187,8 @@ export function buildSystemPrompt(
 	profile: TransportPromptProfile,
 	mcpStatus: McpStatusSummary | null = null,
 ): string {
-	const channelPath = `${workspacePath}/${channelId}`;
+	const channelRelPath = resolveChannelPath(channelId);
+	const channelPath = `${workspacePath}/${channelRelPath}`;
 	const isDocker = sandboxConfig.type === "docker";
 
 	const envDescription = isDocker
@@ -219,7 +220,7 @@ ${envDescription}
 ${workspacePath}/
 ├── MEMORY.md                    # Global memory (all channels)
 ├── skills/                      # Global CLI tools you create
-└── ${channelId}/                # This channel
+└── ${channelRelPath}/  # This channel
     ├── MEMORY.md                # Channel-specific memory
     ├── log.jsonl                # Message history (no tool results)
     ├── attachments/             # User-shared files
@@ -371,7 +372,7 @@ Each built-in tool requires a "label" parameter (shown to user). MCP tools (mcp_
 
 function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: string): string {
 	if (!mcpStatus || (mcpStatus.servers.length === 0 && mcpStatus.configErrors.length === 0)) {
-		return `(none configured — external toolsets can be added via ${workspacePath}/data/mcp.json, see the mcp skill)`;
+		return `(none configured — external toolsets can be added via ${workspacePath}/meta/mcp.json, see the mcp skill)`;
 	}
 	const lines = mcpStatus.servers.map((server) => {
 		if (server.status === "connected") {
@@ -386,7 +387,7 @@ function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: str
 		lines.push(`- config error: ${error}`);
 	}
 	lines.push(
-		`Tools from connected servers are callable directly. Config: ${workspacePath}/data/mcp.json (hot-reloads before each message — see the mcp skill).`,
+		`Tools from connected servers are callable directly. Config: ${workspacePath}/meta/mcp.json (hot-reloads before each message — see the mcp skill).`,
 	);
 	return lines.join("\n");
 }
@@ -937,7 +938,7 @@ function createRunner(
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}
 
-			// Refresh MCP servers (hash-gated no-op while data/mcp.json is unchanged)
+			// Refresh MCP servers (hash-gated no-op while meta/mcp.json is unchanged)
 			// and merge their tools with the built-in toolset. Mutating state.tools
 			// is safe: the session only derives tools from baseToolsOverride at
 			// construction; the agent loop reads state.tools live.
@@ -1305,7 +1306,7 @@ function translateToHostPath(
 	workingDir: string,
 ): string {
 	if (workspacePath === "/workspace") {
-		const prefix = `/workspace/${channelId}/`;
+		const prefix = `/workspace/${resolveChannelPath(channelId)}/`;
 		if (containerPath.startsWith(prefix)) {
 			return join(channelDir, containerPath.slice(prefix.length));
 		}

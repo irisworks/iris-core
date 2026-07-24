@@ -18,8 +18,8 @@ Two transports are supported:
 
 ## Configuration
 
-Servers are declared in `<workspace>/data/mcp.json` (for a standard install,
-`/iris/data/data/mcp.json` — next to `channels.json`). The file is optional;
+Servers are declared in `<workspace>/meta/mcp.json` (for a standard install,
+`/iris/data/meta/mcp.json` — next to `channels.json`). The file is optional;
 no file means no servers and no overhead.
 
 ```json

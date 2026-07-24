@@ -25,8 +25,8 @@ export function settle(ms = 25) {
  */
 export function makeBot({ channels = {}, isRunning = () => false, botUserId = "UBOT", botId = "BBOT" } = {}) {
 	const workingDir = mkdtempSync(join(tmpdir(), "iris-dispatch-test-"));
-	mkdirSync(join(workingDir, "data"), { recursive: true });
-	writeFileSync(join(workingDir, "data", "channels.json"), JSON.stringify(channels));
+	mkdirSync(join(workingDir, "meta"), { recursive: true });
+	writeFileSync(join(workingDir, "meta", "channels.json"), JSON.stringify(channels));
 
 	const calls = { events: [], stops: [], compacts: [], resets: [], posted: [], threads: [] };
 	const handler = {
