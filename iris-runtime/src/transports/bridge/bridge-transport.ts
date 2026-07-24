@@ -2,8 +2,10 @@
 // BridgeTransport — headless transport for bridge-only mode (sub-agents and
 // installs without chat tokens). Replaces the ad-hoc stub bot that previously
 // lived in main.ts, and is the proof the ChannelTransport interface isn't
-// Slack-shaped: posting is a no-op, responses accumulate in the context and
-// are consumed by session requests (POST /sessions/:id/message).
+// Slack-shaped: posting/replacing is a no-op for everything except a
+// `BRIDGE-*` channel — see resolveIfBridgeChannel() — while for a `SESSION-*`
+// channel, responses accumulate in the context and are consumed by session
+// requests (POST /sessions/:id/message) instead.
 // ============================================================================
 
 import type { ChannelState } from "../../engine/index.js";
@@ -22,6 +24,23 @@ export interface BridgeTransportOptions {
 	promptProfile: TransportPromptProfile;
 	/** Dispatch an event into the engine (wired in main.ts to engine.handleEvent) */
 	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void;
+}
+
+/**
+ * A `BRIDGE-{requestId}` channel is engine/bridge.ts's own — the pending HTTP
+ * POST /bridge request is waiting on `resolveBridgeRequest(requestId, ...)`.
+ * Both `postMessage` and `createContext().replaceMessage` need this same
+ * check: the engine delivers a run's final answer via `replaceMessage`, but
+ * some code paths (and tests) post directly via `postMessage`, and either one
+ * is how a bridge-only sub-agent's reply actually reaches the caller — without
+ * it, the HTTP request hangs until BRIDGE_TIMEOUT_MS and the reply is lost
+ * even though the agent generated it successfully.
+ */
+async function resolveIfBridgeChannel(channelId: string, text: string): Promise<void> {
+	if (!channelId.startsWith("BRIDGE-")) return;
+	const requestId = channelId.replace("BRIDGE-", "");
+	const { resolveBridgeRequest } = await import("../../engine/bridge.js");
+	resolveBridgeRequest(requestId, text);
 }
 
 export class BridgeTransport implements ChannelTransport {
@@ -52,7 +71,8 @@ export class BridgeTransport implements ChannelTransport {
 		return [];
 	}
 
-	async postMessage(_channelId: string, _text: string): Promise<string> {
+	async postMessage(channelId: string, text: string): Promise<string> {
+		await resolveIfBridgeChannel(channelId, text);
 		return Date.now().toString();
 	}
 
@@ -80,7 +100,9 @@ export class BridgeTransport implements ChannelTransport {
 			respond: async (text: string) => {
 				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
 			},
-			replaceMessage: async () => {},
+			replaceMessage: async (text: string) => {
+				await resolveIfBridgeChannel(event.channel, text);
+			},
 			respondInThread: async () => {},
 			setTyping: async () => {},
 			uploadFile: async () => {},

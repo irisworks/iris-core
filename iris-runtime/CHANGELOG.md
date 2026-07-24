@@ -55,6 +55,20 @@
 
 ### Fixed
 
+- `BridgeTransport.replaceMessage()` (how the engine delivers a run's final
+  answer) was a no-op, so a bridge-only sub-agent's HTTP caller never got its
+  response and the request hung until the 60s timeout even though the agent
+  had already generated the reply. `postMessage()` now resolves the pending
+  request too, for callers that post directly. `startBridgeServer()` also
+  leaked its 60s per-request timer when event-file writes failed (missed
+  `clearTimeout`), and now returns the underlying `http.Server` so it can
+  actually be shut down (tests; no behavior change for `main.ts`'s call).
+- `agents/service-bootstrap.template.sh` gave every sub-agent zero LLM key,
+  no `models.json`, and left `IRIS_API_PORT` unset (colliding with Iris's own
+  port 3000, `EADDRINUSE`). It now resolves the correct provider's key from
+  `/iris/.env` (per-provider env var name, not a uniform guess) as its own
+  `Environment=` line, symlinks `models.json`, and assigns each agent a
+  distinct `IRIS_API_PORT`.
 - `@agentname` bridge requests reused a fresh random ID per call, so every
   mention landed in a new sub-agent session directory with no memory of the
   prior turn. `callAgentBridge()` now accepts a stable conversation key
