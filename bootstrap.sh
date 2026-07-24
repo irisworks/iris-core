@@ -433,14 +433,14 @@ prompt_secrets() {
       EXISTING_FOUNDRY_KEY=""
       EXISTING_FOUNDRY_ACCOUNT=""
       if [[ -f "$IRIS_DIR/.env" ]]; then
-        EXISTING_FOUNDRY_KEY=$(grep -E '^AZURE_FOUNDRY_KEY=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+        EXISTING_FOUNDRY_KEY=$(grep -E '^AZURE_FOUNDRY_KEY=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
       fi
       if [[ -z "$EXISTING_FOUNDRY_KEY" && "$NO_KEYVAULT" == false && -n "$KV_NAME" ]]; then
         EXISTING_FOUNDRY_KEY=$(az keyvault secret show --vault-name "$KV_NAME" --name "AZURE-FOUNDRY-KEY" --query value -o tsv 2>/dev/null || true)
       fi
       if [[ -f "$IRIS_DIR/data/models.json" ]]; then
         EXISTING_FOUNDRY_ACCOUNT=$(grep -oE 'https://[a-zA-Z0-9-]+\.cognitiveservices' "$IRIS_DIR/data/models.json" 2>/dev/null \
-          | head -1 | sed -E 's#https://##; s#\.cognitiveservices##')
+          | head -1 | sed -E 's#https://##; s#\.cognitiveservices##' || true)
       fi
       [[ -n "$EXISTING_FOUNDRY_KEY" ]] && log "Found an existing Foundry API key on this machine — reusing it."
       LLM_API_KEY=$(prompt_secret "Azure AI Foundry API key" "$EXISTING_FOUNDRY_KEY")
@@ -466,9 +466,9 @@ prompt_secrets() {
       EXISTING_CUSTOM_BASE_URL=""
       EXISTING_CUSTOM_NAME=""
       if [[ -f "$IRIS_DIR/.env" ]]; then
-        EXISTING_CUSTOM_KEY=$(grep -E '^CUSTOM_API_KEY=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
-        EXISTING_CUSTOM_BASE_URL=$(grep -E '^CUSTOM_BASE_URL=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
-        EXISTING_CUSTOM_NAME=$(grep -E '^CUSTOM_PROVIDER_NAME=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+        EXISTING_CUSTOM_KEY=$(grep -E '^CUSTOM_API_KEY=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+        EXISTING_CUSTOM_BASE_URL=$(grep -E '^CUSTOM_BASE_URL=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+        EXISTING_CUSTOM_NAME=$(grep -E '^CUSTOM_PROVIDER_NAME=' "$IRIS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
       fi
       if [[ -z "$EXISTING_CUSTOM_KEY" && "$NO_KEYVAULT" == false && -n "$KV_NAME" ]]; then
         EXISTING_CUSTOM_KEY=$(az keyvault secret show --vault-name "$KV_NAME" --name "CUSTOM-API-KEY" --query value -o tsv 2>/dev/null || true)
