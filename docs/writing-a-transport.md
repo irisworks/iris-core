@@ -220,7 +220,7 @@ pipeline behind them (`src/engine/dispatch.ts`, `dispatch-config.ts`) are
 expressed against fully generic shapes (`InboundMessage`, `DispatchConfig`)
 specifically so any transport *can* drive them — but today only Slack does.
 Telegram and the web UI have their own simpler event handling and don't read
-`data/channels.json` at all. Implementing `ChannelTransport` does not require
+`meta/channels.json` at all. Implementing `ChannelTransport` does not require
 wiring up channel-mode dispatch; do it only if the new platform genuinely
 needs per-channel mode configuration (mention-gating, passthrough relay,
 admin commands). If you do, drive it through `resolveDispatch` rather than

@@ -10,7 +10,7 @@
  * Endpoints:
  *   GET  /health                         — liveness check
  *   GET  /channels                       — list active channel states
- *   GET  /mcp/status                     — refresh MCP servers from data/mcp.json and report
+ *   GET  /mcp/status                     — refresh MCP servers from meta/mcp.json and report
  *                                          per-server status, tool names, and config errors
  *   POST /event                          — inject immediate event into Iris's queue
  *                                          body: { channelId, text, user? }
@@ -270,7 +270,7 @@ export function startApiServer(
 			}
 
 			// ── GET /mcp/status ────────────────────────────────────────────────────
-			// Refresh-on-GET: editing data/mcp.json and hitting this route verifies
+			// Refresh-on-GET: editing meta/mcp.json and hitting this route verifies
 			// the change immediately, without waiting for the next agent run.
 			if (method === "GET" && url === "/mcp/status") {
 				const mcpManager = getMcpManager(workingDir);

@@ -177,7 +177,7 @@ automatically on startup and a fresh claim token is printed — no
 `IRIS_TELEGRAM_FORCE_RECLAIM` needed. (Force-reclaim is only for transferring the
 *same* bot to a new owner.)
 
-**Bot commands:** `/reset` (clear history) · `/compact` (summarise context) ·
+**Bot commands:** `/reset` or `/clear` (clear history) · `/compact` (summarise context) ·
 `/stop` (abort a running response)
 
 **Running Slack and Telegram simultaneously:** set all three tokens in `/iris/.env`

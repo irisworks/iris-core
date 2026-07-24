@@ -16,9 +16,9 @@ const FIXTURE_SERVER = join(dirname(fileURLToPath(import.meta.url)), "fixtures",
 
 function makeWorkspace(config) {
 	const workingDir = mkdtempSync(join(tmpdir(), "iris-mcp-test-"));
-	mkdirSync(join(workingDir, "data"), { recursive: true });
+	mkdirSync(join(workingDir, "meta"), { recursive: true });
 	if (config !== undefined) {
-		writeFileSync(join(workingDir, "data", "mcp.json"), typeof config === "string" ? config : JSON.stringify(config));
+		writeFileSync(join(workingDir, "meta", "mcp.json"), typeof config === "string" ? config : JSON.stringify(config));
 	}
 	return workingDir;
 }
@@ -188,7 +188,7 @@ test("manager: refresh is a no-op while mcp.json is unchanged, reconciles on cha
 	assert.equal(manager.getTools()[0], toolsBefore[0]);
 
 	writeFileSync(
-		join(workingDir, "data", "mcp.json"),
+		join(workingDir, "meta", "mcp.json"),
 		JSON.stringify({ servers: { echo: echoServerEntry({ allowedTools: ["echo"] }) } }),
 	);
 	await manager.refresh();

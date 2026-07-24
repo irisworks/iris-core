@@ -57,9 +57,15 @@ export function admitsBotMessage(config: DispatchConfig, hasThreadTs: boolean): 
 	return false;
 }
 
-/** Whether (lowercased, trimmed) text is one of the admin control commands. */
+/**
+ * Whether (lowercased, trimmed) text is one of the admin control commands.
+ * `clear` is accepted as an alias for `reset` — the conventional name in
+ * other chat/CLI tools (Claude Code, ChatGPT) that users reach for instead
+ * of `reset` (see #109).
+ */
 export function parseAdminCommand(text: string): "stop" | "compact" | "reset" | false {
 	const cmd = text.toLowerCase().trim();
+	if (cmd === "clear") return "reset";
 	return cmd === "stop" || cmd === "compact" || cmd === "reset" ? cmd : false;
 }
 

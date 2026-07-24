@@ -17,7 +17,7 @@ import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
-import { createIrisSettingsManager, syncLogToSessionManager } from "./context.js";
+import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
 import * as log from "./log.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
@@ -29,7 +29,7 @@ import {
 	type TransportPromptProfile,
 	type UserInfo,
 } from "../transport/types.js";
-import type { ChannelStore } from "./store.js";
+import { resolveChannelPath, type ChannelStore } from "./store.js";
 import { createIrisTools, setUploadFunction } from "./tools/index.js";
 
 // Model is now configurable via getOrCreateRunner() — no longer hardcoded here.
@@ -187,7 +187,8 @@ export function buildSystemPrompt(
 	profile: TransportPromptProfile,
 	mcpStatus: McpStatusSummary | null = null,
 ): string {
-	const channelPath = `${workspacePath}/${channelId}`;
+	const channelRelPath = resolveChannelPath(channelId);
+	const channelPath = `${workspacePath}/${channelRelPath}`;
 	const isDocker = sandboxConfig.type === "docker";
 
 	const envDescription = isDocker
@@ -219,7 +220,7 @@ ${envDescription}
 ${workspacePath}/
 ├── MEMORY.md                    # Global memory (all channels)
 ├── skills/                      # Global CLI tools you create
-└── ${channelId}/                # This channel
+└── ${channelRelPath}/  # This channel
     ├── MEMORY.md                # Channel-specific memory
     ├── log.jsonl                # Message history (no tool results)
     ├── attachments/             # User-shared files
@@ -371,7 +372,7 @@ Each built-in tool requires a "label" parameter (shown to user). MCP tools (mcp_
 
 function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: string): string {
 	if (!mcpStatus || (mcpStatus.servers.length === 0 && mcpStatus.configErrors.length === 0)) {
-		return `(none configured — external toolsets can be added via ${workspacePath}/data/mcp.json, see the mcp skill)`;
+		return `(none configured — external toolsets can be added via ${workspacePath}/meta/mcp.json, see the mcp skill)`;
 	}
 	const lines = mcpStatus.servers.map((server) => {
 		if (server.status === "connected") {
@@ -386,7 +387,7 @@ function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: str
 		lines.push(`- config error: ${error}`);
 	}
 	lines.push(
-		`Tools from connected servers are callable directly. Config: ${workspacePath}/data/mcp.json (hot-reloads before each message — see the mcp skill).`,
+		`Tools from connected servers are callable directly. Config: ${workspacePath}/meta/mcp.json (hot-reloads before each message — see the mcp skill).`,
 	);
 	return lines.join("\n");
 }
@@ -917,8 +918,14 @@ function createRunner(
 			await mkdir(channelDir, { recursive: true });
 
 			// Sync messages from log.jsonl that arrived while we were offline or busy
-			// Exclude the current message (it will be added via prompt())
-			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
+			// Exclude the current message (it will be added via prompt()), and anything
+			// at/before the last reset watermark (otherwise a /reset gets undone here — #109)
+			const syncedCount = syncLogToSessionManager(
+				sessionManager,
+				channelDir,
+				ctx.message.ts,
+				readResetWatermark(channelDir),
+			);
 			if (syncedCount > 0) {
 				log.logInfo(`[${channelId}] Synced ${syncedCount} messages from log.jsonl`);
 			}
@@ -931,7 +938,7 @@ function createRunner(
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}
 
-			// Refresh MCP servers (hash-gated no-op while data/mcp.json is unchanged)
+			// Refresh MCP servers (hash-gated no-op while meta/mcp.json is unchanged)
 			// and merge their tools with the built-in toolset. Mutating state.tools
 			// is safe: the session only derives tools from baseToolsOverride at
 			// construction; the agent loop reads state.tools live.
@@ -1266,9 +1273,20 @@ function createRunner(
 			agent.reset();
 			// Release VM if this is a pool-mode session (next exec will boot a fresh one)
 			void releaseExecutor(executor);
-			// Truncate the context file so future loads start fresh
+			// Truncate the context file so future loads start fresh. Runners are cached
+			// per channel (see getOrCreateRunner) and live for the process's lifetime, so
+			// `sessionManager` here is the same long-lived instance every message in this
+			// channel reuses — SessionManager keeps its entries in memory and never re-reads
+			// the file on its own, so the writeFileSync above was previously a no-op as far
+			// as the live session was concerned: buildSessionContext() on the next message
+			// would rebuild agent.state.messages straight from the untouched in-memory
+			// entries, restoring the full pre-reset conversation immediately, no restart or
+			// log.jsonl involved. setSessionFile() forces it to reload from the
+			// now-truncated file and re-establish a fresh session header (#109).
 			try {
 				writeFileSync(contextFile, "");
+				sessionManager.setSessionFile(contextFile);
+				writeResetWatermark(channelDir);
 				log.logInfo(`[${channelId}] Context reset — cleared ${contextFile}`);
 			} catch (err) {
 				log.logWarning(`[${channelId}] Failed to clear context file`, err instanceof Error ? err.message : String(err));
@@ -1288,7 +1306,7 @@ function translateToHostPath(
 	workingDir: string,
 ): string {
 	if (workspacePath === "/workspace") {
-		const prefix = `/workspace/${channelId}/`;
+		const prefix = `/workspace/${resolveChannelPath(channelId)}/`;
 		if (containerPath.startsWith(prefix)) {
 			return join(channelDir, containerPath.slice(prefix.length));
 		}
