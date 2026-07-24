@@ -206,6 +206,7 @@ const handler: IrisHandler = {
 	handleStop: (channelId, slack) => engine.handleStop(channelId, slack),
 	handleCompact: (channelId, slack) => engine.handleCompact(channelId, slack),
 	handleReset: (channelId, slack) => engine.handleReset(channelId, slack),
+	handleVerboseCommand: (channelId, slack, action) => engine.handleVerboseCommand(channelId, slack, action),
 	handleEvent: (event, slack, isEvent) => engine.handleEvent(event, slack, isEvent),
 };
 
@@ -218,6 +219,7 @@ const telegramHandler: IrisTelegramHandler = {
 	handleStop: (channelId, bot) => engine.handleStop(channelId, bot),
 	handleCompact: (channelId, bot) => engine.handleCompact(channelId, bot),
 	handleReset: (channelId, bot) => engine.handleReset(channelId, bot),
+	handleVerboseCommand: (channelId, bot, action) => engine.handleVerboseCommand(channelId, bot, action),
 	handleEvent: (event, bot, isEvent) => engine.handleEvent(event, bot, isEvent),
 };
 

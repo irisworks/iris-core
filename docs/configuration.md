@@ -27,6 +27,7 @@ env vars.
 | `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
+| `IRIS_VERBOSE_TOOLS` | — (quiet) | Default verbose tool-call/thinking output on Slack/Telegram. Quiet by default — a run shows a single status line that updates in place instead of a full per-tool-call/thinking dump. Overridable per channel at runtime with `verbose on` / `verbose off` / `verbose status` (Slack) or `/verbose on|off|status` (Telegram) — see [Channel Modes](channel-modes.md#verbose-tool-output) |
 | `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills, sub-agents, and self-edits to (the `github` skill's push target — see [Extending Iris](overlay.md)). Use a fork of `iris-core` or your own private overlay repo, never the upstream you cloned from. Prompted by bootstrap alongside the GitHub token; also injected into the constitution as Iris's identity source |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in credential broker, see [Secrets](secrets.md) |

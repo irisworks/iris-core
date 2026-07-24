@@ -28,7 +28,7 @@ export function makeBot({ channels = {}, isRunning = () => false, botUserId = "U
 	mkdirSync(join(workingDir, "meta"), { recursive: true });
 	writeFileSync(join(workingDir, "meta", "channels.json"), JSON.stringify(channels));
 
-	const calls = { events: [], stops: [], compacts: [], resets: [], posted: [], threads: [] };
+	const calls = { events: [], stops: [], compacts: [], resets: [], verbose: [], posted: [], threads: [] };
 	const handler = {
 		isRunning,
 		handleEvent: async (event, _bot, isEvent) => {
@@ -42,6 +42,9 @@ export function makeBot({ channels = {}, isRunning = () => false, botUserId = "U
 		},
 		handleReset: async (channelId) => {
 			calls.resets.push(channelId);
+		},
+		handleVerboseCommand: async (channelId, _bot, action) => {
+			calls.verbose.push({ channelId, action });
 		},
 	};
 

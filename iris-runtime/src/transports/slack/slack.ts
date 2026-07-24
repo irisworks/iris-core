@@ -4,7 +4,7 @@ import { execFileSync } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
-import { admitsBotMessage, parseAdminCommand, resolveDispatch, type InboundMessage } from "../../engine/dispatch.js";
+import { admitsBotMessage, parseAdminCommand, parseVerboseCommand, resolveDispatch, type InboundMessage } from "../../engine/dispatch.js";
 import {
 	DEFAULT_CHANNEL_CONFIG,
 	resolveChannelEntry,
@@ -188,6 +188,12 @@ export interface IrisHandler {
 	 * Reset context — wipe all message history (ASYNC)
 	 */
 	handleReset(channelId: string, slack: SlackBot): Promise<void>;
+
+	/**
+	 * Toggle or report verbose tool-call/thinking output for this channel (ASYNC).
+	 * Not admin-mode-gated — works from any DM or explicit mention.
+	 */
+	handleVerboseCommand(channelId: string, slack: SlackBot, action: "on" | "off" | "status"): Promise<void>;
 }
 
 // ============================================================================
@@ -853,6 +859,15 @@ export class SlackBot implements ChannelTransport {
 				// Only respond to allowed channels (if filter is configured)
 				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) return;
 
+				// verbose on/off/status is a UX preference, not a destructive action — unlike
+				// stop/compact/reset it isn't gated behind admin mode; every mention is already
+				// an explicit address to the bot, so intercept it here before any mode logic.
+				const mentionVerboseCmd = parseVerboseCommand(slackEvent.text);
+				if (mentionVerboseCmd) {
+					this.handler.handleVerboseCommand(e.channel, this, mentionVerboseCmd);
+					return;
+				}
+
 				const dispatchConfig = this.getDispatchConfig(e.channel);
 				const input: InboundMessage = {
 					channel: e.channel,
@@ -1000,6 +1015,16 @@ export class SlackBot implements ChannelTransport {
 
 				// Only respond to allowed channels (if filter is configured)
 				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(e.channel)) return;
+
+				// verbose on/off/status from a DM is a UX preference, not a destructive
+				// action — unlike stop/compact/reset it isn't gated behind admin mode.
+				if (isDM) {
+					const dmVerboseCmd = parseVerboseCommand(slackEvent.text);
+					if (dmVerboseCmd) {
+						this.handler.handleVerboseCommand(e.channel, this, dmVerboseCmd);
+						return;
+					}
+				}
 
 				const input: InboundMessage = {
 					channel: e.channel,
@@ -1500,6 +1525,19 @@ export function createSlackContext(event: SlackEvent, slack: SlackBot, state: Ch
 					}
 				} catch (err) {
 					log.logWarning("Slack respond error", err instanceof Error ? err.message : String(err));
+				}
+			});
+			await updatePromise;
+		},
+
+		setStatus: async (label: string) => {
+			updatePromise = updatePromise.then(async () => {
+				try {
+					if (messageTs) {
+						await slack.updateMessage(event.channel, messageTs, label);
+					}
+				} catch (err) {
+					log.logWarning("Slack setStatus error", err instanceof Error ? err.message : String(err));
 				}
 			});
 			await updatePromise;
