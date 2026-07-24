@@ -1204,15 +1204,24 @@ ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 
-# get-secret/set-secret are documented and invoked by many skills (send-email,
-# github, transcribe-audio, etc.) as bare commands, but nothing else puts a
-# skill's own directory on PATH — the sandbox executor spawns `sh -c "<cmd>"`
-# with the plain inherited PATH. Symlinking them into /usr/local/bin (same as
-# iris-secret above) makes the documented bare-command usage actually work,
-# instead of relying on the model discovering the "not found" failure and
-# falling back to the skill's absolute path every time.
-sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret" /usr/local/bin/get-secret
-sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret" /usr/local/bin/set-secret
+# Skill scripts are documented and invoked by other skills as bare commands,
+# but nothing else puts a skill's own directory on PATH — the sandbox executor
+# spawns `sh -c "<cmd>"` with the plain inherited PATH. Symlinking them into
+# /usr/local/bin (same as iris-secret above) makes the documented bare-command
+# usage actually work, instead of relying on the model discovering the "not
+# found" failure and falling back to the skill's absolute path every time.
+# search-web/transcribe-audio's documented command name doesn't match their
+# script's filename (search.sh / transcribe-audio.sh), so those two symlinks
+# are named after the documented command, not the source file.
+sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret"     /usr/local/bin/get-secret
+sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret"     /usr/local/bin/set-secret
+sudo ln -sfn "$REPO_DIR/skills/schedule/schedule"         /usr/local/bin/schedule
+sudo ln -sfn "$REPO_DIR/skills/self-heal/self-heal"       /usr/local/bin/self-heal
+sudo ln -sfn "$REPO_DIR/skills/send-email/send-email"     /usr/local/bin/send-email
+sudo ln -sfn "$REPO_DIR/skills/serve-public/serve-public" /usr/local/bin/serve-public
+sudo ln -sfn "$REPO_DIR/skills/status/status"             /usr/local/bin/status
+sudo ln -sfn "$REPO_DIR/skills/search-web/search.sh"           /usr/local/bin/search-web
+sudo ln -sfn "$REPO_DIR/skills/transcribe-audio/transcribe-audio.sh" /usr/local/bin/transcribe-audio
 
 if [[ -n "$GENERATED_MODELS_JSON" && -f "$GENERATED_MODELS_JSON" ]]; then
   cp "$GENERATED_MODELS_JSON" "$IRIS_DIR/data/models.json"
