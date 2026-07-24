@@ -4,6 +4,29 @@
 
 ### Added
 
+- `spawn-agent` simplified: the default path now provisions a plain systemd
+  service (`agents/service-bootstrap.template.sh`) instead of a Terraform-managed
+  Docker container — no image build, no `terraform apply`, active in about a
+  second, reusing the same already-built `iris-runtime` binary Iris herself
+  runs. Docker/Terraform (`terraform/modules/agent`) becomes an explicit
+  `--mode=docker` opt-in for agents that need container isolation. Bridge
+  registration (`/iris/data/agents.json`) is now an automatic, unconditional
+  step of `spawn-agent` via a new shared helper, `agents/lib/register-bridge.sh`
+  (`flock`-protected read-merge-write, plus auto bridge-port assignment) —
+  previously nothing in the skill actually wrote this file, so `@agentname`
+  routing silently didn't work despite `bridge_port` being configured on the
+  container. `github-commit` is now gated on a GitHub PAT actually being
+  configured (`agents/lib/register-bridge.sh has-pat`) and skipped cleanly
+  when absent, rather than attempted unconditionally. Self-heal and starter
+  skills are no longer mandatory scaffolding — `--with-self-heal` and
+  `--with-skill=<name>` add them only when explicitly requested. Also fixes
+  `terraform/modules/agent`'s `null_resource.build_image`, which ran a full
+  `npm run build && docker build` on every single new agent (a fresh Terraform
+  resource address each time) even though the resulting `iris-runtime:local`
+  image is identical across agents; the build is now a single shared
+  `null_resource.iris_runtime_image` in `terraform/main.tf` (gated behind
+  `var.enable_docker_agents`, default `false`, so non-docker installs never
+  pay the cost), with each agent module depending on it instead of rebuilding.
 - `bootstrap.sh` now prompts for a Perplexity API key ("Set up web search (Perplexity)?", default No) alongside the existing optional Resend/GitHub prompts, seeding it as `PERPLEXITY-API-KEY` (Key Vault path) or writing `PERPLEXITY_API_KEY` to `/iris/.env` (zero-cloud path) — previously the `search-web` skill's key had to be added by hand after install, with no bootstrap step at all. Added to `secret-store.ts`'s `SENSITIVE_ENV_VARS` and `docs/secrets.md`'s migration list so `iris-secret import-env` and store/proxy mode pick it up like every other bootstrap-seeded credential.
 
 ### Fixed

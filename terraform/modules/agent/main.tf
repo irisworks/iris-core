@@ -28,25 +28,12 @@ resource "random_password" "api_token" {
 }
 
 # ─────────────────────────────────────────────
-# Build iris-runtime Docker image from source
-# ─────────────────────────────────────────────
-resource "null_resource" "build_image" {
-  triggers = {
-    package_json = filemd5("${var.iris_repo_dir}/iris-runtime/package.json")
-  }
-
-  provisioner "local-exec" {
-    command = <<-SHELL
-      set -e
-      cd ${var.iris_repo_dir}/iris-runtime
-      npm run build
-      docker build -t ${local.image_tag} .
-    SHELL
-  }
-}
-
-# ─────────────────────────────────────────────
 # Directory structure
+#
+# The iris-runtime:local image itself is built once, shared across every
+# agent module instance, by the top-level null_resource.iris_runtime_image in
+# terraform/main.tf — pass its id in as var.image_dependency so this module
+# depends on it without owning its own (redundant) build step.
 # ─────────────────────────────────────────────
 resource "null_resource" "agent_dirs" {
   triggers = {
@@ -70,7 +57,7 @@ resource "null_resource" "agent_dirs" {
 # Agent container
 # ─────────────────────────────────────────────
 resource "null_resource" "agent" {
-  depends_on = [null_resource.build_image, null_resource.agent_dirs]
+  depends_on = [null_resource.agent_dirs]
 
   lifecycle {
     precondition {
@@ -83,6 +70,11 @@ resource "null_resource" "agent" {
     agent_name = var.agent_name
     image_tag  = local.image_tag
     api_token  = var.unique_api_token ? random_password.api_token[0].result : ""
+    # References the shared build's id (not a resource reference, so not a
+    # valid depends_on target) — including it here gives Terraform an
+    # implicit data dependency: this container is only (re)created after
+    # null_resource.iris_runtime_image in terraform/main.tf has run.
+    image_ready = var.image_dependency
   }
 
   provisioner "local-exec" {

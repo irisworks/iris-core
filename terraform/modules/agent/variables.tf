@@ -78,6 +78,11 @@ variable "iris_model" {
   default     = ""
 }
 
+variable "image_dependency" {
+  description = "id of the shared null_resource.iris_runtime_image (terraform/main.tf), passed through so this module's container waits on — and rebuilds after — the one shared image build instead of running its own redundant `npm run build && docker build` per agent."
+  type        = string
+}
+
 variable "secrets_mode" {
   description = "Host secrets mode (IRIS_SECRETS_MODE). With \"env\" (default) the container inherits the whole /iris/.env via --env-file, matching pre-mode behavior. With \"store\" or \"proxy\" the env files are NOT passed: the agent resolves secrets through the parent API's /secret/:name route (per-agent allow-list in agents.json), so unique_api_token must be true and the agent's `secrets` array must list every name it needs — including its LLM key (e.g. ANTHROPIC-API-KEY). See docs/secrets.md."
   type        = string

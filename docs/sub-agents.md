@@ -6,8 +6,10 @@ description: Spawning isolated sub-agents, the HTTP bridge, sandbox levels, and 
 # Sub-agents & Internal API
 
 Sub-agents are separate runtime instances that Iris spawns and supervises — each
-with its own constitution, memory, and skills, running in a Docker container or a
-Firecracker microVM.
+with its own constitution, memory, and skills. The `spawn-agent` skill's default
+path runs them as a plain systemd service on the host (no Terraform, no Docker);
+`--mode=docker` and Firecracker microVMs are opt-in for agents that specifically
+need container/VM isolation.
 
 ## Sandboxing levels
 
@@ -30,6 +32,12 @@ Sub-agents register in `agents.json` with a `bridge_url`; mentioning `@agentname
 routes the request over HTTP to that agent's bridge server, which processes it and
 returns the reply. Escalations flow the other way: a sub-agent that can't self-heal
 POSTs to Iris's `/escalate` endpoint.
+
+`spawn-agent` writes this registration itself — via `agents/lib/register-bridge.sh
+register`, under an `flock` so concurrent spawns can't clobber each other's entries
+— as an unconditional step of both the default service-mode flow and `--mode=docker`.
+There is no flag to skip it: `@agentname` is meant to work immediately after
+creation, not after a separate manual registration step.
 
 Each agent entry may also declare a `secrets` allow-list — the names it may request
 via `GET /secrets/:name` — and a per-agent `token` so the API can tell agents apart:
@@ -79,8 +87,21 @@ Treat `agents.json` as a secrets file once `token` fields are in it: keep file
 permissions tight and never commit it to version control (the token values are
 random strings that secret scanners won't reliably flag).
 
+The `iris-runtime:local` Docker image used by `--mode=docker` agents is built
+once, by a single shared `null_resource.iris_runtime_image` in `terraform/main.tf`,
+not per agent module — every agent module instance just depends on it instead of
+re-running its own `npm run build && docker build`. That resource is gated behind
+`var.enable_docker_agents` (default `false`), so an install that never uses
+`--mode=docker` doesn't pay an image-build cost on unrelated `terraform apply` runs.
+
 Scaffolds for new sub-agents live in `agents/`; the `spawn-agent` skill automates
-provisioning (two containers per agent: preview and prod).
+provisioning. The default flow provisions one systemd service per agent
+(`agents/service-bootstrap.template.sh`) — no Docker, no Terraform, no
+preview/prod split. `--mode=docker` provisions one Docker container per agent
+via `terraform/modules/agent` (also no preview/prod split — that can be
+re-introduced later if needed). Commits made along the way (scaffold files,
+`terraform/agents.tf`) are skipped entirely when no GitHub PAT is configured
+in the environment, rather than attempted and left to fail.
 
 ## Internal HTTP API
 

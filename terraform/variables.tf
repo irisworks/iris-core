@@ -30,3 +30,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "iris_repo_dir" {
+  description = "Path to the iris-core repo checkout on the VM (used to build the shared iris-runtime:local image once for all docker-mode agents)"
+  type        = string
+  default     = "/iris/repo"
+}
+
+variable "enable_docker_agents" {
+  description = "Set true once at least one spawn-agent --mode=docker sub-agent module is defined in agents.tf. Gates the shared iris-runtime:local image build (null_resource.iris_runtime_image) so installs that only use the default service-mode agents (no Terraform/Docker at all) never pay an image-build cost on unrelated `terraform apply` runs."
+  type        = bool
+  default     = false
+}
