@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseAgentMention } from "../dist/engine/bridge.js";
+import { parseAgentMention, callAgentBridge } from "../dist/engine/bridge.js";
 import { makeBot, settle } from "./helpers.mjs";
 
 const registry = {
@@ -167,6 +167,62 @@ test("slack message (DM): leading @agent bypasses dispatch here too", async () =
 		assert.equal(calls.events.length, 0);
 		assert.equal(calls.posted.length, 1);
 		assert.equal(calls.posted[0].text, "dm reply: what's new?");
+	} finally {
+		server.close();
+	}
+});
+
+// ============================================================================
+// callAgentBridge() conversationKey — session continuity across mentions
+// ============================================================================
+
+test("callAgentBridge: same conversationKey reuses the same requestId across calls", async () => {
+	const port = 19514;
+	const seen = [];
+	const server = await stubBridge(port, (body, res) => {
+		seen.push(body.requestId);
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ text: "ok" }));
+	});
+	try {
+		await callAgentBridge(`http://127.0.0.1:${port}`, "first", "u1", undefined, "slack-C1-1.0");
+		await callAgentBridge(`http://127.0.0.1:${port}`, "second", "u1", undefined, "slack-C1-1.0");
+		assert.equal(seen.length, 2);
+		assert.equal(seen[0], seen[1], "same origin conversation must reuse the same bridge session id");
+	} finally {
+		server.close();
+	}
+});
+
+test("callAgentBridge: different conversationKeys get different requestIds", async () => {
+	const port = 19515;
+	const seen = [];
+	const server = await stubBridge(port, (body, res) => {
+		seen.push(body.requestId);
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ text: "ok" }));
+	});
+	try {
+		await callAgentBridge(`http://127.0.0.1:${port}`, "hi", "u1", undefined, "slack-C1-1.0");
+		await callAgentBridge(`http://127.0.0.1:${port}`, "hi", "u1", undefined, "slack-C2-1.0");
+		assert.notEqual(seen[0], seen[1]);
+	} finally {
+		server.close();
+	}
+});
+
+test("callAgentBridge: no conversationKey falls back to a fresh random requestId each call", async () => {
+	const port = 19516;
+	const seen = [];
+	const server = await stubBridge(port, (body, res) => {
+		seen.push(body.requestId);
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ text: "ok" }));
+	});
+	try {
+		await callAgentBridge(`http://127.0.0.1:${port}`, "hi", "u1");
+		await callAgentBridge(`http://127.0.0.1:${port}`, "hi", "u1");
+		assert.notEqual(seen[0], seen[1]);
 	} finally {
 		server.close();
 	}

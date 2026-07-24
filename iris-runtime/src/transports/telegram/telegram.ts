@@ -421,7 +421,7 @@ export class TelegramBot implements ChannelTransport {
 
 		const query = mention.query.trim() || text;
 		try {
-			const reply = await callAgentBridge(mention.entry.bridge_url, query, user);
+			const reply = await callAgentBridge(mention.entry.bridge_url, query, user, undefined, channelId);
 			await this.postMessage(channelId, reply);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);

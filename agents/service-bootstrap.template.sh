@@ -21,9 +21,20 @@
 #     WorkingDirectory is ${AGENT_DATA_DIR} (not /iris where the file lives),
 #     so nothing here loads it. That's intentional — the agent comes up
 #     bridge-only, with no Slack/Telegram credentials, no LLM API key, unless
-#     something below adds it explicitly via Environment=. Do not add
-#     `EnvironmentFile=/iris/.env` to the unit to "fix" this — see the
-#     Slack/Telegram warning below for why.
+#     something below adds it explicitly via Environment=.
+#
+#   NEVER add `EnvironmentFile=/iris/.env` to the unit to "fix" this, even
+#   alongside an explicit `Environment=TELEGRAM_BOT_TOKEN=` (or Slack) meant to
+#   clear it back out — systemd merges Environment=/EnvironmentFile= in the
+#   order they appear in the unit file, last-one-for-each-variable-wins, and
+#   an EnvironmentFile= line placed after the clearing Environment= line
+#   silently restores Iris's real token from the file, undoing the clear.
+#   This is exactly how a prior "fix" reintroduced the same credential leak
+#   it was meant to close (see iris-runtime/CHANGELOG.md). There is no safe
+#   ordering to rely on here — don't reference the live file at all. If this
+#   agent needs specific values out of /iris/.env (an LLM key, IRIS_PROVIDER),
+#   resolve them once at bootstrap time (like the block below) and embed the
+#   resolved values as literal Environment= lines instead.
 
 set -euo pipefail
 
@@ -39,6 +50,17 @@ AGENT_DATA_DIR="${IRIS_DIR}/agents/${AGENT_NAME}/data"
 NODE_BIN="$(which node)"
 IRIS_RUNTIME_BIN="${REPO_DIR}/iris-runtime/dist/main.js"
 DOTENV_CONFIG="${REPO_DIR}/iris-runtime/node_modules/dotenv/config"
+
+# ── LLM config: resolve once from /iris/.env, embed as literal values ────
+# Prefer the secrets API (get-secret / IRIS_SECRET_BROKER_URL, see
+# docs/secrets.md) over this when the install runs store/proxy mode — this
+# grep fallback only applies to plain env-mode installs, and only reads the
+# two non-secret provider/model settings here. If this agent also needs an
+# LLM key and the install is env-mode, resolve it the same way (a single
+# `grep "^ANTHROPIC_API_KEY" /iris/.env | cut -d= -f2-` line below) and add it
+# as its own Environment= line — never via EnvironmentFile=.
+IRIS_PROVIDER="$(grep "^IRIS_PROVIDER=" "${IRIS_DIR}/.env" 2>/dev/null | cut -d= -f2- || echo "anthropic")"
+IRIS_MODEL="$(grep    "^IRIS_MODEL="    "${IRIS_DIR}/.env" 2>/dev/null | cut -d= -f2- || echo "claude-sonnet-4-6")"
 
 # ── Workspace: symlink identity + skills from the repo checkout ──────────
 mkdir -p "${AGENT_DATA_DIR}/events"
@@ -59,6 +81,8 @@ WorkingDirectory=${AGENT_DATA_DIR}
 Environment=AGENT_NAME=${AGENT_NAME}
 Environment=IRIS_ENV=prod
 Environment=IRIS_BRIDGE_PORT=${BRIDGE_PORT}
+Environment=IRIS_PROVIDER=${IRIS_PROVIDER}
+Environment=IRIS_MODEL=${IRIS_MODEL}
 ExecStart=${NODE_BIN} --require ${DOTENV_CONFIG} ${IRIS_RUNTIME_BIN} --sandbox=host ${AGENT_DATA_DIR}
 Restart=always
 RestartSec=10

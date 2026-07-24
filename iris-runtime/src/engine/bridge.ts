@@ -215,16 +215,35 @@ export function parseAgentMention(
 }
 
 /**
+ * Sanitize a caller-supplied conversation key into a safe requestId — it
+ * becomes part of a `BRIDGE-{id}` channelId, which store.ts joins directly
+ * onto a filesystem path, so anything outside [\w-] gets collapsed.
+ */
+function sanitizeBridgeKey(key: string): string {
+	return key.replace(/[^\w-]/g, "-").slice(0, 128) || randomBytes(8).toString("hex");
+}
+
+/**
  * Forward a message to a sub-agent via its bridge server.
  * Returns the agent's response text, or throws on timeout/error.
+ *
+ * `conversationKey`, when given, is reused as the bridge requestId (and thus
+ * the sub-agent's `BRIDGE-{id}` session directory) instead of a fresh random
+ * one — so repeated `@mentions` from the same origin conversation (a Slack
+ * channel/thread, a Telegram chat, a web session) land in the same sub-agent
+ * session and keep its `context.jsonl` history, rather than starting a blank
+ * session on every single message. Omit it only for one-off calls that
+ * should never share history (there are currently none — every transport
+ * call site passes one).
  */
 export async function callAgentBridge(
 	bridgeUrl: string,
 	text: string,
 	user: string,
 	timeoutMs = 120_000,
+	conversationKey?: string,
 ): Promise<string> {
-	const requestId = randomBytes(8).toString("hex");
+	const requestId = conversationKey ? sanitizeBridgeKey(conversationKey) : randomBytes(8).toString("hex");
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);

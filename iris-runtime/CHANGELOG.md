@@ -48,6 +48,17 @@
 
 ### Fixed
 
+- `@agentname` bridge requests reused a fresh random ID per call, so every
+  mention landed in a new sub-agent session directory with no memory of the
+  prior turn. `callAgentBridge()` now accepts a stable conversation key
+  (Slack channel+thread, Telegram channel, web session), reused as the
+  session ID across repeated mentions from the same origin.
+- `agents/service-bootstrap.template.sh` (host/systemd sub-agents) now
+  resolves `IRIS_PROVIDER`/`IRIS_MODEL` from `/iris/.env` at bootstrap time
+  and embeds them as literal `Environment=` lines, and its warning against
+  `EnvironmentFile=/iris/.env` now explains systemd's last-wins merge order —
+  a prior fix's `Environment=TELEGRAM_BOT_TOKEN=` clear was silently undone
+  by exactly this pattern on a live agent.
 - Sub-agents could end up authenticating with Iris's own Slack/Telegram bot
   credentials, causing two processes to fight over the same Socket Mode
   connection / Telegram `getUpdates` poll (Telegram returns 409 "terminated
