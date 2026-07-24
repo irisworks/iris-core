@@ -65,7 +65,12 @@
   server (`POST /bridge` only, 404s on anything else) — `/health` is served
   by the internal API on `IRIS_API_PORT` (`BRIDGE_PORT+100`). Fixed for both
   service mode and `--mode=docker` (the latter isn't host-reachable at all;
-  verify via `docker exec ... curl`).
+  verify via `docker exec ... curl`). Its `agents/...` command blocks were
+  also all relative paths with no stated base — Iris's own working directory
+  is `/iris/data`, not the repo checkout, so every one of them resolved
+  against the wrong directory (`ls`/`cat` came back empty, only found via
+  `find /iris -name ...`). Now opens with a `cd "${IRIS_REPO_DIR:-/iris/repo}"`
+  preamble, matching `skills/github/SKILL.md` / `skills/terraform/SKILL.md`.
 - `BridgeTransport.replaceMessage()` (how the engine delivers a run's final
   answer) was a no-op, so a bridge-only sub-agent's HTTP caller never got its
   response and the request hung until the 60s timeout even though the agent

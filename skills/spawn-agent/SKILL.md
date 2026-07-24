@@ -28,6 +28,18 @@ without per-step confirmation.
 
 ## Default flow — service mode (no Terraform, no Docker)
 
+Every `agents/...` path below is relative to the repo checkout, not to Iris's
+own working directory (`/iris/data`, where she actually runs from) — `cd`
+there first, same convention as `skills/github/SKILL.md` /
+`skills/terraform/SKILL.md`:
+```bash
+cd "${IRIS_REPO_DIR:-/iris/repo}"
+```
+Skipping this sends every relative path below looking in the wrong place
+(seen in production: `ls agents/lib/` and `cat agents/service-bootstrap.template.sh`
+came back empty from `/iris/data`, and the actual files were only found after
+a `find /iris -name ...` turned up `/iris/repo/agents/...`).
+
 ### Step 1 — Scaffold
 
 Create `agents/<name>/`:
