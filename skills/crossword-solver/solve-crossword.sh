@@ -24,7 +24,7 @@ If there are multiple plausible answers, list the most likely one first and brie
 Keep wordplay explanations under 3 sentences."
 
 # Call search-web skill
-RESULT=$(bash /iris/data/skills/search-web/search-web "$PROMPT" 2>/dev/null) || {
+RESULT=$(bash /iris/data/skills/search-web/search.sh "$PROMPT" 2>/dev/null) || {
   echo "Error: Failed to search for crossword solution." >&2
   exit 1
 }
