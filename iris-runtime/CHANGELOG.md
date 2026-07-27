@@ -47,7 +47,7 @@
 
 ### Changed
 
-- `formatToolArgs()` in `iris-runtime/src/engine/log.ts` had a dead `if (value.includes("\n")) { lines.push(value); } else { lines.push(value); }` branch — both paths were identical, so the multi-line check was a no-op (#74). The comment above it ("Multi-line strings get indented") described behaviour that actually lives in the caller (`logToolStart`, which splits the joined output on `"\n"` and prefixes every line with the same indent), not in `formatToolArgs` itself. Verified via `git log --all -S` (pickaxe) and `git blame` that the dead branch and the misleading comment have been present unchanged since the initial commit (`b962545`, at the file's pre-restructure path `iris-runtime/src/log.ts`), so no indentation logic was ever dropped — the comment was just stale. Simplified to a single `lines.push(value)` and replaced the comment with one that points at where the indenting actually happens. No behaviour change: multi-line string values are still uniformly indented in the console log output, exactly as before.
+- Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 
 ### Fixed
 
