@@ -52,14 +52,11 @@ function formatToolArgs(args: Record<string, unknown>): string {
 		// Skip offset/limit since we already handled them
 		if (key === "offset" || key === "limit") continue;
 
-		// For other values, format them
+		// For other values, format them. Multi-line string values are
+		// uniformly indented by the caller (logToolStart, which splits
+		// the joined output on "\n" and prefixes every line).
 		if (typeof value === "string") {
-			// Multi-line strings get indented
-			if (value.includes("\n")) {
-				lines.push(value);
-			} else {
-				lines.push(value);
-			}
+			lines.push(value);
 		} else {
 			lines.push(JSON.stringify(value));
 		}

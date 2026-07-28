@@ -59,6 +59,13 @@ any channel mode. The setting persists per channel (in that channel's
 `settings.json`) until toggled again; `IRIS_VERBOSE_TOOLS=true` in `/iris/.env`
 changes the default for channels that haven't set their own override.
 
+This toggle only controls what gets posted back into the chat transport.
+Tool-call invocations (name, label, and formatted arguments) are always
+written to the console log (`journalctl -u iris`) regardless of the
+setting — `formatToolArgs()` in `iris-runtime/src/engine/log.ts` formats
+the arguments and `logToolStart()` uniformly indents every line of the
+joined output.
+
 ## Passthrough configuration
 
 Passthrough channels forward every message — top-level channel messages,
