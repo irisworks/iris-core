@@ -1,0 +1,447 @@
+// truncate.ts — head/tail truncation with independent line and byte limits.
+// Covers formatSize's B/KB/MB output and the documented edge cases for
+// truncateHead / truncateTail, including multi-byte UTF-8 boundary safety
+// for the private truncateStringToBytesFromEnd helper (exercised indirectly
+// via truncateTail's lastLinePartial path, the only caller).
+//
+// Requires `npm run build` first (tests import ../dist/*.js).
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+	formatSize,
+	truncateHead,
+	truncateTail,
+	DEFAULT_MAX_LINES,
+	DEFAULT_MAX_BYTES,
+} from "../dist/engine/tools/truncate.js";
+
+/** UTF-8 byte length — matches the source's Buffer.byteLength approach. */
+function bytes(s) {
+	return Buffer.byteLength(s, "utf-8");
+}
+
+/** Round-trip a string through a UTF-8 buffer to detect partial multi-byte sequences. */
+function isCompleteUtf8(s) {
+	return Buffer.from(s, "utf-8").toString("utf-8") === s;
+}
+
+// ---------------------------------------------------------------------------
+// Exported constants
+// ---------------------------------------------------------------------------
+
+test("truncate: DEFAULT_MAX_LINES is 2000", () => {
+	assert.equal(DEFAULT_MAX_LINES, 2000);
+});
+
+test("truncate: DEFAULT_MAX_BYTES is 50KB (50*1024)", () => {
+	assert.equal(DEFAULT_MAX_BYTES, 50 * 1024);
+	assert.equal(DEFAULT_MAX_BYTES, 51200);
+});
+
+// ---------------------------------------------------------------------------
+// formatSize — B/KB/MB output
+// ---------------------------------------------------------------------------
+
+test("formatSize: 0 bytes returns 0B", () => {
+	assert.equal(formatSize(0), "0B");
+});
+
+test("formatSize: 1 byte returns 1B", () => {
+	assert.equal(formatSize(1), "1B");
+});
+
+test("formatSize: 1023 bytes returns 1023B", () => {
+	assert.equal(formatSize(1023), "1023B");
+});
+
+test("formatSize: 1024 bytes returns 1.0KB", () => {
+	assert.equal(formatSize(1024), "1.0KB");
+});
+
+test("formatSize: 1536 bytes returns 1.5KB", () => {
+	assert.equal(formatSize(1536), "1.5KB");
+});
+
+test("formatSize: 1MB (1024*1024) returns 1.0MB", () => {
+	assert.equal(formatSize(1024 * 1024), "1.0MB");
+});
+
+test("formatSize: 1.5MB returns 1.5MB", () => {
+	assert.equal(formatSize(1024 * 1024 * 1.5), "1.5MB");
+});
+
+test("formatSize: boundary 1023 -> B, 1024 -> KB", () => {
+	assert.equal(formatSize(1023), "1023B");
+	assert.equal(formatSize(1024), "1.0KB");
+});
+
+test("formatSize: boundary 1024*1024-1 -> KB, 1024*1024 -> MB", () => {
+	// 1048575 < 1024*1024 so it stays in the KB branch; 1048575/1024 = 1023.999...
+	// which toFixed(1) rounds up to "1024.0" — a KB value just under 1MB.
+	assert.equal(formatSize(1024 * 1024 - 1), "1024.0KB");
+	assert.equal(formatSize(1024 * 1024), "1.0MB");
+});
+
+// ---------------------------------------------------------------------------
+// truncateHead — no truncation
+// ---------------------------------------------------------------------------
+
+test("truncateHead: content under both limits is unchanged", () => {
+	const content = "line1\nline2\nline3";
+	const result = truncateHead(content, { maxLines: 10, maxBytes: 1000 });
+	assert.equal(result.truncated, false);
+	assert.equal(result.truncatedBy, null);
+	assert.equal(result.content, content);
+	assert.equal(result.firstLineExceedsLimit, false);
+	assert.equal(result.lastLinePartial, false);
+	assert.equal(result.totalLines, 3);
+	assert.equal(result.totalBytes, bytes(content));
+	assert.equal(result.outputLines, 3);
+	assert.equal(result.outputBytes, bytes(content));
+});
+
+test("truncateHead: empty content under limits returns unchanged", () => {
+	const result = truncateHead("", { maxLines: 10, maxBytes: 1000 });
+	assert.equal(result.truncated, false);
+	assert.equal(result.content, "");
+	assert.equal(result.totalLines, 1); // "".split("\n") === [""]
+	assert.equal(result.totalBytes, 0);
+	assert.equal(result.outputBytes, 0);
+});
+
+// ---------------------------------------------------------------------------
+// truncateHead — line limit
+// ---------------------------------------------------------------------------
+
+test("truncateHead: line limit keeps first maxLines lines", () => {
+	const content = "l1\nl2\nl3\nl4\nl5";
+	const result = truncateHead(content, { maxLines: 2, maxBytes: 1000 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "lines");
+	assert.equal(result.content, "l1\nl2");
+	assert.equal(result.outputLines, 2);
+	assert.equal(result.outputBytes, bytes("l1\nl2"));
+	assert.equal(result.totalLines, 5);
+	assert.equal(result.totalBytes, bytes(content));
+	assert.equal(result.firstLineExceedsLimit, false);
+});
+
+test("truncateHead: line count exactly equal to maxLines is not truncated", () => {
+	const content = "a\nb\nc";
+	const result = truncateHead(content, { maxLines: 3, maxBytes: 1000 });
+	assert.equal(result.truncated, false);
+	assert.equal(result.content, content);
+});
+
+test("truncateHead: line and byte limits hit together resolves to 'lines'", () => {
+	// maxLines=1 stops the loop after the first line; outputBytes (2) <= maxBytes (4),
+	// so the post-loop check sets truncatedBy back to "lines".
+	const content = "ab\ncd";
+	const result = truncateHead(content, { maxLines: 1, maxBytes: 4 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "lines");
+	assert.equal(result.content, "ab");
+	assert.equal(result.outputLines, 1);
+});
+
+// ---------------------------------------------------------------------------
+// truncateHead — byte limit
+// ---------------------------------------------------------------------------
+
+test("truncateHead: byte limit keeps complete lines that fit", () => {
+	const content = "aaaa\nbbbb\ncccc";
+	const result = truncateHead(content, { maxLines: 10, maxBytes: 5 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.content, "aaaa");
+	assert.equal(result.outputLines, 1);
+	assert.equal(result.outputBytes, 4);
+	assert.equal(result.totalBytes, bytes(content));
+	assert.equal(result.totalLines, 3);
+	assert.equal(result.firstLineExceedsLimit, false);
+});
+
+test("truncateHead: byte limit never returns partial lines", () => {
+	// maxBytes=6 fits line1 (4 bytes) but not line1+newline+line2 (4+1+4=9).
+	const content = "aaaa\nbbbb\ncccc";
+	const result = truncateHead(content, { maxLines: 10, maxBytes: 6 });
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.content, "aaaa");
+	assert.equal(result.outputLines, 1);
+	// Output is always a whole number of complete lines.
+	assert.equal(result.content.split("\n").length, result.outputLines);
+});
+
+// ---------------------------------------------------------------------------
+// truncateHead — first line exceeds byte limit
+// ---------------------------------------------------------------------------
+
+test("truncateHead: first line exceeding byte limit returns empty content", () => {
+	const content = "aaaaaaaaaa"; // 10 bytes, single line
+	const result = truncateHead(content, { maxLines: 10, maxBytes: 3 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.firstLineExceedsLimit, true);
+	assert.equal(result.content, "");
+	assert.equal(result.outputLines, 0);
+	assert.equal(result.outputBytes, 0);
+	assert.equal(result.totalBytes, bytes(content));
+	assert.equal(result.totalLines, 1);
+});
+
+test("truncateHead: first line exactly at byte limit is not 'exceeds' and is included", () => {
+	// firstLineBytes === maxBytes is NOT > maxBytes, so firstLineExceedsLimit is false
+	// and the first line is kept; the second line triggers byte truncation.
+	const content = "aaa\nb";
+	const result = truncateHead(content, { maxLines: 10, maxBytes: 3 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.firstLineExceedsLimit, false);
+	assert.equal(result.content, "aaa");
+	assert.equal(result.outputLines, 1);
+	assert.equal(result.outputBytes, 3);
+});
+
+// ---------------------------------------------------------------------------
+// truncateHead — multi-byte UTF-8
+// ---------------------------------------------------------------------------
+
+test("truncateHead: multi-byte content respects character boundaries", () => {
+	// "é" is 2 bytes; lines ["é","é","é"] total 2+1+2+1+2 = 8 bytes.
+	const content = "é\né\né";
+	const result = truncateHead(content, { maxLines: 10, maxBytes: 4 });
+	assert.equal(result.truncatedBy, "bytes");
+	// Only the first line fits: 2 bytes; adding the 2nd would be 2+1+2=5 > 4.
+	assert.equal(result.content, "é");
+	assert.equal(result.outputLines, 1);
+	assert.equal(result.outputBytes, 2);
+	assert.ok(isCompleteUtf8(result.content), "output must contain only complete UTF-8 chars");
+});
+
+test("truncateHead: multi-byte first line exceeding byte limit triggers firstLineExceedsLimit", () => {
+	// "€" is 3 bytes; a single line of 4 € = 12 bytes > maxBytes=5.
+	const content = "€€€€";
+	const result = truncateHead(content, { maxLines: 10, maxBytes: 5 });
+	assert.equal(result.firstLineExceedsLimit, true);
+	assert.equal(result.content, "");
+	assert.equal(result.outputBytes, 0);
+});
+
+test("truncateHead: totalLines/totalBytes reflect original, outputLines/outputBytes reflect truncated", () => {
+	const content = "alpha\nbeta\ngamma\ndelta";
+	const result = truncateHead(content, { maxLines: 2, maxBytes: 1000 });
+	assert.equal(result.totalLines, 4);
+	assert.equal(result.totalBytes, bytes(content));
+	assert.equal(result.outputLines, 2);
+	assert.equal(result.outputBytes, bytes(result.content));
+	assert.notEqual(result.outputBytes, result.totalBytes);
+});
+
+// ---------------------------------------------------------------------------
+// truncateTail — no truncation
+// ---------------------------------------------------------------------------
+
+test("truncateTail: content under both limits is unchanged", () => {
+	const content = "line1\nline2\nline3";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 1000 });
+	assert.equal(result.truncated, false);
+	assert.equal(result.truncatedBy, null);
+	assert.equal(result.content, content);
+	assert.equal(result.lastLinePartial, false);
+	assert.equal(result.firstLineExceedsLimit, false);
+	assert.equal(result.totalLines, 3);
+	assert.equal(result.totalBytes, bytes(content));
+	assert.equal(result.outputLines, 3);
+	assert.equal(result.outputBytes, bytes(content));
+});
+
+// ---------------------------------------------------------------------------
+// truncateTail — line limit
+// ---------------------------------------------------------------------------
+
+test("truncateTail: line limit keeps LAST maxLines lines", () => {
+	const content = "l1\nl2\nl3\nl4\nl5";
+	const result = truncateTail(content, { maxLines: 2, maxBytes: 1000 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "lines");
+	assert.equal(result.content, "l4\nl5");
+	assert.equal(result.outputLines, 2);
+	assert.equal(result.outputBytes, bytes("l4\nl5"));
+	assert.equal(result.totalLines, 5);
+	assert.equal(result.totalBytes, bytes(content));
+});
+
+// ---------------------------------------------------------------------------
+// truncateTail — byte limit
+// ---------------------------------------------------------------------------
+
+test("truncateTail: byte limit keeps last complete lines that fit", () => {
+	const content = "aaaa\nbbbb\ncccc";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 5 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.content, "cccc");
+	assert.equal(result.outputLines, 1);
+	assert.equal(result.outputBytes, 4);
+	assert.equal(result.lastLinePartial, false);
+});
+
+test("truncateTail: byte limit keeps multiple trailing lines when they fit", () => {
+	// lines ["aa","bb","cc","dd"]; maxBytes=6 fits "cc\ndd" (2+1+2=5) but not "bb\ncc\ndd" (8).
+	const content = "aa\nbb\ncc\ndd";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 6 });
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.content, "cc\ndd");
+	assert.equal(result.outputLines, 2);
+	assert.equal(result.outputBytes, bytes("cc\ndd"));
+	assert.equal(result.lastLinePartial, false);
+});
+
+test("truncateTail: last line exactly at byte limit is kept whole (not partial)", () => {
+	// lineBytes === maxBytes is NOT > maxBytes, so the last line is included and
+	// lastLinePartial stays false; the earlier line then triggers byte truncation.
+	const content = "aaa\nbbb";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 3 });
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.content, "bbb");
+	assert.equal(result.outputLines, 1);
+	assert.equal(result.outputBytes, 3);
+	assert.equal(result.lastLinePartial, false);
+});
+
+// ---------------------------------------------------------------------------
+// truncateTail — last line exceeds byte limit (truncateStringToBytesFromEnd)
+// ---------------------------------------------------------------------------
+
+test("truncateTail: single line exceeding maxBytes returns partial from end with lastLinePartial=true", () => {
+	const content = "aaaaaaaaaa"; // 10 bytes, single line
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 3 });
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.lastLinePartial, true);
+	// Last 3 bytes of "aaaaaaaaaa".
+	assert.equal(result.content, "aaa");
+	assert.equal(result.outputBytes, 3);
+	assert.equal(result.outputLines, 1);
+	assert.equal(result.totalBytes, 10);
+	assert.equal(result.totalLines, 1);
+});
+
+test("truncateTail: lastLinePartial content is a suffix of the original last line", () => {
+	const content = "abcdefghij"; // 10 bytes
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 4 });
+	assert.equal(result.lastLinePartial, true);
+	assert.equal(result.content, "ghij"); // last 4 bytes
+	assert.ok(content.endsWith(result.content));
+});
+
+// ---------------------------------------------------------------------------
+// truncateTail — multi-byte UTF-8 boundary safety
+// ---------------------------------------------------------------------------
+
+test("truncateTail: lastLinePartial respects 2-byte UTF-8 boundaries (é)", () => {
+	// "é" is 2 bytes; 5 é = 10 bytes. maxBytes=3 lands mid-character (start=7, the 2nd
+	// byte of the 4th é), so it advances to byte 8 (start of the 5th é) and returns
+	// the last complete é (2 bytes, not 3).
+	const content = "ééééé";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 3 });
+	assert.equal(result.lastLinePartial, true);
+	assert.equal(result.content, "é");
+	assert.equal(result.outputBytes, 2);
+	assert.ok(isCompleteUtf8(result.content));
+	assert.ok(content.endsWith(result.content));
+});
+
+test("truncateTail: lastLinePartial respects 3-byte UTF-8 boundaries (€)", () => {
+	// "€" is 3 bytes; 4 € = 12 bytes. maxBytes=5: start=7 (mid 3rd €), advances to
+	// byte 9 (start of 4th €), slice(9) = last € (3 bytes).
+	const content = "€€€€";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 5 });
+	assert.equal(result.lastLinePartial, true);
+	assert.equal(result.content, "€");
+	assert.equal(result.outputBytes, 3);
+	assert.ok(isCompleteUtf8(result.content));
+	assert.ok(content.endsWith(result.content));
+});
+
+test("truncateTail: lastLinePartial respects 4-byte UTF-8 boundaries (𝕏)", () => {
+	// "𝕏" (U+1D54F) is 4 bytes; 3 𝕏 = 12 bytes. maxBytes=5: start=7 (4th byte of 2nd 𝕏),
+	// advances to byte 8 (start of 3rd 𝕏), slice(8) = last 𝕏 (4 bytes).
+	const content = "𝕏𝕏𝕏";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 5 });
+	assert.equal(result.lastLinePartial, true);
+	assert.equal(result.content, "𝕏");
+	assert.equal(result.outputBytes, 4);
+	assert.ok(isCompleteUtf8(result.content));
+	assert.ok(content.endsWith(result.content));
+});
+
+test("truncateTail: lastLinePartial takes multiple complete chars when they fit", () => {
+	// 20 € = 60 bytes. maxBytes=10: start=50 (mid-€), advances to byte 51 (start of 18th €),
+	// slice(51) = last 3 € (9 bytes). 10 bytes would split a €, so 9 is the largest whole fit.
+	const content = "€".repeat(20);
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 10 });
+	assert.equal(result.lastLinePartial, true);
+	assert.equal(result.content, "€".repeat(3));
+	assert.equal(result.outputBytes, 9);
+	assert.ok(result.outputBytes <= 10);
+	assert.ok(isCompleteUtf8(result.content));
+	assert.ok(content.endsWith(result.content));
+});
+
+test("truncateTail: multi-byte content with a line that fits keeps complete lines (no partial)", () => {
+	// lines ["é","é","é"]; maxBytes=4: last line "é" (2 bytes) fits, the 2nd would make 2+1+2=5 > 4.
+	const content = "é\né\né";
+	const result = truncateTail(content, { maxLines: 10, maxBytes: 4 });
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.content, "é");
+	assert.equal(result.outputLines, 1);
+	assert.equal(result.outputBytes, 2);
+	assert.equal(result.lastLinePartial, false);
+	assert.ok(isCompleteUtf8(result.content));
+});
+
+test("truncateTail: totalLines/totalBytes reflect original, outputLines/outputBytes reflect truncated", () => {
+	const content = "alpha\nbeta\ngamma\ndelta";
+	const result = truncateTail(content, { maxLines: 2, maxBytes: 1000 });
+	assert.equal(result.totalLines, 4);
+	assert.equal(result.totalBytes, bytes(content));
+	assert.equal(result.outputLines, 2);
+	assert.equal(result.outputBytes, bytes(result.content));
+	assert.notEqual(result.outputBytes, result.totalBytes);
+});
+
+// ---------------------------------------------------------------------------
+// Default options
+// ---------------------------------------------------------------------------
+
+test("truncateHead/truncateTail: content under default limits is unchanged", () => {
+	const content = "x".repeat(100);
+	const head = truncateHead(content);
+	const tail = truncateTail(content);
+	assert.equal(head.truncated, false);
+	assert.equal(tail.truncated, false);
+	assert.equal(head.content, content);
+	assert.equal(tail.content, content);
+});
+
+test("truncateHead: content exceeding default byte limit is truncated by bytes", () => {
+	// Single line under the default line limit but over the default byte limit.
+	const content = "x".repeat(DEFAULT_MAX_BYTES + 1);
+	const result = truncateHead(content);
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.firstLineExceedsLimit, true);
+	assert.equal(result.content, "");
+});
+
+test("truncateTail: content exceeding default byte limit returns partial from end", () => {
+	const content = "x".repeat(DEFAULT_MAX_BYTES + 10);
+	const result = truncateTail(content);
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "bytes");
+	assert.equal(result.lastLinePartial, true);
+	assert.equal(result.outputBytes, DEFAULT_MAX_BYTES);
+	assert.ok(content.endsWith(result.content));
+});
