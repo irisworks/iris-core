@@ -98,9 +98,13 @@ test("slack app_mention: leading @agent bypasses dispatch and posts the bridge r
 		await settle(100);
 
 		assert.equal(calls.events.length, 0, "Iris's own dispatch must be skipped entirely");
+		// A placeholder goes up first, then the reply replaces it in place.
 		assert.equal(calls.posted.length, 1);
 		assert.equal(calls.posted[0].channel, "C1");
-		assert.equal(calls.posted[0].text, "reply to: what's the score?");
+		assert.match(calls.posted[0].text, /@cricket is working/);
+		assert.equal(calls.updated.length, 1);
+		assert.equal(calls.updated[0].messageId, "111.111");
+		assert.equal(calls.updated[0].text, "reply to: what's the score?");
 	} finally {
 		server.close();
 	}
@@ -120,8 +124,12 @@ test("slack app_mention: reply goes to the thread when the mention was posted in
 		await settle(100);
 
 		assert.equal(calls.posted.length, 0, "must reply in-thread, not as a top-level post");
-		assert.equal(calls.threads.length, 1);
-		assert.deepEqual(calls.threads[0], { channel: "C1", threadTs: "1.0", text: "threaded reply" });
+		assert.equal(calls.threads.length, 1, "the placeholder is the in-thread post");
+		assert.match(calls.threads[0].text, /@cricket is working/);
+		assert.equal(calls.threads[0].threadTs, "1.0");
+		assert.equal(calls.updated.length, 1, "reply replaces the in-thread placeholder");
+		assert.equal(calls.updated[0].messageId, "112.112");
+		assert.equal(calls.updated[0].text, "threaded reply");
 	} finally {
 		server.close();
 	}
@@ -147,8 +155,10 @@ test("slack app_mention: a bridge error posts a visible notice instead of hangin
 	await settle(200);
 
 	assert.equal(calls.events.length, 0, "still bypasses Iris's dispatch — the mention matched");
+	// The notice replaces the placeholder rather than leaving it orphaned.
 	assert.equal(calls.posted.length, 1);
-	assert.match(calls.posted[0].text, /Couldn't reach @cricket/);
+	assert.equal(calls.updated.length, 1);
+	assert.match(calls.updated[0].text, /Couldn't reach @cricket/);
 });
 
 test("slack message (DM): leading @agent bypasses dispatch here too", async () => {
@@ -166,7 +176,8 @@ test("slack message (DM): leading @agent bypasses dispatch here too", async () =
 
 		assert.equal(calls.events.length, 0);
 		assert.equal(calls.posted.length, 1);
-		assert.equal(calls.posted[0].text, "dm reply: what's new?");
+		assert.equal(calls.updated.length, 1);
+		assert.equal(calls.updated[0].text, "dm reply: what's new?");
 	} finally {
 		server.close();
 	}

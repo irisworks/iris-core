@@ -259,7 +259,11 @@ ${Object.keys(agents).length > 0
 
 ${Object.entries(agents).map(([name, entry]) => `### ${name}
 Description: ${entry.description ?? "(no description)"}
-Bridge: \`curl -s -X POST ${entry.bridge_url}/bridge -H 'Content-Type: application/json' -d '{"text":"<query>","user":"<username>"}'  | jq -r '.text'\``).join("\n\n")}
+Bridge: \`curl -s --max-time 240 --fail-with-body -X POST ${entry.bridge_url}/bridge -H 'Content-Type: application/json' -d '{"text":"<query>","user":"<username>"}'  | jq -r '.text'\``).join("\n\n")}
+
+This plain-JSON call waits for the sub-agent's whole run and is capped at 240s. A
+task that may take longer belongs in an @mention, which streams progress and has
+a 10-minute ceiling.
 
 Only delegate when the user's intent clearly matches a sub-agent's domain. Handle general questions yourself.`
 	: "(no sub-agents configured)"}
@@ -667,7 +671,12 @@ function createRunner(
 		if (!runState.ctx || !runState.logCtx || !runState.queue) return;
 
 		const { ctx, logCtx, queue, pendingTools } = runState;
-		const isSessionChannel = channelId.startsWith("SESSION-");
+		// Headless channels have no chat surface to narrate into: the `_marker_`
+		// progress lines below would just pollute the text the caller ends up
+		// receiving (SESSION- and BRIDGE- replies are both assembled from the
+		// run's output). ctx.setStatus stays unconditional — for a BRIDGE-
+		// channel the engine forwards it to the waiting caller as a status line.
+		const isHeadlessChannel = channelId.startsWith("SESSION-") || channelId.startsWith("BRIDGE-");
 
 		if (event.type === "tool_execution_start") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
@@ -688,7 +697,7 @@ function createRunner(
 				args: agentEvent.args,
 				phase: "start",
 			});
-			if (!isSessionChannel) {
+			if (!isHeadlessChannel) {
 				queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
 				queue.enqueue(() => ctx.setStatus?.(`_→ ${label}..._`) ?? Promise.resolve(), "tool status");
 			}
@@ -741,7 +750,7 @@ function createRunner(
 				isError: agentEvent.isError,
 			});
 
-			if (agentEvent.isError && !isSessionChannel) {
+			if (agentEvent.isError && !isHeadlessChannel) {
 				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
 			}
 		} else if (event.type === "message_start") {
@@ -820,7 +829,7 @@ function createRunner(
 			}
 		} else if (event.type === "compaction_start") {
 			log.logInfo(`Compaction started (reason: ${event.reason})`);
-			if (!isSessionChannel) {
+			if (!isHeadlessChannel) {
 				queue.enqueue(() => ctx.respond("_Compacting context..._", false), "compaction start");
 			}
 		} else if (event.type === "compaction_end") {
@@ -832,7 +841,7 @@ function createRunner(
 		} else if (event.type === "auto_retry_start") {
 			const retryEvent = event as any;
 			log.logWarning(`Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})`, retryEvent.errorMessage);
-			if (!isSessionChannel) {
+			if (!isHeadlessChannel) {
 				queue.enqueue(
 					() => ctx.respond(`_Retrying (${retryEvent.attempt}/${retryEvent.maxAttempts})..._`, false),
 					"retry",

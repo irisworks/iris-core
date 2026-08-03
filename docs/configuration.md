@@ -22,6 +22,9 @@ env vars.
 | `IRIS_API_PORT` / `IRIS_API_HOST` | `3000` / `127.0.0.1` | Internal HTTP API bind (always on) |
 | `IRIS_API_TOKEN` | — | When set, API requires `Authorization: Bearer <token>` (except `/health`) |
 | `IRIS_BRIDGE_PORT` / `IRIS_BRIDGE_HOST` | — / `127.0.0.1` | Sub-agent bridge server (sub-agents only) |
+| `IRIS_BRIDGE_IDLE_TIMEOUT_MS` / `IRIS_BRIDGE_MAX_MS` | `180000` / `600000` | Bridge request lifetime: no-progress deadline, and hard ceiling ([Sub-agents](sub-agents.md)) |
+| `IRIS_BRIDGE_HEARTBEAT_MS` / `IRIS_BRIDGE_LEGACY_TIMEOUT_MS` | `15000` / `240000` | Streaming keepalive cadence; ceiling for non-streaming bridge requests |
+| `IRIS_BRIDGE_STATUS_THROTTLE_MS` | `3000` | Minimum gap between chat edits when forwarding sub-agent progress |
 | `IRIS_LLM_TIMEOUT_SECS` | `90` | Per-attempt LLM timeout |
 | `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_RETRY_BASE_MS` | `3` / `2000` | Retry with exponential backoff on 429/timeout/transient errors |
 | `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |

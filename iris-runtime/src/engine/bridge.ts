@@ -31,24 +31,57 @@ import * as log from "./log.js";
 // Pending request registry (module-level, shared with slack.ts via this module)
 // ============================================================================
 
+/** A line of the NDJSON stream a bridge request may emit before its reply. */
+export type BridgeStreamLine =
+	| { type: "accepted"; requestId: string; protocol: number }
+	| { type: "status"; text: string }
+	| { type: "heartbeat" }
+	| { type: "final"; text: string; requestId: string }
+	| { type: "error"; error: string; code: string; requestId: string };
+
 interface PendingRequest {
 	resolve: (text: string) => void;
 	reject: (err: Error) => void;
-	timer: ReturnType<typeof setTimeout>;
+	/** Present only for streaming (NDJSON) requests — legacy callers get no progress. */
+	onStatus?: (text: string) => void;
+	/** Reset the idle deadline. Called on every sign of agent progress. */
+	touch: () => void;
+	/** Release the idle/hard timers and any heartbeat interval. */
+	dispose: () => void;
 }
 
 const pendingRequests = new Map<string, PendingRequest>();
+
+/** Settle a pending request: unregister it, stop its timers, hand it to `finish`. */
+function settleBridgeRequest(requestId: string, finish: (pending: PendingRequest) => void): boolean {
+	const pending = pendingRequests.get(requestId);
+	if (!pending) return false;
+	pending.dispose();
+	pendingRequests.delete(requestId);
+	finish(pending);
+	return true;
+}
 
 /**
  * Called by slack.ts when a message is posted to a BRIDGE-{requestId} channel.
  * Resolves the waiting HTTP request.
  */
 export function resolveBridgeRequest(requestId: string, text: string): boolean {
+	return settleBridgeRequest(requestId, (pending) => pending.resolve(text));
+}
+
+/**
+ * Forward a mid-run progress line to a waiting bridge caller, and — for legacy
+ * callers, which get no progress — at least prove the agent is alive so the
+ * idle deadline doesn't fire under a long but healthy run. Wired from the engine
+ * (engine/index.ts) onto `ctx.setStatus` for BRIDGE- channels, which agent.ts
+ * already fires once per tool call.
+ */
+export function publishBridgeStatus(requestId: string, text: string): boolean {
 	const pending = pendingRequests.get(requestId);
 	if (!pending) return false;
-	clearTimeout(pending.timer);
-	pendingRequests.delete(requestId);
-	pending.resolve(text);
+	pending.touch();
+	pending.onStatus?.(text);
 	return true;
 }
 
@@ -68,13 +101,15 @@ export function hasPendingBridgeRequest(requestId: string): boolean {
  * e.g. its event file was deleted as stale because the sub-agent restarted
  * between accepting the POST and watching its events dir.
  */
-export function failBridgeRequest(requestId: string, reason: string): boolean {
-	const pending = pendingRequests.get(requestId);
-	if (!pending) return false;
-	clearTimeout(pending.timer);
-	pendingRequests.delete(requestId);
-	pending.reject(new Error(reason));
-	return true;
+export function failBridgeRequest(requestId: string, reason: string, code = "failed"): boolean {
+	return settleBridgeRequest(requestId, (pending) => pending.reject(new BridgeRequestError(reason, code)));
+}
+
+/** An error carrying the `code` that goes out on a streamed `error` line. */
+class BridgeRequestError extends Error {
+	constructor(message: string, readonly code: string) {
+		super(message);
+	}
 }
 
 /**
@@ -112,15 +147,54 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 	res.end(payload);
 }
 
+function envMs(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (!raw) return fallback;
+	const parsed = parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/** Longest a status line may be before it's truncated on the way out. */
+const STATUS_MAX_CHARS = 200;
+
+/** Protocol version advertised on the `accepted` line. */
+export const BRIDGE_STREAM_PROTOCOL = 1;
+
+export const BRIDGE_STREAM_CONTENT_TYPE = "application/x-ndjson";
+
 /**
  * Start the bridge HTTP server on the given port.
  * Called by sub-agents (not by Iris herself). Returns the underlying server
  * so callers that need to shut it down (tests) can — main.ts's own call
  * ignores the return value, matching the process-lifetime behavior before
  * this existed.
+ *
+ * `POST /bridge` answers in one of two shapes, negotiated on the request's
+ * `Accept` header:
+ *
+ * - `Accept: application/x-ndjson` — a chunked NDJSON stream. Status 200 and an
+ *   `accepted` line go out immediately, `status` lines follow as the agent works,
+ *   and exactly one terminal `final` or `error` line closes it. Because headers
+ *   are written up front this survives arbitrarily long runs; the blocking shape
+ *   below cannot, since Node's own fetch caps time-to-headers at ~300s.
+ * - anything else — the original single JSON body, byte-for-byte, so Iris's
+ *   `curl … | jq -r '.text'` recipe and older sub-agents keep working.
+ *
+ * Neither shape has a fixed overall deadline any more. A request lives as long
+ * as the agent keeps making progress (`publishBridgeStatus`), bounded by an idle
+ * deadline and a hard cap — see the env vars below.
  */
 export function startBridgeServer(port: number, workingDir: string): import("http").Server {
-	const BRIDGE_TIMEOUT_MS = 60_000; // 60 seconds max for sub-agent to respond
+	// No progress for this long ⇒ the agent is presumed wedged.
+	const IDLE_MS = envMs("IRIS_BRIDGE_IDLE_TIMEOUT_MS", 180_000);
+	// Backstop on total run time. Without it, an agent looping on tool calls
+	// forever would hold a request (and burn tokens) indefinitely.
+	const MAX_MS = envMs("IRIS_BRIDGE_MAX_MS", 600_000);
+	// Keepalive cadence for streaming responses.
+	const HEARTBEAT_MS = envMs("IRIS_BRIDGE_HEARTBEAT_MS", 15_000);
+	// Non-streaming ceiling. Must stay under undici's ~300s headersTimeout, or
+	// the caller's own fetch tears down the connection before we answer.
+	const LEGACY_MAX_MS = envMs("IRIS_BRIDGE_LEGACY_TIMEOUT_MS", 240_000);
 
 	const server = createServer(async (req, res) => {
 		if (req.method !== "POST" || req.url !== "/bridge") {
@@ -142,17 +216,92 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 			return;
 		}
 
+		const streaming = (req.headers.accept ?? "").includes(BRIDGE_STREAM_CONTENT_TYPE);
 		const channelId = `BRIDGE-${requestId}`;
-		log.logInfo(`[bridge] Received request ${requestId}: ${text.substring(0, 60)}`);
+		log.logInfo(`[bridge] Received request ${requestId}${streaming ? " (streaming)" : ""}: ${text.substring(0, 60)}`);
+
+		// Reusing a conversationKey as the requestId is the normal case, so a
+		// second request for one already in flight isn't an error — the newer one
+		// wins and the older is told why, rather than being orphaned in the map.
+		if (pendingRequests.has(requestId)) {
+			log.logWarning(`[bridge] Request ${requestId} superseded by a newer request`);
+			failBridgeRequest(requestId, "superseded by a newer request", "superseded");
+		}
+
+		const writeLine = (line: BridgeStreamLine): void => {
+			if (res.writableEnded) return;
+			res.write(`${JSON.stringify(line)}\n`);
+		};
+
+		if (streaming) {
+			res.writeHead(200, {
+				"Content-Type": BRIDGE_STREAM_CONTENT_TYPE,
+				"Cache-Control": "no-store",
+				// Stop nginx and friends buffering the stream into one lump.
+				"X-Accel-Buffering": "no",
+				Connection: "close",
+			});
+			// Flush headers + this line before the agent has done anything, so the
+			// caller's time-to-first-byte doesn't scale with the run.
+			writeLine({ type: "accepted", requestId, protocol: BRIDGE_STREAM_PROTOCOL });
+		}
 
 		// Register pending request BEFORE writing event file to avoid race
-		let timer: ReturnType<typeof setTimeout>;
+		let idleTimer: ReturnType<typeof setTimeout>;
+		let hardTimer: ReturnType<typeof setTimeout>;
+		let heartbeat: ReturnType<typeof setInterval> | undefined;
+		const idleMs = streaming ? IDLE_MS : Math.min(IDLE_MS, LEGACY_MAX_MS);
+		const hardMs = streaming ? MAX_MS : Math.min(MAX_MS, LEGACY_MAX_MS);
+
+		let registration: PendingRequest | undefined;
 		const responsePromise = new Promise<string>((resolve, reject) => {
-			timer = setTimeout(() => {
-				pendingRequests.delete(requestId);
-				reject(new Error(`Bridge request ${requestId} timed out after ${BRIDGE_TIMEOUT_MS / 1000}s`));
-			}, BRIDGE_TIMEOUT_MS);
-			pendingRequests.set(requestId, { resolve, reject, timer });
+			const armIdle = () => {
+				clearTimeout(idleTimer);
+				if (idleMs > 0) {
+					idleTimer = setTimeout(() => {
+						failBridgeRequest(requestId, `no progress for ${idleMs / 1000}s`, "idle_timeout");
+					}, idleMs);
+				}
+			};
+			if (hardMs > 0) {
+				hardTimer = setTimeout(() => {
+					failBridgeRequest(requestId, `exceeded the ${hardMs / 1000}s limit`, "max_duration");
+				}, hardMs);
+			}
+			if (streaming && HEARTBEAT_MS > 0) {
+				// Deliberately does NOT touch the idle deadline — a heartbeat proves
+				// the connection is alive, never that the agent is.
+				heartbeat = setInterval(() => writeLine({ type: "heartbeat" }), HEARTBEAT_MS);
+			}
+			armIdle();
+			registration = {
+				resolve,
+				reject,
+				touch: armIdle,
+				dispose: () => {
+					clearTimeout(idleTimer);
+					clearTimeout(hardTimer);
+					if (heartbeat) clearInterval(heartbeat);
+				},
+				onStatus: streaming
+					? (statusText) => writeLine({ type: "status", text: statusText.substring(0, STATUS_MAX_CHARS) })
+					: undefined,
+			};
+			pendingRequests.set(requestId, registration);
+		});
+
+		// A caller that hangs up can no longer be answered. Drop the request so it
+		// isn't held by its timers; the run itself is left alone — a transient blip
+		// shouldn't kill work that's already half done.
+		//
+		// Identity-checked, not just keyed: closing this response also fires after a
+		// newer request has taken over the same requestId (a reused conversation
+		// key), and failing *that* one here would kill the live request instead.
+		res.on("close", () => {
+			if (registration && pendingRequests.get(requestId) === registration) {
+				log.logWarning(`[bridge] Caller disconnected before ${requestId} was answered`);
+				failBridgeRequest(requestId, "caller disconnected", "disconnected");
+			}
 		});
 
 		// Write event file to trigger agent processing
@@ -166,11 +315,22 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 				text,
 			}));
 		} catch (err) {
-			clearTimeout(timer!);
-			pendingRequests.delete(requestId);
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] Failed to write event file: ${msg}`);
-			jsonResponse(res, 500, { error: "Failed to write event." });
+			// Unregister and stop the timers, but leave the promise unsettled — we
+			// answer the HTTP request directly below and never await it, so
+			// rejecting here would surface as an unhandled rejection. Identity-checked
+			// for the same reason as the close handler above.
+			if (registration && pendingRequests.get(requestId) === registration) {
+				registration.dispose();
+				pendingRequests.delete(requestId);
+			}
+			if (streaming) {
+				writeLine({ type: "error", error: "Failed to write event.", code: "event_write_failed", requestId });
+				res.end();
+			} else {
+				jsonResponse(res, 500, { error: "Failed to write event." });
+			}
 			return;
 		}
 
@@ -178,13 +338,33 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 		try {
 			const responseText = await responsePromise;
 			log.logInfo(`[bridge] Response for ${requestId}: ${responseText.substring(0, 60)}`);
-			jsonResponse(res, 200, { text: responseText, requestId });
+			if (streaming) {
+				writeLine({ type: "final", text: responseText, requestId });
+				res.end();
+			} else {
+				jsonResponse(res, 200, { text: responseText, requestId });
+			}
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
+			const code = err instanceof BridgeRequestError ? err.code : "failed";
 			log.logWarning(`[bridge] Request failed: ${msg}`);
-			jsonResponse(res, 504, { error: "Bridge request failed." });
+			if (code === "disconnected") {
+				res.destroy();
+			} else if (streaming) {
+				writeLine({ type: "error", error: msg, code, requestId });
+				res.end();
+			} else {
+				jsonResponse(res, 504, { error: "Bridge request failed." });
+			}
 		}
 	});
+
+	// Pin the socket-level ceilings rather than inheriting Node's defaults: a
+	// streaming reply can legitimately outlive any of them.
+	server.headersTimeout = 60_000;
+	server.requestTimeout = 60_000;
+	server.timeout = 0;
+	server.keepAliveTimeout = 5_000;
 
 	// Default bind is loopback; set IRIS_BRIDGE_HOST when the bridge must be
 	// reachable from outside the container/host (e.g. cross-host sub-agents).
@@ -284,22 +464,93 @@ function sanitizeBridgeKey(key: string): string {
  * should never share history (there are currently none — every transport
  * call site passes one).
  */
+/**
+ * Trailing-edge throttle for status forwarding. A tool-heavy run emits dozens of
+ * status lines, and Slack's chat.update (like Telegram's editMessageText) is
+ * rate-limited to roughly one call per second per channel — forwarding each line
+ * as it arrives gets the bot throttled. Keeps only the newest text, emits at most
+ * once per `ms`, and drops repeats.
+ */
+export function bridgeStatusThrottleMs(): number {
+	return envMs("IRIS_BRIDGE_STATUS_THROTTLE_MS", 3_000);
+}
+
+export function throttleStatus(emit: (text: string) => void, ms: number = bridgeStatusThrottleMs()): (text: string) => void {
+	let last = 0;
+	let lastText: string | undefined;
+	let pending: ReturnType<typeof setTimeout> | undefined;
+	const flush = (text: string) => {
+		last = Date.now();
+		lastText = text;
+		emit(text);
+	};
+	return (text: string) => {
+		if (text === lastText) return;
+		const wait = last + ms - Date.now();
+		if (wait <= 0) {
+			if (pending) { clearTimeout(pending); pending = undefined; }
+			flush(text);
+			return;
+		}
+		if (pending) clearTimeout(pending);
+		pending = setTimeout(() => {
+			pending = undefined;
+			if (text !== lastText) flush(text);
+		}, wait);
+		// Timer must not hold the process open on shutdown.
+		pending.unref?.();
+	};
+}
+
+export interface BridgeCallOptions {
+	/** Overall wall-clock ceiling. Defaults to 10 minutes, matching the server's. */
+	timeoutMs?: number;
+	/** Abort if not a single byte arrives for this long. Streaming replies heartbeat. */
+	idleTimeoutMs?: number;
+	/** See the note above — reuse the origin conversation's key to keep its session. */
+	conversationKey?: string;
+	/** Called for each mid-run progress line the sub-agent emits. */
+	onStatus?: (text: string) => void;
+	/** Force the non-streaming single-JSON request. Default: stream. */
+	stream?: boolean;
+}
+
 export async function callAgentBridge(
 	bridgeUrl: string,
 	text: string,
 	user: string,
-	timeoutMs = 120_000,
-	conversationKey?: string,
+	options?: BridgeCallOptions | number,
+	conversationKeyArg?: string,
 ): Promise<string> {
+	// Historic signature was (url, text, user, timeoutMs, conversationKey); keep it
+	// working rather than silently changing what a numeric 4th argument means.
+	const opts: BridgeCallOptions = typeof options === "number"
+		? { timeoutMs: options, conversationKey: conversationKeyArg }
+		: { conversationKey: conversationKeyArg, ...options };
+
+	const { timeoutMs = 600_000, idleTimeoutMs = 60_000, conversationKey, onStatus, stream = true } = opts;
 	const requestId = conversationKey ? sanitizeBridgeKey(conversationKey) : randomBytes(8).toString("hex");
 
 	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	let abortReason = `Agent bridge timed out after ${timeoutMs / 1000}s`;
+	const hardTimer = setTimeout(() => controller.abort(), timeoutMs);
+	let idleTimer: ReturnType<typeof setTimeout>;
+	const armIdle = () => {
+		clearTimeout(idleTimer);
+		idleTimer = setTimeout(() => {
+			abortReason = `Agent bridge went silent for ${idleTimeoutMs / 1000}s`;
+			controller.abort();
+		}, idleTimeoutMs);
+	};
+	armIdle();
 
 	try {
 		const response = await fetch(`${bridgeUrl}/bridge`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: {
+				"Content-Type": "application/json",
+				...(stream ? { Accept: BRIDGE_STREAM_CONTENT_TYPE } : {}),
+			},
 			body: JSON.stringify({ text, user, requestId }),
 			signal: controller.signal,
 		});
@@ -309,14 +560,75 @@ export async function callAgentBridge(
 			throw new Error(`Bridge returned ${response.status}: ${err.error ?? response.statusText}`);
 		}
 
-		const result = await response.json() as { text?: string };
-		return result.text ?? "(no response)";
+		// Branch on what came back, not on what we asked for: a sub-agent running
+		// an older runtime ignores the Accept header and answers with plain JSON.
+		const isStream = (response.headers.get("content-type") ?? "").includes(BRIDGE_STREAM_CONTENT_TYPE);
+		if (!isStream) {
+			const result = await response.json() as { text?: string };
+			return result.text ?? "(no response)";
+		}
+		return await readBridgeStream(response, armIdle, onStatus);
 	} catch (err) {
 		if ((err as Error).name === "AbortError") {
-			throw new Error(`Agent bridge timed out after ${timeoutMs / 1000}s`);
+			throw new Error(abortReason);
 		}
 		throw err;
 	} finally {
-		clearTimeout(timer);
+		clearTimeout(hardTimer);
+		clearTimeout(idleTimer!);
 	}
+}
+
+/**
+ * Consume an NDJSON bridge reply, forwarding `status` lines and returning the
+ * text of the terminal `final` line. A stream that ends without a terminal line
+ * throws rather than returning a placeholder — silently reporting "(no
+ * response)" for a run that actually produced one is the bug this whole change
+ * exists to fix.
+ */
+async function readBridgeStream(
+	response: Response,
+	onLine: () => void,
+	onStatus?: (text: string) => void,
+): Promise<string> {
+	if (!response.body) throw new Error("Bridge stream had no body");
+	const decoder = new TextDecoder();
+	let buffer = "";
+	let loggedParseFailure = false;
+
+	const handle = (raw: string): string | undefined => {
+		let line: BridgeStreamLine;
+		try {
+			line = JSON.parse(raw) as BridgeStreamLine;
+		} catch {
+			// One unreadable line shouldn't sink an otherwise healthy reply.
+			if (!loggedParseFailure) {
+				loggedParseFailure = true;
+				log.logWarning(`[bridge] Ignoring unparseable stream line: ${raw.substring(0, 80)}`);
+			}
+			return undefined;
+		}
+		// Unknown types are ignored on purpose, so the protocol can grow.
+		if (line.type === "status") onStatus?.(line.text);
+		else if (line.type === "error") throw new Error(`Bridge failed (${line.code}): ${line.error}`);
+		else if (line.type === "final") return line.text;
+		return undefined;
+	};
+
+	for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+		onLine();
+		buffer += decoder.decode(chunk, { stream: true });
+		const lines = buffer.split("\n");
+		buffer = lines.pop() ?? "";
+		for (const raw of lines) {
+			if (!raw.trim()) continue;
+			const final = handle(raw);
+			if (final !== undefined) return final;
+		}
+	}
+	if (buffer.trim()) {
+		const final = handle(buffer);
+		if (final !== undefined) return final;
+	}
+	throw new Error("Bridge stream ended without a final reply");
 }

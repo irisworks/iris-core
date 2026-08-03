@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
-import { callAgentBridge, loadAgentRegistry, parseAgentMention } from "../../engine/bridge.js";
+import { callAgentBridge, loadAgentRegistry, parseAgentMention, throttleStatus } from "../../engine/bridge.js";
 import { parseVerboseCommand } from "../../engine/dispatch.js";
 import { registerSessionRequest, resolveSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "../../engine/store.js";
@@ -413,6 +413,10 @@ export class TelegramBot implements ChannelTransport {
 	 * post the reply directly, skipping Iris's own LLM turn entirely. Returns
 	 * true if handled (caller should return without dispatching further);
 	 * false if there was no leading mention or it didn't match a known agent.
+	 *
+	 * A placeholder goes up immediately and is edited in place with the
+	 * sub-agent's progress, then replaced by the reply — the same shape as the
+	 * thinking indicator on a local run.
 	 */
 	private async tryHandleAgentMention(text: string, user: string, channelId: string): Promise<boolean> {
 		const registry = loadAgentRegistry(this.workingDir);
@@ -420,13 +424,27 @@ export class TelegramBot implements ChannelTransport {
 		if (!mention) return false;
 
 		const query = mention.query.trim() || text;
+		const placeholderId = await this.postMessage(channelId, `→ @${mention.name} is working...`);
+		const settle = async (finalText: string) => {
+			if (placeholderId) await this.finalizeMessage(channelId, placeholderId, finalText);
+			else await this.postMessage(channelId, finalText);
+		};
+
 		try {
-			const reply = await callAgentBridge(mention.entry.bridge_url, query, user, undefined, channelId);
-			await this.postMessage(channelId, reply);
+			const onStatus = throttleStatus((status) => {
+				if (!placeholderId) return;
+				// updateMessage already swallows Telegram's "message is not modified".
+				void this.updateMessage(channelId, placeholderId, `→ @${mention.name}: ${status}`);
+			});
+			const reply = await callAgentBridge(mention.entry.bridge_url, query, user, {
+				conversationKey: channelId,
+				onStatus,
+			});
+			await settle(reply);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] @${mention.name} request failed`, msg);
-			await this.postMessage(channelId, `⚠️ Couldn't reach @${mention.name}: ${msg}`);
+			await settle(`⚠️ Couldn't reach @${mention.name}: ${msg}`);
 		}
 		return true;
 	}

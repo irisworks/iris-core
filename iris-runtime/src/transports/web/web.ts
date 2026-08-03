@@ -63,6 +63,7 @@ const webPromptProfile: TransportPromptProfile = {
 
 type OutboundFrame =
 	| { type: "thinking"; id: string }
+	| { type: "status"; id: string; text: string }
 	| { type: "final"; id: string; text: string }
 	| { type: "update"; id: string; text: string }
 	| { type: "thread"; text: string }
@@ -342,10 +343,10 @@ export class WebTransport implements ChannelTransport {
 		if (body.type !== "message" || !body.text) return;
 
 		if (targetAgent) {
-			// Sub-agent routing: single request/response over the existing
-			// @mention bridge (agents.json[targetAgent].bridge_url) — no thinking
-			// placeholder or tool-event stream, since the bridge protocol doesn't
-			// expose intermediate events, only a final reply.
+			// Sub-agent routing over the existing @mention bridge
+			// (agents.json[targetAgent].bridge_url). The bridge streams progress but
+			// not individual tool events, so this shows a status line rather than the
+			// tool-event stream a local run gets.
 			const registry = loadAgentRegistry(this.workingDir);
 			const entry = registry[targetAgent];
 			if (!entry) {
@@ -355,7 +356,11 @@ export class WebTransport implements ChannelTransport {
 			const id = randomToken();
 			this.broadcast(channelId, { type: "thinking", id });
 			try {
-				const text = await callAgentBridge(entry.bridge_url, body.text, "web", undefined, `web-${channelId}`);
+				const text = await callAgentBridge(entry.bridge_url, body.text, "web", {
+					conversationKey: `web-${channelId}`,
+					// No throttle: a websocket frame is cheap, unlike a Slack edit.
+					onStatus: (status) => this.broadcast(channelId, { type: "status", id, text: status }),
+				});
 				this.broadcast(channelId, { type: "final", id, text });
 			} catch (err) {
 				this.broadcast(channelId, { type: "error", message: err instanceof Error ? err.message : String(err) });
@@ -816,6 +821,10 @@ function handleFrame(f) {
     var e = messageEl(f.id);
     e.textContent = "Iris is thinking...";
     e.className = "msg thinking";
+  } else if (f.type === "status") {
+    var se = messageEl(f.id);
+    se.textContent = "\u2192 " + f.text;
+    se.className = "msg thinking";
   } else if (f.type === "tool") {
     var d = toolEl(f.id);
     var summary = d.querySelector("summary");

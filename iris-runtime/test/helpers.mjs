@@ -28,7 +28,7 @@ export function makeBot({ channels = {}, isRunning = () => false, botUserId = "U
 	mkdirSync(join(workingDir, "meta"), { recursive: true });
 	writeFileSync(join(workingDir, "meta", "channels.json"), JSON.stringify(channels));
 
-	const calls = { events: [], stops: [], compacts: [], resets: [], verbose: [], posted: [], threads: [] };
+	const calls = { events: [], stops: [], compacts: [], resets: [], verbose: [], posted: [], threads: [], updated: [] };
 	const handler = {
 		isRunning,
 		handleEvent: async (event, _bot, isEvent) => {
@@ -69,6 +69,9 @@ export function makeBot({ channels = {}, isRunning = () => false, botUserId = "U
 	bot.postInThread = async (channel, threadTs, text) => {
 		calls.threads.push({ channel, threadTs, text });
 		return "112.112";
+	};
+	bot.updateMessage = async (channel, messageId, text) => {
+		calls.updated.push({ channel, messageId, text });
 	};
 
 	// Fake socket client: capture the handlers setupEventHandlers registers.
