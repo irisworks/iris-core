@@ -319,12 +319,6 @@ await scrubProcessEnv({
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
 startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => transports);
 
-// Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
-const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
-if (bridgePort > 0) {
-	startBridgeServer(bridgePort, workingDir);
-}
-
 if (slackBot) {
 	slackBot.start();
 } else {
@@ -411,6 +405,17 @@ const watchers = watchDirs.map(sub => {
 	w.start();
 	return w;
 });
+
+// Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT).
+// Deliberately AFTER the events watchers: the bridge server answers a request by
+// writing an event file into events/, and EventsWatcher deletes any file older
+// than its own start time as stale. Starting the bridge first opened a window
+// where an accepted request was silently dropped and the caller waited out the
+// full bridge timeout for nothing (issue #128).
+const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
+if (bridgePort > 0) {
+	startBridgeServer(bridgePort, workingDir);
+}
 
 // Close MCP clients on shutdown so stdio server children don't orphan.
 // Bounded so a hung server can't stall shutdown.

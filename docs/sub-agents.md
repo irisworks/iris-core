@@ -62,6 +62,15 @@ Telegram channel, web session) into `callAgentBridge()`, so repeated
 `@mentions` from the same origin reuse the same sub-agent session and its
 prior turns — a fresh conversation elsewhere gets a fresh session.
 
+**A reply is never dropped just because nothing posted it.** A bridge call is a
+blocking HTTP request that the sub-agent's run normally answers by posting to its
+`BRIDGE-{requestId}` channel. If a run instead finishes silently or throws, the
+engine resolves the waiting request from whatever the run did produce (or an
+explicit `(run failed: …)`) rather than leaving the caller to time out with
+nothing. A request whose event file is dropped because the sub-agent restarted
+between accepting it and watching its events directory fails immediately with
+that reason, instead of waiting out the bridge timeout.
+
 In every case, the sub-agent's own process never touches Slack/Telegram/the
 Web UI directly — whichever transport originally received the message (already
 holding its channel/thread context) is the one that posts the reply, using its

@@ -52,6 +52,47 @@ export function resolveBridgeRequest(requestId: string, text: string): boolean {
 	return true;
 }
 
+/**
+ * Is a bridge request still waiting for a reply? Used by the engine's post-run
+ * fallback (engine/index.ts) to tell "the run already delivered its answer"
+ * from "the run finished without delivering anything", and by events.ts before
+ * failing a request whose event file was dropped as stale.
+ */
+export function hasPendingBridgeRequest(requestId: string): boolean {
+	return pendingRequests.has(requestId);
+}
+
+/**
+ * Fail a pending bridge request immediately instead of letting the caller wait
+ * out the full timeout. Used when we know the request can never be answered —
+ * e.g. its event file was deleted as stale because the sub-agent restarted
+ * between accepting the POST and watching its events dir.
+ */
+export function failBridgeRequest(requestId: string, reason: string): boolean {
+	const pending = pendingRequests.get(requestId);
+	if (!pending) return false;
+	clearTimeout(pending.timer);
+	pendingRequests.delete(requestId);
+	pending.reject(new Error(reason));
+	return true;
+}
+
+/**
+ * Strip the `_→ tool label_` / `_Compacting…_` progress markers that agent.ts
+ * emits via `ctx.respond()` during a run. The engine's post-run fallback
+ * resolves a bridge request from `ctx.getAccumulatedText()`, and for a bridge
+ * channel that accumulator contains those markers interleaved with the real
+ * answer (BridgeTransport.respond appends everything it is given) — a raw
+ * fallback would hand the caller `_→ running bash_\n<answer>`.
+ */
+export function stripBridgeStatusLines(text: string): string {
+	return text
+		.split("\n")
+		.filter((line) => !/^_.*_$/.test(line.trim()))
+		.join("\n")
+		.trim();
+}
+
 // ============================================================================
 // Bridge server (runs inside each sub-agent)
 // ============================================================================

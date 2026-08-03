@@ -163,9 +163,20 @@ export function createEngine(config: EngineConfig): Engine {
 
 			log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
 
+			// A BRIDGE-{requestId} channel has a caller blocked on an HTTP request
+			// (engine/bridge.ts). Normally the transport resolves it from
+			// postMessage/replaceMessage; the finally block below is the backstop
+			// for runs that finish or throw without ever reaching those.
+			const bridgeRequestId = event.channel.startsWith("BRIDGE-")
+				? event.channel.slice("BRIDGE-".length)
+				: undefined;
+			let bridgeCtx: MessageContext | undefined;
+			let bridgeError: string | undefined;
+
 			try {
 				// Create context adapter
 				const ctx = transport.createContext(event, state, isEvent);
+				bridgeCtx = ctx;
 
 				// Run the agent
 				await ctx.setTyping(true);
@@ -189,9 +200,26 @@ export function createEngine(config: EngineConfig): Engine {
 					}
 				}
 			} catch (err) {
-				log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
+				bridgeError = err instanceof Error ? err.message : String(err);
+				log.logWarning(`[${event.channel}] Run error`, bridgeError);
 			} finally {
 				state.running = false;
+				if (bridgeRequestId) {
+					const { hasPendingBridgeRequest, resolveBridgeRequest, stripBridgeStatusLines } =
+						await import("./bridge.js");
+					if (hasPendingBridgeRequest(bridgeRequestId)) {
+						// The run produced no reply through the transport. Salvage
+						// whatever it did say rather than making the caller wait out
+						// the bridge timeout and get nothing (issue #128).
+						const accumulated = stripBridgeStatusLines(bridgeCtx?.getAccumulatedText() ?? "");
+						const fallback = accumulated
+							|| (bridgeError ? `(run failed: ${bridgeError})` : "(no response)");
+						resolveBridgeRequest(bridgeRequestId, fallback);
+						log.logWarning(
+							`[${event.channel}] Run delivered no reply; resolved bridge request from accumulated text`,
+						);
+					}
+				}
 			}
 		},
 	};
