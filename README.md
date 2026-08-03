@@ -147,6 +147,7 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 | `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills/sub-agents/self-edits to (see [Company-Specific Extensions](#company-specific-extensions-overlay)) — a fork or your own private overlay, never the upstream you cloned from. Prompted by bootstrap alongside the GitHub token |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — (off) | Presence enables Langfuse tracing — one session-correlated trace per turn, with per-message token/cost and a `TOOL` observation per tool call. Tune with `LANGFUSE_HOST` (default `https://cloud.langfuse.com`), `LANGFUSE_ENVIRONMENT`, `LANGFUSE_RELEASE`, `LANGFUSE_TIMEOUT_MS`, `LANGFUSE_ENABLED=false`. Traces carry prompts, replies, and tool arguments/results — set `LANGFUSE_CAPTURE_IO=false` for cost/token telemetry only (see `docs/observability.md`) |
 
 > **Security note:** the internal API binds to loopback by default. If sub-agent
 > containers reach Iris via the Docker gateway (`172.18.0.1:3000`), set

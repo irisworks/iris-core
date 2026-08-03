@@ -17,6 +17,7 @@ import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
+import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./langfuse.js";
 import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
 import * as log from "./log.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
@@ -654,6 +655,10 @@ function createRunner(
 		stopReason: "stop",
 		errorMessage: undefined as string | undefined,
 		verbose: false,
+		// Langfuse trace for the in-flight run (#133) — undefined when tracing is
+		// unconfigured, so every trace call site is a no-op by default.
+		trace: undefined as LangfuseTrace | undefined,
+		generationStart: undefined as Date | undefined,
 	};
 
 	// Subscribe to events ONCE
@@ -727,6 +732,15 @@ function createRunner(
 				phase: "end",
 			});
 
+			runState.trace?.recordTool({
+				name: agentEvent.toolName,
+				startTime: new Date(pending?.startTime ?? Date.now() - durationMs),
+				endTime: new Date(),
+				input: pending?.args,
+				output: resultStr,
+				isError: agentEvent.isError,
+			});
+
 			if (agentEvent.isError && !isSessionChannel) {
 				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
 			}
@@ -734,6 +748,7 @@ function createRunner(
 			const agentEvent = event as AgentEvent & { type: "message_start" };
 			if (agentEvent.message.role === "assistant") {
 				log.logResponseStart(logCtx);
+				runState.generationStart = new Date();
 			}
 		} else if (event.type === "message_end") {
 			const agentEvent = event as AgentEvent & { type: "message_end" };
@@ -771,6 +786,19 @@ function createRunner(
 				}
 
 				const text = textParts.join("\n");
+
+				// One Langfuse generation per assistant message, carrying that
+				// message's own tokens/cost so the trace totals Pupil reads add up.
+				runState.trace?.recordGeneration({
+					// pi-ai reports `model` as either an id string or a model object.
+					model: typeof assistantMsg.model === "string" ? assistantMsg.model : (assistantMsg.model?.id ?? modelId),
+					startTime: runState.generationStart ?? new Date(),
+					endTime: new Date(),
+					output: text || undefined,
+					usage: assistantMsg.usage,
+					errorMessage: assistantMsg.errorMessage,
+				});
+				runState.generationStart = undefined;
 
 				const MAX_THINKING = 2900;
 				for (const thinking of thinkingParts) {
@@ -1002,6 +1030,48 @@ function createRunner(
 			};
 			runState.stopReason = "stop";
 			runState.errorMessage = undefined;
+			runState.generationStart = undefined;
+
+			// Open the Langfuse trace for this run, keyed on the session id Pupil
+			// correlates with (#133). No-op when Langfuse isn't configured.
+			runState.trace = getLangfuseClient()?.startTrace({
+				sessionId: langfuseSessionId(channelId),
+				channelId,
+				name: "iris-turn",
+				userId: ctx.message.userName,
+				input: ctx.message.text,
+				model: modelId,
+				provider,
+				transportId: ctx.transportId,
+				metadata: { channelName: ctx.channelName, messageTs: ctx.message.ts },
+			});
+
+			// Iris's reply for this turn, captured while the session history still
+			// holds it: post-run auto-compaction rewrites `session.messages`, so
+			// re-deriving the text at flush time would trace the compaction summary
+			// instead of the answer.
+			let turnOutput: string | undefined;
+
+			// Ship the trace exactly once per run, on the normal and error paths
+			// alike. Never throws: a failed flush must not change a run's outcome.
+			let traceFinalized = false;
+			const finalizeTrace = async (error?: Error): Promise<void> => {
+				const trace = runState.trace;
+				if (!trace || traceFinalized) return;
+				traceFinalized = true;
+				try {
+					trace.end({
+						output: error ? undefined : turnOutput,
+						stopReason: error ? "error" : runState.stopReason,
+						errorMessage: error?.message ?? runState.errorMessage,
+						usage: runState.totalUsage,
+					});
+					await trace.flush();
+					log.logInfo(`[${channelId}] Langfuse trace ${trace.traceId} (session ${trace.sessionId})`);
+				} catch {
+					// Best-effort observability only.
+				}
+			};
 
 			// Create queue for this run
 			let queueChain = Promise.resolve();
@@ -1167,6 +1237,7 @@ function createRunner(
 					const msg = lastError.message.toLowerCase();
 					const isRetryable = msg.includes("timeout") || msg.includes("429") || msg.includes("econnreset") || msg.includes("fetch failed") || msg.includes("rate limit") || msg.includes("throttled");
 					if (!isRetryable || attempt === MAX_RETRIES) {
+						await finalizeTrace(lastError);
 						throw lastError; // final failure — will be caught below
 					}
 					const delay = RETRY_BASE_MS * (2 ** (attempt - 1)) + Math.random() * 1000;
@@ -1180,11 +1251,22 @@ function createRunner(
 				}
 			}
 			if (lastError) {
+				await finalizeTrace(lastError);
 				throw lastError;
 			}
 
 			// Wait for queued messages
 			await queueChain;
+
+			// Final assistant text for this turn — read once, before auto-compaction
+			// below can rewrite the history, and shared with the Langfuse trace.
+			const lastAssistant = session.messages.filter((m) => m.role === "assistant").pop();
+			const finalText =
+				lastAssistant?.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("\n") || "";
+			turnOutput = finalText.trim() ? finalText : undefined;
 
 			// Handle error case - update main message and post error to thread
 			if (runState.stopReason === "error" && runState.errorMessage) {
@@ -1196,15 +1278,6 @@ function createRunner(
 					log.logWarning("Failed to post error message", errMsg);
 				}
 			} else {
-				// Final message update
-				const messages = session.messages;
-				const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
-				const finalText =
-					lastAssistant?.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n") || "";
-
 				// Check for [SILENT] marker - delete message and thread instead of posting
 				if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
 					try {
@@ -1264,10 +1337,15 @@ function createRunner(
 				}
 			}
 
+			// Flush the trace before clearing state — Pupil polls Langfuse for the
+			// session as soon as the turn response returns.
+			await finalizeTrace();
+
 			// Clear run state
 			runState.ctx = null;
 			runState.logCtx = null;
 			runState.queue = null;
+			runState.trace = undefined;
 
 			return { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
 		},

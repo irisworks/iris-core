@@ -36,7 +36,7 @@
  *   GET    /sessions                     — list all sessions
  *   GET    /sessions/:id                 — get session
  *   PATCH  /sessions/:id                 — update session (partial patch)
- *   POST   /sessions/:id/message         — inject message, wait for response
+ *   POST   /sessions/:id/message         — inject message, wait for response ({ text, sessionId })
  *   GET    /sessions/:id/history         — full log.jsonl as JSON array
  *   POST   /sessions/email-inbound       — route inbound email to matching session
  *   POST   /sessions/open                — post to channel, create session, return sessionId + threadTs
@@ -673,7 +673,9 @@ export function startApiServer(
 				log.logInfo(`[api] POST /sessions/${sessionId}/message: ${body.text.substring(0, 60)}`);
 				try {
 					const responseText = await bot.injectSessionMessage(sessionId, body.user ?? "api", body.text);
-					json(res, 200, { text: responseText });
+					// sessionId is echoed so callers correlating a turn with its Langfuse
+					// trace (Pupil, IRIS-97) can read it off the turn response alone.
+					json(res, 200, { text: responseText, sessionId });
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
 					log.logWarning(`[api] Session message failed: ${msg}`);
