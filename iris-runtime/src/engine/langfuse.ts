@@ -28,6 +28,13 @@ export interface LangfuseConfig {
 	/** Release/version tag attached to traces. */
 	release?: string;
 	timeoutMs: number;
+	/**
+	 * Whether prompt/reply/tool payloads are sent. `false` keeps names, timings,
+	 * tokens, and cost but omits every input/output field — for installs that
+	 * want turn telemetry without shipping conversation content, command lines,
+	 * or resolved secrets to the Langfuse host.
+	 */
+	captureIo: boolean;
 }
 
 /** Token/cost numbers as pi-ai reports them on an assistant message. */
@@ -120,6 +127,7 @@ export function langfuseConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Lan
 		environment: env.LANGFUSE_ENVIRONMENT?.trim() || undefined,
 		release: env.LANGFUSE_RELEASE?.trim() || undefined,
 		timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_TIMEOUT_MS,
+		captureIo: env.LANGFUSE_CAPTURE_IO !== "false" && env.LANGFUSE_CAPTURE_IO !== "0",
 	};
 }
 
@@ -182,8 +190,8 @@ export class LangfuseTrace {
 				model: record.model ?? this.start.model,
 				startTime: record.startTime.toISOString(),
 				endTime: record.endTime.toISOString(),
-				input: clip(record.input),
-				output: clip(record.output),
+				input: this.io(record.input),
+				output: this.io(record.output),
 				usageDetails,
 				costDetails,
 				level: record.errorMessage ? "ERROR" : "DEFAULT",
@@ -204,8 +212,8 @@ export class LangfuseTrace {
 				name: record.name,
 				startTime: record.startTime.toISOString(),
 				endTime: record.endTime.toISOString(),
-				input: clip(record.input),
-				output: clip(record.output),
+				input: this.io(record.input),
+				output: this.io(record.output),
 				level: record.isError ? "ERROR" : "DEFAULT",
 				environment: this.client.config.environment,
 			});
@@ -241,8 +249,8 @@ export class LangfuseTrace {
 				sessionId: this.sessionId,
 				userId: this.start.userId,
 				timestamp: this.startedAt.toISOString(),
-				input: clip(this.start.input),
-				output: clip(this.ended?.output),
+				input: this.io(this.start.input),
+				output: this.io(this.ended?.output),
 				release: this.client.config.release,
 				environment: this.client.config.environment,
 				tags: [
@@ -273,6 +281,14 @@ export class LangfuseTrace {
 				},
 			},
 		};
+	}
+
+	/**
+	 * Every payload field is attached through here, so `LANGFUSE_CAPTURE_IO=false`
+	 * drops prompts, replies, and tool arguments/results at a single choke point.
+	 */
+	private io(value: unknown): unknown {
+		return this.client.config.captureIo ? clip(value) : undefined;
 	}
 
 	private push(type: string, body: Record<string, unknown>): void {
@@ -336,7 +352,7 @@ export function getLangfuseClient(): LangfuseClient | undefined {
 		const config = langfuseConfigFromEnv();
 		cached = config ? new LangfuseClient(config) : null;
 		if (config) {
-			log.logInfo(`Langfuse tracing enabled → ${config.baseUrl}`);
+			log.logInfo(`Langfuse tracing enabled → ${config.baseUrl}${config.captureIo ? "" : " (payload capture off)"}`);
 		}
 	}
 	return cached ?? undefined;

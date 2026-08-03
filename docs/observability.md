@@ -30,6 +30,7 @@ Set these in `/iris/.env` (or the service environment):
 | `LANGFUSE_RELEASE` | no | Release/version string recorded on traces. |
 | `LANGFUSE_TIMEOUT_MS` | no | Per-request ingestion timeout. Default `5000`. |
 | `LANGFUSE_ENABLED` | no | Set to `false` or `0` to disable tracing even when keys are present. |
+| `LANGFUSE_CAPTURE_IO` | no | Set to `false` or `0` to omit all prompt, reply, and tool payloads while still recording names, timings, tokens, and cost. See [What leaves the host](#what-leaves-the-host). |
 
 Iris talks to the public ingestion API (`POST /api/public/ingestion`) over
 plain HTTP with basic auth — no Langfuse SDK is installed.
@@ -54,6 +55,29 @@ Inside the trace:
   arguments, result, timing, and `ERROR` level when the call failed
 
 Input/output fields are truncated at 20,000 characters.
+
+Generations carry no `input` — prompts are never sent, only replies.
+
+## What leaves the host
+
+Tracing exports conversation content to whatever `LANGFUSE_HOST` points at, and
+that defaults to Langfuse Cloud. With payload capture on, a trace includes the
+user's message, Iris's reply, and **every tool call's arguments and result** —
+which in practice means shell command lines, file contents she read or wrote,
+and the resolved value of any secret a skill fetched. Nothing is redacted.
+
+Decide deliberately:
+
+- self-host Langfuse and point `LANGFUSE_HOST` at it, and/or
+- set `LANGFUSE_CAPTURE_IO=false` to get cost, token, latency, and tool-name
+  telemetry with no payloads attached
+
+Error messages (`statusMessage` on a failed generation, `errorMessage` in trace
+metadata) are still sent when capture is off, since they are what makes a failed
+turn diagnosable — provider errors can quote request content.
+
+The Langfuse keys themselves are read from the environment, used only as basic
+auth, and never logged.
 
 ## Session correlation
 

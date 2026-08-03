@@ -9,8 +9,9 @@
   UUID), a generation per assistant message with token/cost detail, and a `TOOL`
   observation per tool call. Enabled by `LANGFUSE_PUBLIC_KEY` /
   `LANGFUSE_SECRET_KEY`; off and inert otherwise, and ingestion failures never
-  affect a run. `POST /sessions/:id/message` now also returns `sessionId`. See
-  `docs/observability.md`.
+  affect a run. `LANGFUSE_CAPTURE_IO=false` records cost/token/tool telemetry
+  without prompt, reply, or tool payloads. `POST /sessions/:id/message` now also
+  returns `sessionId`. See `docs/observability.md`.
 
 - Skills may now declare `secrets: [NAME, ...]` in their `SKILL.md`
   frontmatter — the secret names their script actually resolves (#125).

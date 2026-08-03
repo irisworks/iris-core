@@ -36,7 +36,7 @@ env vars.
 | `IRIS_BROKER_SERVICES_FILE` | `/iris/broker/services.json` | Operator overrides for the injection gateway's service map |
 | `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | When set, `GET /secrets/:name` proxies here instead of env/Key Vault/store — points at the bundled iris-broker (`proxy` mode), Vault, Infisical, or any HTTP service speaking the same tiny contract |
 | `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | Presence enables Langfuse tracing (one session-correlated trace per turn). `LANGFUSE_HOST`, `LANGFUSE_ENVIRONMENT`, `LANGFUSE_RELEASE`, `LANGFUSE_TIMEOUT_MS`, `LANGFUSE_ENABLED=false` tune it — see [Observability](observability.md) |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | Presence enables Langfuse tracing (one session-correlated trace per turn). `LANGFUSE_HOST`, `LANGFUSE_ENVIRONMENT`, `LANGFUSE_RELEASE`, `LANGFUSE_TIMEOUT_MS`, `LANGFUSE_ENABLED=false`, `LANGFUSE_CAPTURE_IO=false` (drop prompt/reply/tool payloads) tune it — see [Observability](observability.md) |
 | `PASSTHROUGH_API_KEY` | — | Fallback API key for passthrough channels (see [Channel Modes](channel-modes.md)) |
 
 ## Models and providers

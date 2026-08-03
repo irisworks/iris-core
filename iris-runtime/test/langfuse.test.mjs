@@ -45,7 +45,7 @@ async function stubLangfuse({ status = 207 } = {}) {
 	return { baseUrl, batches, headers };
 }
 
-function client(baseUrl) {
+function client(baseUrl, overrides = {}) {
 	return new LangfuseClient({
 		baseUrl,
 		publicKey: "pk-test",
@@ -53,6 +53,8 @@ function client(baseUrl) {
 		environment: "test",
 		release: "1.2.3",
 		timeoutMs: 2000,
+		captureIo: true,
+		...overrides,
 	});
 }
 
@@ -148,6 +150,43 @@ test("a flushed run trace carries sessionId, usage/cost, and TOOL observations",
 	assert.equal(tool.body.traceId, trace.traceId);
 	assert.equal(tool.body.startTime, start.toISOString());
 	assert.equal(tool.body.level, "DEFAULT");
+});
+
+test("LANGFUSE_CAPTURE_IO=false drops payloads but keeps usage and cost", async () => {
+	assert.equal(
+		langfuseConfigFromEnv({ LANGFUSE_PUBLIC_KEY: "pk", LANGFUSE_SECRET_KEY: "sk" }).captureIo,
+		true,
+	);
+	assert.equal(
+		langfuseConfigFromEnv({ LANGFUSE_PUBLIC_KEY: "pk", LANGFUSE_SECRET_KEY: "sk", LANGFUSE_CAPTURE_IO: "false" })
+			.captureIo,
+		false,
+	);
+
+	const stub = await stubLangfuse();
+	const trace = client(stub.baseUrl, { captureIo: false }).startTrace({
+		sessionId: "s",
+		channelId: "SESSION-s",
+		input: "secret question",
+	});
+	const now = new Date();
+	trace.recordTool({ name: "bash", startTime: now, endTime: now, input: { cmd: "cat /iris/.env" }, output: "TOKEN=..." });
+	trace.recordGeneration({ startTime: now, endTime: now, output: "secret answer", usage });
+	trace.end({ output: "secret answer", usage });
+	await trace.flush();
+
+	const batch = stub.batches[0];
+	for (const event of batch) {
+		assert.equal(event.body.input, undefined, `${event.type} should carry no input`);
+		assert.equal(event.body.output, undefined, `${event.type} should carry no output`);
+	}
+	assert.ok(!JSON.stringify(batch).includes("secret"), "no payload text should reach the wire");
+	// Telemetry survives.
+	const generation = batch.find((e) => e.type === "generation-create");
+	assert.equal(generation.body.usageDetails.input, 100);
+	assert.equal(generation.body.costDetails.total, 0.0033);
+	assert.equal(batch.find((e) => e.type === "observation-create").body.name, "bash");
+	assert.equal(batch.find((e) => e.type === "trace-create").body.metadata.totalCostUsd, 0.0033);
 });
 
 test("failing tool calls are flagged ERROR", async () => {
