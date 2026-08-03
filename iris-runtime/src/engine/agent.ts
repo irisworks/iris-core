@@ -1046,14 +1046,11 @@ function createRunner(
 				metadata: { channelName: ctx.channelName, messageTs: ctx.message.ts },
 			});
 
-			const lastResponseText = (): string | undefined => {
-				const last = session.messages.filter((m) => m.role === "assistant").pop();
-				const text = last?.content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text)
-					.join("\n");
-				return text?.trim() ? text : undefined;
-			};
+			// Iris's reply for this turn, captured while the session history still
+			// holds it: post-run auto-compaction rewrites `session.messages`, so
+			// re-deriving the text at flush time would trace the compaction summary
+			// instead of the answer.
+			let turnOutput: string | undefined;
 
 			// Ship the trace exactly once per run, on the normal and error paths
 			// alike. Never throws: a failed flush must not change a run's outcome.
@@ -1064,7 +1061,7 @@ function createRunner(
 				traceFinalized = true;
 				try {
 					trace.end({
-						output: error ? undefined : lastResponseText(),
+						output: error ? undefined : turnOutput,
 						stopReason: error ? "error" : runState.stopReason,
 						errorMessage: error?.message ?? runState.errorMessage,
 						usage: runState.totalUsage,
@@ -1261,6 +1258,16 @@ function createRunner(
 			// Wait for queued messages
 			await queueChain;
 
+			// Final assistant text for this turn — read once, before auto-compaction
+			// below can rewrite the history, and shared with the Langfuse trace.
+			const lastAssistant = session.messages.filter((m) => m.role === "assistant").pop();
+			const finalText =
+				lastAssistant?.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("\n") || "";
+			turnOutput = finalText.trim() ? finalText : undefined;
+
 			// Handle error case - update main message and post error to thread
 			if (runState.stopReason === "error" && runState.errorMessage) {
 				try {
@@ -1271,15 +1278,6 @@ function createRunner(
 					log.logWarning("Failed to post error message", errMsg);
 				}
 			} else {
-				// Final message update
-				const messages = session.messages;
-				const lastAssistant = messages.filter((m) => m.role === "assistant").pop();
-				const finalText =
-					lastAssistant?.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n") || "";
-
 				// Check for [SILENT] marker - delete message and thread instead of posting
 				if (finalText.trim() === "[SILENT]" || finalText.trim().startsWith("[SILENT]")) {
 					try {
