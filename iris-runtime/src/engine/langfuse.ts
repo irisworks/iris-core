@@ -313,6 +313,43 @@ export class LangfuseTrace {
 	}
 }
 
+/**
+ * Per-request body budget. The ingestion endpoint caps request size server-side
+ * (Langfuse Cloud rejects bodies over ~3.5 MB with HTTP 413), so a turn with
+ * many tool calls has to be split — otherwise the single request carrying the
+ * whole trace is rejected and nothing at all is recorded.
+ */
+const MAX_BATCH_BYTES = 2_500_000;
+
+/**
+ * Split a batch into sub-budget chunks. The trace event leads the batch, so it
+ * always lands in the first chunk. An event larger than the budget on its own
+ * still ships alone — the server may reject that one, but it no longer takes
+ * the rest of the trace with it.
+ */
+function chunkBatch(batch: IngestionEvent[]): IngestionEvent[][] {
+	const chunks: IngestionEvent[][] = [];
+	let current: IngestionEvent[] = [];
+	let bytes = 0;
+	for (const event of batch) {
+		let size: number;
+		try {
+			size = Buffer.byteLength(JSON.stringify(event));
+		} catch {
+			continue; // unserializable event — skipping it beats failing the batch
+		}
+		if (current.length > 0 && bytes + size > MAX_BATCH_BYTES) {
+			chunks.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(event);
+		bytes += size;
+	}
+	if (current.length > 0) chunks.push(current);
+	return chunks;
+}
+
 /** Thin ingestion-API client. Failures are logged once per streak, never thrown. */
 export class LangfuseClient {
 	private failureStreak = 0;
@@ -326,7 +363,18 @@ export class LangfuseClient {
 		return new LangfuseTrace(this, start);
 	}
 
+	/**
+	 * Ship a batch, split across as many requests as the size cap needs. A long
+	 * turn's observations add up fast, and one oversized request would take the
+	 * whole trace down with it (see MAX_BATCH_BYTES).
+	 */
 	async send(batch: IngestionEvent[]): Promise<void> {
+		for (const chunk of chunkBatch(batch)) {
+			await this.post(chunk);
+		}
+	}
+
+	private async post(batch: IngestionEvent[]): Promise<void> {
 		if (batch.length === 0) return;
 		const auth = Buffer.from(`${this.config.publicKey}:${this.config.secretKey}`).toString("base64");
 		try {

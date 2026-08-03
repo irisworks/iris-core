@@ -104,6 +104,9 @@ Tracing is best-effort and never affects a run:
 - missing keys — no-op, no requests
 - ingestion errors, timeouts, or an unreachable host — logged once per failure
   streak as a warning, run outcome unchanged
+- a turn with enough tool calls to exceed the ingestion endpoint's request-size
+  limit is split across several requests, so one large observation cannot cost
+  you the whole trace
 - traces are flushed at the end of each turn (both the success and error paths),
   so the trace is queryable as soon as the turn's response is returned
 

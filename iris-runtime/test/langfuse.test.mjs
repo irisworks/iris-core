@@ -257,6 +257,26 @@ test("flush resolves without throwing when Langfuse errors or is unreachable", a
 	await unreachable.flush(); // must not reject
 });
 
+test("an oversized batch is split across requests instead of dropped", async () => {
+	const stub = await stubLangfuse();
+	const trace = client(stub.baseUrl).startTrace({ sessionId: "s", channelId: "SESSION-s" });
+	const now = new Date();
+	// ~20 KB of clipped output each — enough of them to blow past one request.
+	for (let i = 0; i < 200; i++) {
+		trace.recordTool({ name: `bash-${i}`, startTime: now, endTime: now, output: "x".repeat(30_000) });
+	}
+	trace.end({ output: "done" });
+	await trace.flush();
+
+	assert.ok(stub.batches.length > 1, `expected multiple requests, got ${stub.batches.length}`);
+	const all = stub.batches.flat();
+	assert.equal(all.filter((e) => e.type === "observation-create").length, 200, "no observation may be dropped");
+	assert.equal(stub.batches[0][0].type, "trace-create", "the trace lands in the first request");
+	for (const batch of stub.batches) {
+		assert.ok(Buffer.byteLength(JSON.stringify({ batch })) < 3_000_000, "each request stays under the size cap");
+	}
+});
+
 test("flush ships only new events on a second call", async () => {
 	const stub = await stubLangfuse();
 	const trace = client(stub.baseUrl).startTrace({ sessionId: "s", channelId: "SESSION-s" });
