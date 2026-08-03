@@ -54,7 +54,9 @@ Inside the trace:
 - a **`TOOL` observation** per tool call, named after the tool, with its
   arguments, result, timing, and `ERROR` level when the call failed
 
-Input/output fields are truncated at 20,000 characters.
+Input/output fields are capped at 20,000 characters. Structured payloads (tool
+arguments) are measured by their serialized size and, when oversized, recorded
+as a truncated JSON string rather than an object.
 
 Generations carry no `input` — prompts are never sent, only replies.
 

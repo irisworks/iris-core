@@ -210,6 +210,41 @@ test("oversized payloads are truncated", async () => {
 	assert.ok(tool.body.output.endsWith("(truncated)"));
 });
 
+test("oversized structured payloads are truncated too", async () => {
+	const stub = await stubLangfuse();
+	const trace = client(stub.baseUrl).startTrace({ sessionId: "s", channelId: "SESSION-s" });
+	const now = new Date();
+	// Tool args arrive as objects — a fat member must not slip past the cap.
+	trace.recordTool({ name: "write", startTime: now, endTime: now, input: { path: "/x", content: "y".repeat(50_000) } });
+	await trace.flush();
+	const tool = stub.batches[0].find((e) => e.type === "observation-create");
+	assert.equal(typeof tool.body.input, "string", "oversized args degrade to a clipped string");
+	assert.ok(tool.body.input.length < 21_000);
+	assert.ok(tool.body.input.endsWith("(truncated)"));
+});
+
+test("small structured payloads pass through unchanged", async () => {
+	const stub = await stubLangfuse();
+	const trace = client(stub.baseUrl).startTrace({ sessionId: "s", channelId: "SESSION-s" });
+	const now = new Date();
+	trace.recordTool({ name: "bash", startTime: now, endTime: now, input: { cmd: "ls", n: 1, ok: true } });
+	await trace.flush();
+	const tool = stub.batches[0].find((e) => e.type === "observation-create");
+	assert.deepEqual(tool.body.input, { cmd: "ls", n: 1, ok: true });
+});
+
+test("circular payloads neither throw nor sink the event", async () => {
+	const stub = await stubLangfuse();
+	const trace = client(stub.baseUrl).startTrace({ sessionId: "s", channelId: "SESSION-s" });
+	const now = new Date();
+	const circular = { name: "loop" };
+	circular.self = circular;
+	trace.recordTool({ name: "bash", startTime: now, endTime: now, input: circular });
+	await trace.flush();
+	const tool = stub.batches[0].find((e) => e.type === "observation-create");
+	assert.equal(tool.body.input, "[unserializable]");
+});
+
 test("flush resolves without throwing when Langfuse errors or is unreachable", async () => {
 	const failing = await stubLangfuse({ status: 500 });
 	const errored = client(failing.baseUrl).startTrace({ sessionId: "s", channelId: "SESSION-s" });

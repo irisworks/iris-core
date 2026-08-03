@@ -131,14 +131,31 @@ export function langfuseConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Lan
 	};
 }
 
-/** Cap payload strings — a 200k-char tool result has no business in a trace. */
+/** Cap payload size — a 200k-char tool result has no business in a trace. */
 const MAX_FIELD_CHARS = 20000;
 
+function clipString(value: string): string {
+	return value.length > MAX_FIELD_CHARS ? `${value.slice(0, MAX_FIELD_CHARS)}… (truncated)` : value;
+}
+
+/**
+ * Cap a payload field. Strings truncate directly; anything structured is sized
+ * by its serialized form, because tool arguments arrive as objects and a single
+ * oversized member (a `Write` call's `content`, say) would otherwise sail past
+ * the cap. Oversized structures degrade to a truncated JSON string rather than
+ * being dropped — a clipped view beats none. Unserializable values (circular
+ * references) are replaced with a marker.
+ */
 function clip(value: unknown): unknown {
-	if (typeof value === "string") {
-		return value.length > MAX_FIELD_CHARS ? `${value.slice(0, MAX_FIELD_CHARS)}… (truncated)` : value;
+	if (typeof value === "string") return clipString(value);
+	if (value === null || value === undefined || typeof value === "number" || typeof value === "boolean") return value;
+	let serialized: string;
+	try {
+		serialized = JSON.stringify(value) ?? "";
+	} catch {
+		return "[unserializable]";
 	}
-	return value;
+	return serialized.length > MAX_FIELD_CHARS ? clipString(serialized) : value;
 }
 
 /**
