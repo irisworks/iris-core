@@ -4,6 +4,20 @@
 
 ### Added
 
+- Streaming bridge replies with progress passthrough (#128). A sub-agent request
+  sent with `Accept: application/x-ndjson` gets a chunked NDJSON stream —
+  `accepted`, `status`, and `heartbeat` lines, then one terminal `final`/`error`
+  — instead of one blocking JSON body, so a run of any length reaches the caller
+  and its progress is visible while it works. Slack and Telegram show a
+  placeholder that updates in place (throttled) and is replaced by the reply; the
+  Web UI gets `status` frames. `callAgentBridge()` streams by default and takes
+  an options object (`{conversationKey, onStatus, timeoutMs, stream}`); the old
+  positional form still works, and a request without the header still gets the
+  original single-JSON response, so `curl … | jq -r '.text'` and older
+  sub-agents are unaffected. The fixed 60s ceiling is replaced by
+  `IRIS_BRIDGE_IDLE_TIMEOUT_MS` (180s no-progress) and `IRIS_BRIDGE_MAX_MS`
+  (10min hard cap); see `docs/sub-agents.md`.
+
 - Langfuse tracing, session-correlated (#133). Each turn emits one trace tagged
   with the Iris session id (`SESSION-<uuid>` channels trace under the bare
   UUID), a generation per assistant message with token/cost detail, and a `TOOL`

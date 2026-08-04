@@ -175,7 +175,21 @@ export function createEngine(config: EngineConfig): Engine {
 
 			try {
 				// Create context adapter
-				const ctx = transport.createContext(event, state, isEvent);
+				const baseCtx = transport.createContext(event, state, isEvent);
+				// Forward mid-run progress to a waiting bridge caller. Hooked here
+				// rather than in each transport because two of them serve BRIDGE-
+				// channels (BridgeTransport for a token-less sub-agent, SlackBot for
+				// one that has Slack tokens) and both discard setStatus.
+				const ctx: MessageContext = bridgeRequestId
+					? {
+						...baseCtx,
+						setStatus: async (label: string) => {
+							const { publishBridgeStatus } = await import("./bridge.js");
+							publishBridgeStatus(bridgeRequestId, label.replace(/^_+|_+$/g, "").trim());
+							await baseCtx.setStatus?.(label);
+						},
+					}
+					: baseCtx;
 				bridgeCtx = ctx;
 
 				// Run the agent

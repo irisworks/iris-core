@@ -98,9 +98,13 @@ test("slack app_mention: leading @agent bypasses dispatch and posts the bridge r
 		await settle(100);
 
 		assert.equal(calls.events.length, 0, "Iris's own dispatch must be skipped entirely");
+		// A placeholder goes up first, then the reply replaces it in place.
 		assert.equal(calls.posted.length, 1);
 		assert.equal(calls.posted[0].channel, "C1");
-		assert.equal(calls.posted[0].text, "reply to: what's the score?");
+		assert.match(calls.posted[0].text, /@cricket is working/);
+		assert.equal(calls.updated.length, 1);
+		assert.equal(calls.updated[0].messageId, "111.111");
+		assert.equal(calls.updated[0].text, "reply to: what's the score?");
 	} finally {
 		server.close();
 	}
@@ -120,8 +124,12 @@ test("slack app_mention: reply goes to the thread when the mention was posted in
 		await settle(100);
 
 		assert.equal(calls.posted.length, 0, "must reply in-thread, not as a top-level post");
-		assert.equal(calls.threads.length, 1);
-		assert.deepEqual(calls.threads[0], { channel: "C1", threadTs: "1.0", text: "threaded reply" });
+		assert.equal(calls.threads.length, 1, "the placeholder is the in-thread post");
+		assert.match(calls.threads[0].text, /@cricket is working/);
+		assert.equal(calls.threads[0].threadTs, "1.0");
+		assert.equal(calls.updated.length, 1, "reply replaces the in-thread placeholder");
+		assert.equal(calls.updated[0].messageId, "112.112");
+		assert.equal(calls.updated[0].text, "threaded reply");
 	} finally {
 		server.close();
 	}
@@ -147,8 +155,63 @@ test("slack app_mention: a bridge error posts a visible notice instead of hangin
 	await settle(200);
 
 	assert.equal(calls.events.length, 0, "still bypasses Iris's dispatch — the mention matched");
+	// The notice replaces the placeholder rather than leaving it orphaned.
 	assert.equal(calls.posted.length, 1);
-	assert.match(calls.posted[0].text, /Couldn't reach @cricket/);
+	assert.equal(calls.updated.length, 1);
+	assert.match(calls.updated[0].text, /Couldn't reach @cricket/);
+});
+
+test("slack app_mention: a status queued behind the throttle can't overwrite the reply", async () => {
+	const port = 19516;
+	// Two statuses back to back: the first edit goes out immediately, the second is
+	// queued for the trailing edge — and the reply lands before that timer fires.
+	const server = await stubBridge(port, (_body, res) => {
+		res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+		res.write(`${JSON.stringify({ type: "accepted", requestId: "x", protocol: 1 })}\n`);
+		res.write(`${JSON.stringify({ type: "status", text: "running bash" })}\n`);
+		res.write(`${JSON.stringify({ type: "status", text: "reading file" })}\n`);
+		res.write(`${JSON.stringify({ type: "final", text: "the real answer", requestId: "x" })}\n`);
+		res.end();
+	});
+	const savedThrottle = process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS;
+	process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS = "80";
+	try {
+		const { calls, mention, workingDir } = makeBot({});
+		withAgentsJson(workingDir, { cricket: { bridge_url: `http://127.0.0.1:${port}`, description: "test" } });
+
+		mention({ text: "<@UBOT> @cricket score?", channel: "C1", user: "U1", ts: "1.6" });
+		await settle(300); // well past the throttle window
+
+		assert.equal(calls.updated.at(-1).text, "the real answer",
+			"a trailing status edit must not land on top of the reply");
+	} finally {
+		if (savedThrottle === undefined) delete process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS;
+		else process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS = savedThrottle;
+		server.close();
+	}
+});
+
+test("slack app_mention: if editing the placeholder fails the reply is posted instead of lost", async () => {
+	const port = 19517;
+	const server = await stubBridge(port, (_body, res) => {
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ text: "the reply" }));
+	});
+	try {
+		const { bot, calls, mention, workingDir } = makeBot({});
+		withAgentsJson(workingDir, { cricket: { bridge_url: `http://127.0.0.1:${port}`, description: "test" } });
+		bot.updateMessage = async () => { throw new Error("slack: message_not_found"); };
+
+		mention({ text: "<@UBOT> @cricket score?", channel: "C1", user: "U1", ts: "1.7" });
+		await settle(150);
+
+		assert.equal(calls.posted.length, 2, "placeholder, then the reply as its own message");
+		assert.equal(calls.posted[1].text, "the reply");
+		assert.ok(!calls.posted.some((p) => /Couldn't reach/.test(p.text)),
+			"a Slack edit failure must not be reported as a sub-agent failure");
+	} finally {
+		server.close();
+	}
 });
 
 test("slack message (DM): leading @agent bypasses dispatch here too", async () => {
@@ -166,7 +229,8 @@ test("slack message (DM): leading @agent bypasses dispatch here too", async () =
 
 		assert.equal(calls.events.length, 0);
 		assert.equal(calls.posted.length, 1);
-		assert.equal(calls.posted[0].text, "dm reply: what's new?");
+		assert.equal(calls.updated.length, 1);
+		assert.equal(calls.updated[0].text, "dm reply: what's new?");
 	} finally {
 		server.close();
 	}

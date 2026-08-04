@@ -62,13 +62,71 @@ Telegram channel, web session) into `callAgentBridge()`, so repeated
 `@mentions` from the same origin reuse the same sub-agent session and its
 prior turns — a fresh conversation elsewhere gets a fresh session.
 
-**A reply is never dropped just because nothing posted it.** A bridge call is a
-blocking HTTP request that the sub-agent's run normally answers by posting to its
+**A reply is never dropped just because nothing posted it.** A bridge call is an
+HTTP request that the sub-agent's run normally answers by posting to its
 `BRIDGE-{requestId}` channel. If a run instead finishes silently or throws, the
 engine resolves the waiting request from whatever the run did produce (or an
 explicit `(run failed: …)`) rather than leaving the caller to time out with
 nothing. Progress markers such as `_→ running bash_` are excluded from that
 salvaged reply, so the caller gets the answer on its own.
+
+### Long-running replies and progress
+
+`POST /bridge` answers in one of two shapes, chosen by the request's `Accept`
+header:
+
+| Request | Response |
+|---|---|
+| `Accept: application/x-ndjson` | A chunked NDJSON stream: one JSON object per line. |
+| anything else | A single `{"text": …, "requestId": …}` body, as before. |
+
+`callAgentBridge()` asks for the stream by default, so every `@mention` and
+`?agent=` route uses it; the plain body remains for `curl … \| jq -r '.text'` and
+for sub-agents running an older runtime, which ignore the header. The client
+branches on the response's content type rather than on what it asked for, so a new
+Iris talking to an old sub-agent keeps working.
+
+Stream lines are:
+
+```jsonl
+{"type":"accepted","requestId":"slack-C123","protocol":1}
+{"type":"status","text":"→ running bash"}
+{"type":"heartbeat"}
+{"type":"final","text":"the answer","requestId":"slack-C123"}
+```
+
+Exactly one terminal line closes the stream — `final`, or
+`{"type":"error","error":…,"code":…}`. **An error arrives on an already-200
+response**, since the status line goes out before the run starts; that up-front
+flush is the whole point, because Node's `fetch` caps time-to-first-header at
+about 300 seconds and the blocking shape cannot answer later than that. Clients
+must ignore line types they don't recognize, so the protocol can grow.
+
+Status lines come from the same per-tool-call signal a local run shows
+(`ctx.setStatus`), truncated to 200 characters. Slack and Telegram post a
+placeholder, edit it in place as progress arrives, and replace it with the reply;
+the Web UI gets `status` frames on its existing websocket. Chat edits are
+throttled — Slack's `chat.update` and Telegram's `editMessageText` are limited to
+roughly one call per second per channel — so what you see is "what it's doing
+now", not every step.
+
+Nothing has a fixed overall deadline any more. A request lives as long as the agent
+keeps making progress, bounded by:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IRIS_BRIDGE_IDLE_TIMEOUT_MS` | `180000` | No progress for this long ⇒ `idle_timeout`. Heartbeats deliberately don't count — they prove the connection is alive, never the agent. |
+| `IRIS_BRIDGE_MAX_MS` | `600000` | Hard ceiling on one request, so a looping agent can't hold it (and burn tokens) indefinitely. |
+| `IRIS_BRIDGE_HEARTBEAT_MS` | `15000` | Keepalive cadence on a streaming response. |
+| `IRIS_BRIDGE_LEGACY_TIMEOUT_MS` | `240000` | Ceiling for non-streaming requests. Keep it under ~300s. |
+| `IRIS_BRIDGE_STATUS_THROTTLE_MS` | `3000` | Minimum gap between chat edits while forwarding progress. |
+
+Two caveats worth knowing. The open connection *is* the job handle: if it drops, or
+if Iris restarts mid-request, the reply is lost even though the sub-agent finished
+the work. And behind a response-buffering proxy the stream degrades to arriving all
+at once — the reply still lands, but the progress and liveness signals don't.
+`X-Accel-Buffering: no` is set for nginx; the default loopback topology is
+unaffected.
 
 In every case, the sub-agent's own process never touches Slack/Telegram/the
 Web UI directly — whichever transport originally received the message (already

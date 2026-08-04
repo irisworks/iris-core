@@ -4,7 +4,7 @@ import { execFileSync } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
-import { callAgentBridge, loadAgentRegistry, parseAgentMention } from "../../engine/bridge.js";
+import { callAgentBridge, loadAgentRegistry, parseAgentMention, throttleStatus } from "../../engine/bridge.js";
 import { admitsBotMessage, parseAdminCommand, parseVerboseCommand, resolveDispatch, type InboundMessage } from "../../engine/dispatch.js";
 import {
 	DEFAULT_CHANNEL_CONFIG,
@@ -721,6 +721,11 @@ export class SlackBot implements ChannelTransport {
 	 * (caller should return without dispatching further); false if there was
 	 * no leading mention or it didn't match a known agent, in which case the
 	 * message falls through to normal dispatch/Iris's intent-based routing.
+	 *
+	 * A placeholder goes up immediately and is updated in place with the
+	 * sub-agent's progress, then replaced by the reply — the same shape as a
+	 * local run's status line, so a multi-minute sub-agent task doesn't look
+	 * like silence.
 	 */
 	private async tryHandleAgentMention(text: string, user: string, channel: string, threadTs?: string): Promise<boolean> {
 		const registry = loadAgentRegistry(this.workingDir);
@@ -729,23 +734,53 @@ export class SlackBot implements ChannelTransport {
 
 		const query = mention.query.trim() || text;
 		const conversationKey = `slack-${channel}${threadTs ? `-${threadTs}` : ""}`;
+		const post = (body: string) => threadTs
+			? this.postInThread(channel, threadTs, body)
+			: this.postMessage(channel, body);
+		// A placeholder that can't be posted isn't fatal — the reply just goes out
+		// as its own message below, exactly as it did before progress existed.
+		let placeholderTs: string | undefined;
 		try {
-			const reply = await callAgentBridge(mention.entry.bridge_url, query, user, undefined, conversationKey);
-			if (threadTs) {
-				await this.postInThread(channel, threadTs, reply);
-			} else {
-				await this.postMessage(channel, reply);
+			placeholderTs = await post(`_→ @${mention.name} is working..._`);
+		} catch (err) {
+			log.logWarning(`[bridge] @${mention.name} placeholder failed`, err instanceof Error ? err.message : String(err));
+		}
+		const settle = async (finalText: string) => {
+			if (!placeholderTs) {
+				await post(finalText);
+				return;
 			}
+			try {
+				await this.updateMessage(channel, placeholderTs, finalText);
+			} catch (err) {
+				// Editing the placeholder failed; the reply still has to land, and a
+				// Slack failure must not be reported as a sub-agent failure.
+				log.logWarning(`[bridge] @${mention.name} placeholder edit failed`, err instanceof Error ? err.message : String(err));
+				await post(finalText);
+			}
+		};
+
+		const onStatus = throttleStatus((status) => {
+			if (!placeholderTs) return;
+			void this.updateMessage(channel, placeholderTs, `_→ @${mention.name}: ${status}_`)
+				.catch(() => {});
+		});
+		let finalText: string;
+		try {
+			finalText = await callAgentBridge(mention.entry.bridge_url, query, user, {
+				conversationKey,
+				onStatus,
+			});
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] @${mention.name} request failed`, msg);
-			const errorText = `⚠️ Couldn't reach @${mention.name}: ${msg}`;
-			if (threadTs) {
-				await this.postInThread(channel, threadTs, errorText);
-			} else {
-				await this.postMessage(channel, errorText);
-			}
+			finalText = `⚠️ Couldn't reach @${mention.name}: ${msg}`;
+		} finally {
+			// Before settling: a queued status edit would otherwise land after the
+			// reply and overwrite it with a stale progress line.
+			onStatus.cancel();
 		}
+		await settle(finalText);
 		return true;
 	}
 
