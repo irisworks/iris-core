@@ -424,28 +424,40 @@ export class TelegramBot implements ChannelTransport {
 		if (!mention) return false;
 
 		const query = mention.query.trim() || text;
-		const placeholderId = await this.postMessage(channelId, `→ @${mention.name} is working...`);
+		// A placeholder that can't be posted isn't fatal — the reply just goes out as
+		// its own message below, exactly as it did before progress existed.
+		let placeholderId: string | undefined;
+		try {
+			placeholderId = await this.postMessage(channelId, `→ @${mention.name} is working...`);
+		} catch (err) {
+			log.logWarning(`[bridge] @${mention.name} placeholder failed`, err instanceof Error ? err.message : String(err));
+		}
 		const settle = async (finalText: string) => {
 			if (placeholderId) await this.finalizeMessage(channelId, placeholderId, finalText);
 			else await this.postMessage(channelId, finalText);
 		};
 
+		const onStatus = throttleStatus((status) => {
+			if (!placeholderId) return;
+			// updateMessage already swallows Telegram's "message is not modified".
+			void this.updateMessage(channelId, placeholderId, `→ @${mention.name}: ${status}`);
+		});
+		let finalText: string;
 		try {
-			const onStatus = throttleStatus((status) => {
-				if (!placeholderId) return;
-				// updateMessage already swallows Telegram's "message is not modified".
-				void this.updateMessage(channelId, placeholderId, `→ @${mention.name}: ${status}`);
-			});
-			const reply = await callAgentBridge(mention.entry.bridge_url, query, user, {
+			finalText = await callAgentBridge(mention.entry.bridge_url, query, user, {
 				conversationKey: channelId,
 				onStatus,
 			});
-			await settle(reply);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] @${mention.name} request failed`, msg);
-			await settle(`⚠️ Couldn't reach @${mention.name}: ${msg}`);
+			finalText = `⚠️ Couldn't reach @${mention.name}: ${msg}`;
+		} finally {
+			// Before settling: a queued status edit would otherwise land after the
+			// reply and overwrite it with a stale progress line.
+			onStatus.cancel();
 		}
+		await settle(finalText);
 		return true;
 	}
 

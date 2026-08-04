@@ -161,6 +161,59 @@ test("slack app_mention: a bridge error posts a visible notice instead of hangin
 	assert.match(calls.updated[0].text, /Couldn't reach @cricket/);
 });
 
+test("slack app_mention: a status queued behind the throttle can't overwrite the reply", async () => {
+	const port = 19516;
+	// Two statuses back to back: the first edit goes out immediately, the second is
+	// queued for the trailing edge — and the reply lands before that timer fires.
+	const server = await stubBridge(port, (_body, res) => {
+		res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+		res.write(`${JSON.stringify({ type: "accepted", requestId: "x", protocol: 1 })}\n`);
+		res.write(`${JSON.stringify({ type: "status", text: "running bash" })}\n`);
+		res.write(`${JSON.stringify({ type: "status", text: "reading file" })}\n`);
+		res.write(`${JSON.stringify({ type: "final", text: "the real answer", requestId: "x" })}\n`);
+		res.end();
+	});
+	const savedThrottle = process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS;
+	process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS = "80";
+	try {
+		const { calls, mention, workingDir } = makeBot({});
+		withAgentsJson(workingDir, { cricket: { bridge_url: `http://127.0.0.1:${port}`, description: "test" } });
+
+		mention({ text: "<@UBOT> @cricket score?", channel: "C1", user: "U1", ts: "1.6" });
+		await settle(300); // well past the throttle window
+
+		assert.equal(calls.updated.at(-1).text, "the real answer",
+			"a trailing status edit must not land on top of the reply");
+	} finally {
+		if (savedThrottle === undefined) delete process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS;
+		else process.env.IRIS_BRIDGE_STATUS_THROTTLE_MS = savedThrottle;
+		server.close();
+	}
+});
+
+test("slack app_mention: if editing the placeholder fails the reply is posted instead of lost", async () => {
+	const port = 19517;
+	const server = await stubBridge(port, (_body, res) => {
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ text: "the reply" }));
+	});
+	try {
+		const { bot, calls, mention, workingDir } = makeBot({});
+		withAgentsJson(workingDir, { cricket: { bridge_url: `http://127.0.0.1:${port}`, description: "test" } });
+		bot.updateMessage = async () => { throw new Error("slack: message_not_found"); };
+
+		mention({ text: "<@UBOT> @cricket score?", channel: "C1", user: "U1", ts: "1.7" });
+		await settle(150);
+
+		assert.equal(calls.posted.length, 2, "placeholder, then the reply as its own message");
+		assert.equal(calls.posted[1].text, "the reply");
+		assert.ok(!calls.posted.some((p) => /Couldn't reach/.test(p.text)),
+			"a Slack edit failure must not be reported as a sub-agent failure");
+	} finally {
+		server.close();
+	}
+});
+
 test("slack message (DM): leading @agent bypasses dispatch here too", async () => {
 	const port = 19513;
 	const server = await stubBridge(port, (body, res) => {

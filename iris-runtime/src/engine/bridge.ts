@@ -250,8 +250,11 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 		let idleTimer: ReturnType<typeof setTimeout>;
 		let hardTimer: ReturnType<typeof setTimeout>;
 		let heartbeat: ReturnType<typeof setInterval> | undefined;
-		const idleMs = streaming ? IDLE_MS : Math.min(IDLE_MS, LEGACY_MAX_MS);
-		const hardMs = streaming ? MAX_MS : Math.min(MAX_MS, LEGACY_MAX_MS);
+		// 0 disables a limit, so "the tighter of the two" has to read 0 as infinite
+		// rather than as an instant deadline.
+		const tighter = (a: number, b: number) => (a === 0 ? b : b === 0 ? a : Math.min(a, b));
+		const idleMs = streaming ? IDLE_MS : tighter(IDLE_MS, LEGACY_MAX_MS);
+		const hardMs = streaming ? MAX_MS : tighter(MAX_MS, LEGACY_MAX_MS);
 
 		let registration: PendingRequest | undefined;
 		const responsePromise = new Promise<string>((resolve, reject) => {
@@ -451,6 +454,57 @@ function sanitizeBridgeKey(key: string): string {
 	return key.replace(/[^\w-]/g, "-").slice(0, 128) || randomBytes(8).toString("hex");
 }
 
+export function bridgeStatusThrottleMs(): number {
+	return envMs("IRIS_BRIDGE_STATUS_THROTTLE_MS", 3_000);
+}
+
+/**
+ * A throttled status pusher. `cancel()` must be called once the run has settled:
+ * a queued trailing update would otherwise fire *after* the reply replaced the
+ * placeholder and put the stale status line back in its place.
+ */
+export type StatusThrottle = ((text: string) => void) & { cancel: () => void };
+
+/**
+ * Trailing-edge throttle for status forwarding. A tool-heavy run emits dozens of
+ * status lines, and Slack's chat.update (like Telegram's editMessageText) is
+ * rate-limited to roughly one call per second per channel — forwarding each line
+ * as it arrives gets the bot throttled. Keeps only the newest text, emits at most
+ * once per `ms`, and drops repeats.
+ */
+export function throttleStatus(emit: (text: string) => void, ms: number = bridgeStatusThrottleMs()): StatusThrottle {
+	let last = 0;
+	let lastText: string | undefined;
+	let pending: ReturnType<typeof setTimeout> | undefined;
+	let cancelled = false;
+	const flush = (text: string) => {
+		last = Date.now();
+		lastText = text;
+		emit(text);
+	};
+	const push = (text: string) => {
+		if (cancelled || text === lastText) return;
+		const wait = last + ms - Date.now();
+		if (wait <= 0) {
+			if (pending) { clearTimeout(pending); pending = undefined; }
+			flush(text);
+			return;
+		}
+		if (pending) clearTimeout(pending);
+		pending = setTimeout(() => {
+			pending = undefined;
+			if (!cancelled && text !== lastText) flush(text);
+		}, wait);
+		// Timer must not hold the process open on shutdown.
+		pending.unref?.();
+	};
+	push.cancel = () => {
+		cancelled = true;
+		if (pending) { clearTimeout(pending); pending = undefined; }
+	};
+	return push;
+}
+
 /**
  * Forward a message to a sub-agent via its bridge server.
  * Returns the agent's response text, or throws on timeout/error.
@@ -464,48 +518,15 @@ function sanitizeBridgeKey(key: string): string {
  * should never share history (there are currently none — every transport
  * call site passes one).
  */
-/**
- * Trailing-edge throttle for status forwarding. A tool-heavy run emits dozens of
- * status lines, and Slack's chat.update (like Telegram's editMessageText) is
- * rate-limited to roughly one call per second per channel — forwarding each line
- * as it arrives gets the bot throttled. Keeps only the newest text, emits at most
- * once per `ms`, and drops repeats.
- */
-export function bridgeStatusThrottleMs(): number {
-	return envMs("IRIS_BRIDGE_STATUS_THROTTLE_MS", 3_000);
-}
-
-export function throttleStatus(emit: (text: string) => void, ms: number = bridgeStatusThrottleMs()): (text: string) => void {
-	let last = 0;
-	let lastText: string | undefined;
-	let pending: ReturnType<typeof setTimeout> | undefined;
-	const flush = (text: string) => {
-		last = Date.now();
-		lastText = text;
-		emit(text);
-	};
-	return (text: string) => {
-		if (text === lastText) return;
-		const wait = last + ms - Date.now();
-		if (wait <= 0) {
-			if (pending) { clearTimeout(pending); pending = undefined; }
-			flush(text);
-			return;
-		}
-		if (pending) clearTimeout(pending);
-		pending = setTimeout(() => {
-			pending = undefined;
-			if (text !== lastText) flush(text);
-		}, wait);
-		// Timer must not hold the process open on shutdown.
-		pending.unref?.();
-	};
-}
-
 export interface BridgeCallOptions {
 	/** Overall wall-clock ceiling. Defaults to 10 minutes, matching the server's. */
 	timeoutMs?: number;
-	/** Abort if not a single byte arrives for this long. Streaming replies heartbeat. */
+	/**
+	 * Abort if not a single byte arrives for this long *once a stream has started*
+	 * — streaming replies heartbeat, so silence means the transport died. A
+	 * non-streaming reply is one lump at the end and has nothing to be idle
+	 * between, so it's bounded by `timeoutMs` (and the server's own legacy cap).
+	 */
 	idleTimeoutMs?: number;
 	/** See the note above — reuse the origin conversation's key to keep its session. */
 	conversationKey?: string;
@@ -534,7 +555,10 @@ export async function callAgentBridge(
 	const controller = new AbortController();
 	let abortReason = `Agent bridge timed out after ${timeoutMs / 1000}s`;
 	const hardTimer = setTimeout(() => controller.abort(), timeoutMs);
-	let idleTimer: ReturnType<typeof setTimeout>;
+	let idleTimer: ReturnType<typeof setTimeout> | undefined;
+	// Armed only once a stream is actually flowing (below). Arming it up front
+	// would cap a non-streaming reply — which sends nothing until the run ends —
+	// at idleTimeoutMs, reintroducing the very ceiling this change removes.
 	const armIdle = () => {
 		clearTimeout(idleTimer);
 		idleTimer = setTimeout(() => {
@@ -542,7 +566,6 @@ export async function callAgentBridge(
 			controller.abort();
 		}, idleTimeoutMs);
 	};
-	armIdle();
 
 	try {
 		const response = await fetch(`${bridgeUrl}/bridge`, {
@@ -567,6 +590,7 @@ export async function callAgentBridge(
 			const result = await response.json() as { text?: string };
 			return result.text ?? "(no response)";
 		}
+		armIdle();
 		return await readBridgeStream(response, armIdle, onStatus);
 	} catch (err) {
 		if ((err as Error).name === "AbortError") {
@@ -575,7 +599,7 @@ export async function callAgentBridge(
 		throw err;
 	} finally {
 		clearTimeout(hardTimer);
-		clearTimeout(idleTimer!);
+		clearTimeout(idleTimer);
 	}
 }
 

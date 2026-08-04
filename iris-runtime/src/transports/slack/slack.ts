@@ -734,35 +734,53 @@ export class SlackBot implements ChannelTransport {
 
 		const query = mention.query.trim() || text;
 		const conversationKey = `slack-${channel}${threadTs ? `-${threadTs}` : ""}`;
-		const placeholderTs = threadTs
-			? await this.postInThread(channel, threadTs, `_→ @${mention.name} is working..._`)
-			: await this.postMessage(channel, `_→ @${mention.name} is working..._`);
+		const post = (body: string) => threadTs
+			? this.postInThread(channel, threadTs, body)
+			: this.postMessage(channel, body);
+		// A placeholder that can't be posted isn't fatal — the reply just goes out
+		// as its own message below, exactly as it did before progress existed.
+		let placeholderTs: string | undefined;
+		try {
+			placeholderTs = await post(`_→ @${mention.name} is working..._`);
+		} catch (err) {
+			log.logWarning(`[bridge] @${mention.name} placeholder failed`, err instanceof Error ? err.message : String(err));
+		}
 		const settle = async (finalText: string) => {
-			if (placeholderTs) {
+			if (!placeholderTs) {
+				await post(finalText);
+				return;
+			}
+			try {
 				await this.updateMessage(channel, placeholderTs, finalText);
-			} else if (threadTs) {
-				await this.postInThread(channel, threadTs, finalText);
-			} else {
-				await this.postMessage(channel, finalText);
+			} catch (err) {
+				// Editing the placeholder failed; the reply still has to land, and a
+				// Slack failure must not be reported as a sub-agent failure.
+				log.logWarning(`[bridge] @${mention.name} placeholder edit failed`, err instanceof Error ? err.message : String(err));
+				await post(finalText);
 			}
 		};
 
+		const onStatus = throttleStatus((status) => {
+			if (!placeholderTs) return;
+			void this.updateMessage(channel, placeholderTs, `_→ @${mention.name}: ${status}_`)
+				.catch(() => {});
+		});
+		let finalText: string;
 		try {
-			const onStatus = throttleStatus((status) => {
-				if (!placeholderTs) return;
-				void this.updateMessage(channel, placeholderTs, `_→ @${mention.name}: ${status}_`)
-					.catch(() => {});
-			});
-			const reply = await callAgentBridge(mention.entry.bridge_url, query, user, {
+			finalText = await callAgentBridge(mention.entry.bridge_url, query, user, {
 				conversationKey,
 				onStatus,
 			});
-			await settle(reply);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			log.logWarning(`[bridge] @${mention.name} request failed`, msg);
-			await settle(`⚠️ Couldn't reach @${mention.name}: ${msg}`);
+			finalText = `⚠️ Couldn't reach @${mention.name}: ${msg}`;
+		} finally {
+			// Before settling: a queued status edit would otherwise land after the
+			// reply and overwrite it with a stale progress line.
+			onStatus.cancel();
 		}
+		await settle(finalText);
 		return true;
 	}
 

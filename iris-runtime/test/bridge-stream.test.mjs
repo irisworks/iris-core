@@ -493,6 +493,25 @@ test("client: stream:false opts out of the streaming request entirely", async ()
 	}
 });
 
+test("client: a non-streaming reply slower than the idle timeout still lands", async () => {
+	const port = 19658;
+	// The idle timer exists for a stream going quiet mid-flight. A blocking reply
+	// sends nothing until the run ends, so applying it there would re-cap the
+	// legacy shape at idleTimeoutMs — the ceiling this change removes.
+	const server = await stubStreamServer(port, [300, JSON.stringify({ text: "slow plain" })], {
+		contentType: "application/json",
+	});
+	try {
+		const reply = await callAgentBridge(`http://127.0.0.1:${port}`, "hi", "u1", {
+			conversationKey: "k",
+			idleTimeoutMs: 100,
+		});
+		assert.equal(reply, "slow plain");
+	} finally {
+		server.close();
+	}
+});
+
 // ============================================================================
 // End-to-end: a run that outlives the old 60s ceiling
 // ============================================================================
@@ -570,6 +589,19 @@ test("throttleStatus: emits the first line immediately and coalesces a burst int
 	assert.deepEqual(seen, ["one"], "the burst must not become three chat edits");
 	await new Promise((r) => setTimeout(r, 120));
 	assert.deepEqual(seen, ["one", "three"], "only the newest line of the burst is sent");
+});
+
+test("throttleStatus: cancel() drops a queued update so it can't overwrite the reply", async () => {
+	const seen = [];
+	const push = throttleStatus((t) => seen.push(t), 60);
+	push("first");
+	push("queued");
+	push.cancel();
+	await new Promise((r) => setTimeout(r, 120));
+	assert.deepEqual(seen, ["first"], "the trailing update must not fire after cancel");
+	push("after cancel");
+	await new Promise((r) => setTimeout(r, 120));
+	assert.deepEqual(seen, ["first"], "a cancelled throttle stays closed");
 });
 
 test("throttleStatus: drops a repeat of the text already showing", async () => {
