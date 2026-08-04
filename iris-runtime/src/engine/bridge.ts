@@ -88,18 +88,17 @@ export function publishBridgeStatus(requestId: string, text: string): boolean {
 /**
  * Is a bridge request still waiting for a reply? Used by the engine's post-run
  * fallback (engine/index.ts) to tell "the run already delivered its answer"
- * from "the run finished without delivering anything", and by events.ts before
- * failing a request whose event file was dropped as stale.
+ * from "the run finished without delivering anything".
  */
 export function hasPendingBridgeRequest(requestId: string): boolean {
 	return pendingRequests.has(requestId);
 }
 
 /**
- * Fail a pending bridge request immediately instead of letting the caller wait
- * out the full timeout. Used when we know the request can never be answered —
- * e.g. its event file was deleted as stale because the sub-agent restarted
- * between accepting the POST and watching its events dir.
+ * Fail a pending bridge request instead of letting the caller wait out its
+ * deadline. Used by the bridge server when a request can no longer be answered:
+ * its idle or hard deadline fired, a newer request took over the same
+ * conversation key, or the caller hung up.
  */
 export function failBridgeRequest(requestId: string, reason: string, code = "failed"): boolean {
 	return settleBridgeRequest(requestId, (pending) => pending.reject(new BridgeRequestError(reason, code)));
@@ -110,22 +109,6 @@ class BridgeRequestError extends Error {
 	constructor(message: string, readonly code: string) {
 		super(message);
 	}
-}
-
-/**
- * Strip the `_→ tool label_` / `_Compacting…_` progress markers that agent.ts
- * emits via `ctx.respond()` during a run. The engine's post-run fallback
- * resolves a bridge request from `ctx.getAccumulatedText()`, and for a bridge
- * channel that accumulator contains those markers interleaved with the real
- * answer (BridgeTransport.respond appends everything it is given) — a raw
- * fallback would hand the caller `_→ running bash_\n<answer>`.
- */
-export function stripBridgeStatusLines(text: string): string {
-	return text
-		.split("\n")
-		.filter((line) => !/^_.*_$/.test(line.trim()))
-		.join("\n")
-		.trim();
 }
 
 // ============================================================================
