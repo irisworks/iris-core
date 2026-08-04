@@ -198,8 +198,9 @@ caller identity comes from the authenticating API token, not a self-reported hea
 
 ## Company-Specific Extensions (Overlay)
 
-Don't fork core — link it. Create a private repo with core as a submodule and your
-own agents/skills/config as an overlay:
+Link core, don't fork it — unless you need to change core's own code. Create a
+private repo with core as a submodule and your own agents/skills/config as an
+overlay:
 
 ```bash
 gh repo create iris-yourcompany --private
@@ -211,6 +212,10 @@ mkdir -p overlay/{agents,skills,data}
 Add a `bootstrap-yourcompany.sh` wrapper that sets `REPO_DIR` before calling
 `core/bootstrap.sh`, then symlinks your overlay into the workspace. Pin `core` to a
 release tag and bump deliberately (see [docs/RELEASING.md](docs/RELEASING.md)).
+
+Fork instead when you need to change core's own code — a proprietary transport,
+say. [docs/overlay.md](docs/overlay.md) compares the three install shapes and
+covers the fork upgrade path.
 
 ## Operating
 

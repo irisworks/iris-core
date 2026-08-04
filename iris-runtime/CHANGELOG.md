@@ -64,6 +64,12 @@
 
 ### Changed
 
+- Forking core is now a documented option rather than a prohibition: `docs/overlay.md`
+  recommends the overlay+submodule shape, compares it against a pinned clone and a
+  fork, and covers the fork upgrade path for installs that need core code changes
+  (e.g. a proprietary transport). `bootstrap.sh` now advises forks to rebase onto a
+  release tag instead of merging `upstream/main`, and fetches `--tags` so that works.
+
 - Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 
 ### Fixed

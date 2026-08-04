@@ -45,4 +45,5 @@ minor version without reading intermediate release notes.
 ## Support policy
 
 - Installs may lag behind; core keeps workspace/data migrations one-way-safe.
-- Never edit files under an install's `core/` submodule — contribute upstream instead.
+- Don't edit files under an install's `core/` submodule — contribute upstream, or
+  fork if upstream can't take the change (see [Extending Iris](overlay.md)).
