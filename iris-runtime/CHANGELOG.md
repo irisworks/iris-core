@@ -78,6 +78,15 @@
 
 ### Changed
 
+- `docs/overlay.md` keeps overlay+submodule as the default and now documents core code
+  changes too: fork to contribute upstream, private mirror when the change can't be
+  published, with the upgrade path for each. `bootstrap.sh` advises rebasing onto a
+  release tag instead of merging `upstream/main`, and fetches `--tags` so that works.
+
+- `IRIS_GITHUB_ORG`/`IRIS_GITHUB_REPO` guidance in `bootstrap.sh`, `README.md`,
+  `docs/SETUP.md`, and `docs/configuration.md` no longer offers a fork of `iris-core` —
+  a fork of a public repo is always public, and Iris's memory lands in that repo.
+
 - Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 
 ### Fixed

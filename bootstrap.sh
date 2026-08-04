@@ -628,8 +628,9 @@ prompt_secrets() {
     echo ""
     echo "  This token needs a repo to push to: the one Iris commits her own"
     echo "  skills, sub-agents, and self-edits to (GitHub is her long-term"
-    echo "  memory — see docs/overlay.md). Use a fork of iris-core, or your"
-    echo "  own private overlay repo — not this upstream checkout."
+    echo "  memory — see docs/overlay.md). Use your own private overlay repo,"
+    echo "  or a private mirror of iris-core — not this upstream checkout, and"
+    echo "  not a public fork: what Iris commits here is yours, keep it private."
     echo ""
     GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
     if [[ -n "$GH_ORG_REPO" ]]; then
@@ -1200,8 +1201,10 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
       git -C "$REPO_DIR" remote add upstream "$IRIS_CORE_URL"
       log "upstream remote added → $IRIS_CORE_URL"
     fi
-    git -C "$REPO_DIR" fetch upstream --quiet 2>/dev/null || log "Warning: could not fetch upstream — continuing (you can run 'git fetch upstream' manually later)"
-    log "To merge future iris-core updates: git fetch upstream && git merge upstream/main"
+    git -C "$REPO_DIR" fetch upstream --tags --quiet 2>/dev/null || log "Warning: could not fetch upstream — continuing (you can run 'git fetch upstream --tags' manually later)"
+    log "To take future iris-core updates: git fetch upstream --tags && git rebase <tag>"
+    log "  (pick a release tag with 'git tag -l' — not upstream/main; the rebase"
+    log "   rewrites history, so push back with --force-with-lease. See docs/overlay.md)"
   fi
 else
   [[ -d "$REPO_DIR/.git" ]] || die "REPO_DIR '$REPO_DIR' is not a git checkout."
