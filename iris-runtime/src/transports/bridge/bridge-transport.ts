@@ -97,7 +97,12 @@ export class BridgeTransport implements ChannelTransport {
 			},
 			channels: [],
 			users: [],
-			respond: async (text: string) => {
+			// `shouldLog: false` marks agent.ts's progress markers (`_→ running bash_`,
+			// `_Compacting…_`, tool errors) rather than the turn's actual text. The
+			// accumulator is the reply source for both the engine's post-run bridge
+			// fallback and SESSION- requests, so keep the markers out of it.
+			respond: async (text: string, shouldLog = true) => {
+				if (!shouldLog) return;
 				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
 			},
 			replaceMessage: async (text: string) => {

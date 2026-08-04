@@ -48,15 +48,6 @@ const DEBOUNCE_MS = 100;
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 100;
 
-/**
- * How far before our own start time an immediate event may have been written
- * and still run. The stale check exists to stop a replay of events queued while
- * the process was down; a file written seconds before startup is a restart
- * racing a live request (a bridge POST, typically), not a replay — dropping it
- * left the caller waiting out the full bridge timeout for nothing.
- */
-const STALE_GRACE_MS = 60_000;
-
 export class EventsWatcher {
 	private timers: Map<string, NodeJS.Timeout> = new Map();
 	private crons: Map<string, Cron> = new Map();
@@ -275,23 +266,12 @@ export class EventsWatcher {
 	private handleImmediate(filename: string, event: ImmediateEvent): void {
 		const filePath = join(this.eventsDir, filename);
 
-		// Check if stale (created well before harness started — see STALE_GRACE_MS)
+		// Check if stale (created before harness started)
 		try {
 			const stat = statSync(filePath);
-			if (stat.mtimeMs < this.startTime - STALE_GRACE_MS) {
-				const forBridge = event.channelId.startsWith("BRIDGE-");
-				const msg = `Stale immediate event, deleting: ${filename}`;
-				if (forBridge) log.logWarning(msg);
-				else log.logInfo(msg);
+			if (stat.mtimeMs < this.startTime) {
+				log.logInfo(`Stale immediate event, deleting: ${filename}`);
 				this.deleteFile(filename);
-				if (forBridge) {
-					// A caller is blocked on this request's HTTP response. Fail it now
-					// instead of making it wait out the bridge timeout (issue #128).
-					const requestId = event.channelId.slice("BRIDGE-".length);
-					void import("./bridge.js").then(({ failBridgeRequest }) => {
-						failBridgeRequest(requestId, "sub-agent restarted before processing the request");
-					});
-				}
 				return;
 			}
 		} catch {

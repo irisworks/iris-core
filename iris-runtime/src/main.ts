@@ -319,6 +319,31 @@ await scrubProcessEnv({
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
 startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => transports);
 
+// Route synthetic events to the transport that owns the channel
+// (tg-* → Telegram; Slack, then Bridge, is the fallback owner)
+const routeEvent = (event: TransportEvent & { type: "mention" }): boolean => {
+	const transport = transports.find((t) => t.ownsChannel(event.channel));
+	return transport ? transport.enqueueEvent(event) : false;
+};
+
+// Watch slack/events/, telegram/events/, and root events/ for backward compat.
+// Constructed BEFORE the bridge server, started after the transports are ready:
+// EventsWatcher stamps its start time at construction and drops any event file
+// older than that as a stale replay. The bridge server answers a request by
+// writing an event file into events/, so a request accepted before this point
+// had its event file deleted and the caller waited out the full bridge timeout
+// for nothing (issue #128).
+const watchDirs = ["slack/events", "telegram/events", "events"];
+const watchers = watchDirs.map(sub =>
+	createEventsWatcher(workingDir, { enqueueEvent: routeEvent }, sub === "events" ? undefined : sub.split("/")[0]),
+);
+
+// Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT)
+const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
+if (bridgePort > 0) {
+	startBridgeServer(bridgePort, workingDir);
+}
+
 if (slackBot) {
 	slackBot.start();
 } else {
@@ -391,31 +416,9 @@ if (!slackBot && !tgBot) {
 	log.logInfo("⚡️ Bridge-only mode active");
 }
 
-// Route synthetic events to the transport that owns the channel
-// (tg-* → Telegram; Slack, then Bridge, is the fallback owner)
-const routeEvent = (event: TransportEvent & { type: "mention" }): boolean => {
-	const transport = transports.find((t) => t.ownsChannel(event.channel));
-	return transport ? transport.enqueueEvent(event) : false;
-};
-
-// Watch slack/events/, telegram/events/, and root events/ for backward compat
-const watchDirs = ["slack/events", "telegram/events", "events"];
-const watchers = watchDirs.map(sub => {
-	const w = createEventsWatcher(workingDir, { enqueueEvent: routeEvent }, sub === "events" ? undefined : sub.split("/")[0]);
-	w.start();
-	return w;
-});
-
-// Start bridge server if requested (sub-agents only — set IRIS_BRIDGE_PORT).
-// Deliberately AFTER the events watchers: the bridge server answers a request by
-// writing an event file into events/, and EventsWatcher deletes any file older
-// than its own start time as stale. Starting the bridge first opened a window
-// where an accepted request was silently dropped and the caller waited out the
-// full bridge timeout for nothing (issue #128).
-const bridgePort = parseInt(process.env.IRIS_BRIDGE_PORT ?? "0", 10);
-if (bridgePort > 0) {
-	startBridgeServer(bridgePort, workingDir);
-}
+// Transports are ready — safe to start delivering events (see the watcher
+// construction above for why start() is split from the constructor).
+watchers.forEach(w => w.start());
 
 // Close MCP clients on shutdown so stdio server children don't orphan.
 // Bounded so a hung server can't stall shutdown.

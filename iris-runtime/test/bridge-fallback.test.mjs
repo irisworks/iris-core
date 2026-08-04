@@ -1,24 +1,25 @@
-// Bridge reply-loss backstops (issue #128). Before this, a sub-agent run could
+// Bridge reply-loss backstop (issue #128). Before this, a sub-agent run could
 // finish — or throw — without ever reaching postMessage/replaceMessage, and the
 // blocked HTTP caller waited out the full bridge timeout and got a 504 with no
-// reply, even though the agent had done the work. Three paths are covered here:
+// reply, even though the agent had done the work. Two paths are covered here:
 //
-//   1. stripBridgeStatusLines() — the accumulated text of a bridge run is
-//      polluted with agent.ts's `_→ tool label_` markers, so the fallback can't
-//      use it raw.
-//   2. engine.handleEvent() resolves any still-pending BRIDGE- request after the
+//   1. engine.handleEvent() resolves any still-pending BRIDGE- request after the
 //      run, on both the success and the throw path.
-//   3. EventsWatcher fails a pending bridge request whose event file it drops as
-//      stale, instead of deleting it silently (the accept-before-watch race).
+//   2. BridgeTransport's accumulator — the fallback's reply source — keeps
+//      agent.ts's `_→ tool label_` progress markers (respond(..., false)) out,
+//      so the caller gets the answer rather than `_→ running bash_\n<answer>`.
+//
+// The real BridgeTransport is used rather than a stub context precisely so the
+// marker filtering is exercised end to end.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync, writeFileSync, utimesSync, existsSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBridgeServer, stripBridgeStatusLines, hasPendingBridgeRequest } from "../dist/engine/bridge.js";
+import { startBridgeServer, hasPendingBridgeRequest, resolveBridgeRequest } from "../dist/engine/bridge.js";
 import { createEngine } from "../dist/engine/index.js";
-import { createEventsWatcher } from "../dist/engine/events.js";
+import { BridgeTransport } from "../dist/transports/bridge/bridge-transport.js";
 
 function tempWorkspace() {
 	const workingDir = mkdtempSync(join(tmpdir(), "iris-bridge-fallback-test-"));
@@ -27,40 +28,13 @@ function tempWorkspace() {
 }
 
 /**
- * A minimal EngineTransport whose context accumulates respond() text and never
- * calls replaceMessage/postMessage — i.e. exactly the run shape that used to
- * lose its reply. `run` is the stub AgentRunner body.
+ * The engine plus a real BridgeTransport, with the channel state pre-seeded so
+ * `run` stands in for the agent runner. A run that only calls respond() — never
+ * replaceMessage/postMessage — is exactly the shape that used to lose its reply.
  */
 function makeEngineHarness(workingDir, run) {
-	const engine = createEngine({
-		workingDir,
-		sandbox: {},
-		provider: "test",
-		model: "test",
-	});
-	const transport = {
-		stopCommandHint: "say `stop` first",
-		postMessage: async () => "1",
-		updateMessage: async () => {},
-		createContext: (event) => {
-			let accumulated = "";
-			return {
-				transportId: "bridge",
-				message: { text: event.text, rawText: event.text, user: event.user, channel: event.channel, ts: event.ts, attachments: [] },
-				channels: [],
-				users: [],
-				respond: async (text) => { accumulated = accumulated ? `${accumulated}\n${text}` : text; },
-				replaceMessage: async () => {},
-				respondInThread: async () => {},
-				setTyping: async () => {},
-				uploadFile: async () => {},
-				setWorking: async () => {},
-				deleteMessage: async () => {},
-				getAccumulatedText: () => accumulated,
-			};
-		},
-	};
-	// Pre-seed the channel state so the engine doesn't build a real agent runner.
+	const engine = createEngine({ workingDir, sandbox: {}, provider: "test", model: "test" });
+	const transport = new BridgeTransport({ promptProfile: { fragments: [] }, dispatch: () => {} });
 	const seed = (channelId) => engine.channelStates.set(channelId, {
 		running: false,
 		stopRequested: false,
@@ -85,37 +59,29 @@ async function inFlightRequest(port, requestId) {
 	return { promise };
 }
 
-// ============================================================================
-// stripBridgeStatusLines()
-// ============================================================================
-
-test("stripBridgeStatusLines: drops agent.ts's _→ label_ progress markers, keeps the answer", () => {
-	const accumulated = "_→ running bash_\n_→ reading file_\nThe score is 240/6.";
-	assert.equal(stripBridgeStatusLines(accumulated), "The score is 240/6.");
-});
-
-test("stripBridgeStatusLines: keeps inline italics and only strips whole marker lines", () => {
-	assert.equal(stripBridgeStatusLines("the _score_ is 240/6"), "the _score_ is 240/6");
-});
-
-test("stripBridgeStatusLines: an all-markers run strips to empty, so the caller can substitute", () => {
-	assert.equal(stripBridgeStatusLines("_→ running bash_\n_Compacting…_"), "");
-});
+/** Run `body` against a bridge server + workspace, cleaning both up after. */
+async function withBridge(port, body) {
+	const workingDir = tempWorkspace();
+	const server = startBridgeServer(port, workingDir);
+	try {
+		return await body(workingDir);
+	} finally {
+		server.close();
+		rmSync(workingDir, { recursive: true, force: true });
+	}
+}
 
 // ============================================================================
 // engine.handleEvent() post-run fallback
 // ============================================================================
 
 test("engine: a run that never posts still resolves the pending bridge request from its output", async () => {
-	const port = 19621;
-	const workingDir = tempWorkspace();
-	const server = startBridgeServer(port, workingDir);
-	try {
-		const { promise: responsePromise } = await inFlightRequest(port, "fallback1");
+	await withBridge(19621, async (workingDir) => {
+		const { promise: responsePromise } = await inFlightRequest(19621, "fallback1");
 		assert.ok(hasPendingBridgeRequest("fallback1"), "request should be pending before the run");
 
 		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
-			await ctx.respond("_→ running bash_");
+			await ctx.respond("_→ running bash_", false);
 			await ctx.respond("the answer");
 			return { stopReason: "end" };
 		});
@@ -123,19 +89,14 @@ test("engine: a run that never posts still resolves the pending bridge request f
 		await engine.handleEvent({ channel: "BRIDGE-fallback1", user: "test", text: "do the thing", ts: "1", attachments: [] }, transport);
 
 		const result = await responsePromise;
-		assert.equal(result.text, "the answer", "status markers stripped, real reply delivered");
+		assert.equal(result.text, "the answer", "progress markers excluded, real reply delivered");
 		assert.ok(!hasPendingBridgeRequest("fallback1"));
-	} finally {
-		server.close();
-	}
+	});
 });
 
 test("engine: a run that throws resolves the bridge request with the error, instead of hanging", async () => {
-	const port = 19622;
-	const workingDir = tempWorkspace();
-	const server = startBridgeServer(port, workingDir);
-	try {
-		const { promise: responsePromise } = await inFlightRequest(port, "fallback2");
+	await withBridge(19622, async (workingDir) => {
+		const { promise: responsePromise } = await inFlightRequest(19622, "fallback2");
 
 		const { engine, transport, seed } = makeEngineHarness(workingDir, async () => {
 			throw new Error("model exploded");
@@ -143,43 +104,31 @@ test("engine: a run that throws resolves the bridge request with the error, inst
 		seed("BRIDGE-fallback2");
 		await engine.handleEvent({ channel: "BRIDGE-fallback2", user: "test", text: "do the thing", ts: "1", attachments: [] }, transport);
 
-		const result = await responsePromise;
-		assert.match(result.text, /run failed: model exploded/);
-	} finally {
-		server.close();
-	}
+		assert.match((await responsePromise).text, /run failed: model exploded/);
+	});
 });
 
 test("engine: a silent run resolves with a placeholder rather than an empty reply", async () => {
-	const port = 19623;
-	const workingDir = tempWorkspace();
-	const server = startBridgeServer(port, workingDir);
-	try {
-		const { promise: responsePromise } = await inFlightRequest(port, "fallback3");
+	await withBridge(19623, async (workingDir) => {
+		const { promise: responsePromise } = await inFlightRequest(19623, "fallback3");
 
 		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
-			await ctx.respond("_→ running bash_");
+			await ctx.respond("_→ running bash_", false);
 			return { stopReason: "end" };
 		});
 		seed("BRIDGE-fallback3");
 		await engine.handleEvent({ channel: "BRIDGE-fallback3", user: "test", text: "x", ts: "1", attachments: [] }, transport);
 
 		assert.equal((await responsePromise).text, "(no response)");
-	} finally {
-		server.close();
-	}
+	});
 });
 
 test("engine: the fallback does not overwrite a reply the transport already delivered", async () => {
-	const port = 19624;
-	const workingDir = tempWorkspace();
-	const server = startBridgeServer(port, workingDir);
-	try {
-		const { promise: responsePromise } = await inFlightRequest(port, "fallback4");
+	await withBridge(19624, async (workingDir) => {
+		const { promise: responsePromise } = await inFlightRequest(19624, "fallback4");
 
-		const { resolveBridgeRequest } = await import("../dist/engine/bridge.js");
 		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
-			await ctx.respond("_→ running bash_");
+			await ctx.respond("_→ running bash_", false);
 			// Stand in for the transport's replaceMessage on the final answer.
 			resolveBridgeRequest("fallback4", "the real reply");
 			await ctx.respond("trailing chatter");
@@ -189,74 +138,46 @@ test("engine: the fallback does not overwrite a reply the transport already deli
 		await engine.handleEvent({ channel: "BRIDGE-fallback4", user: "test", text: "x", ts: "1", attachments: [] }, transport);
 
 		assert.equal((await responsePromise).text, "the real reply");
-	} finally {
-		server.close();
-	}
+	});
 });
 
 // ============================================================================
-// EventsWatcher stale-drop handling
+// The accumulator must not treat emphasis in the answer as a progress marker.
+// A line-shape heuristic (`/^_.*_$/`) silently ate whole answers like
+// "_Moby Dick_ was written by _Melville_"; respond()'s shouldLog flag is the
+// signal agent.ts actually emits.
 // ============================================================================
 
-test("events: an immediate event written just before startup runs instead of being dropped as stale", async () => {
-	const workingDir = tempWorkspace();
-	const eventsDir = join(workingDir, "events");
-	const file = join(eventsDir, "bridge-1-grace.json");
-	writeFileSync(file, JSON.stringify({ type: "immediate", channelId: "BRIDGE-grace", user: "iris", text: "hi" }));
-	// 5s before now — a restart racing a live request, not a stale replay.
-	const fiveSecondsAgo = new Date(Date.now() - 5_000);
-	utimesSync(file, fiveSecondsAgo, fiveSecondsAgo);
+test("engine: an answer whose every line is wrapped in emphasis survives the fallback", async () => {
+	await withBridge(19625, async (workingDir) => {
+		const { promise: responsePromise } = await inFlightRequest(19625, "fallback5");
 
-	const enqueued = [];
-	const watcher = createEventsWatcher(workingDir, { enqueueEvent: (e) => { enqueued.push(e); return true; } });
-	try {
-		watcher.start();
-		await new Promise((r) => setTimeout(r, 150));
-		assert.equal(enqueued.length, 1, "event within the grace window must execute");
-		assert.equal(enqueued[0].channel, "BRIDGE-grace");
-	} finally {
-		watcher.stop();
-	}
-});
-
-test("events: a genuinely stale bridge event is deleted AND fails its pending request immediately", async () => {
-	const port = 19625;
-	const workingDir = tempWorkspace();
-	const server = startBridgeServer(port, workingDir);
-	const eventsDir = join(workingDir, "events");
-	try {
-		// A caller blocked on a request whose event file is about to be dropped.
-		const responsePromise = fetch(`http://127.0.0.1:${port}/bridge`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ text: "hi", user: "test", requestId: "stale1" }),
+		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
+			await ctx.respond("_→ running bash_", false);
+			await ctx.respond("_Moby Dick_ was written by _Melville_");
+			return { stopReason: "end" };
 		});
-		await new Promise((r) => setTimeout(r, 50));
+		seed("BRIDGE-fallback5");
+		await engine.handleEvent({ channel: "BRIDGE-fallback5", user: "test", text: "x", ts: "1", attachments: [] }, transport);
 
-		// Drop the fresh event file the bridge server just wrote, and stand in a
-		// stale one — simulating the same request having been accepted before a
-		// restart that reset the watcher's start time.
-		for (const f of readdirSync(eventsDir)) unlinkSync(join(eventsDir, f));
-		const file = join(eventsDir, "bridge-1-stale1.json");
-		writeFileSync(file, JSON.stringify({ type: "immediate", channelId: "BRIDGE-stale1", user: "iris", text: "hi" }));
-		const tenMinutesAgo = new Date(Date.now() - 600_000);
-		utimesSync(file, tenMinutesAgo, tenMinutesAgo);
+		assert.equal((await responsePromise).text, "_Moby Dick_ was written by _Melville_");
+	});
+});
 
-		const enqueued = [];
-		const watcher = createEventsWatcher(workingDir, { enqueueEvent: (e) => { enqueued.push(e); return true; } });
-		try {
-			watcher.start();
-			await new Promise((r) => setTimeout(r, 150));
-			assert.equal(enqueued.length, 0, "a truly stale event must not run");
-			assert.ok(!existsSync(file), "stale file is deleted");
+test("engine: tool errors and compaction notices are excluded, the answer is not", async () => {
+	await withBridge(19626, async (workingDir) => {
+		const { promise: responsePromise } = await inFlightRequest(19626, "fallback6");
 
-			const response = await responsePromise;
-			assert.equal(response.status, 504, "caller fails immediately, not after the bridge timeout");
-			assert.ok(!hasPendingBridgeRequest("stale1"));
-		} finally {
-			watcher.stop();
-		}
-	} finally {
-		server.close();
-	}
+		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
+			await ctx.respond("_→ reading file_", false);
+			await ctx.respond("_Error: exit code 1_", false);
+			await ctx.respond("_Compacting context..._", false);
+			await ctx.respond("240/6");
+			return { stopReason: "end" };
+		});
+		seed("BRIDGE-fallback6");
+		await engine.handleEvent({ channel: "BRIDGE-fallback6", user: "test", text: "x", ts: "1", attachments: [] }, transport);
+
+		assert.equal((await responsePromise).text, "240/6");
+	});
 });

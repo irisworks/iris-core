@@ -67,9 +67,8 @@ blocking HTTP request that the sub-agent's run normally answers by posting to it
 `BRIDGE-{requestId}` channel. If a run instead finishes silently or throws, the
 engine resolves the waiting request from whatever the run did produce (or an
 explicit `(run failed: …)`) rather than leaving the caller to time out with
-nothing. A request whose event file is dropped because the sub-agent restarted
-between accepting it and watching its events directory fails immediately with
-that reason, instead of waiting out the bridge timeout.
+nothing. Progress markers such as `_→ running bash_` are excluded from that
+salvaged reply, so the caller gets the answer on its own.
 
 In every case, the sub-agent's own process never touches Slack/Telegram/the
 Web UI directly — whichever transport originally received the message (already

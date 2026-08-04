@@ -205,18 +205,16 @@ export function createEngine(config: EngineConfig): Engine {
 			} finally {
 				state.running = false;
 				if (bridgeRequestId) {
-					const { hasPendingBridgeRequest, resolveBridgeRequest, stripBridgeStatusLines } =
-						await import("./bridge.js");
+					const { hasPendingBridgeRequest, resolveBridgeRequest } = await import("./bridge.js");
 					if (hasPendingBridgeRequest(bridgeRequestId)) {
 						// The run produced no reply through the transport. Salvage
 						// whatever it did say rather than making the caller wait out
 						// the bridge timeout and get nothing (issue #128).
-						const accumulated = stripBridgeStatusLines(bridgeCtx?.getAccumulatedText() ?? "");
-						const fallback = accumulated
+						const fallback = bridgeCtx?.getAccumulatedText().trim()
 							|| (bridgeError ? `(run failed: ${bridgeError})` : "(no response)");
 						resolveBridgeRequest(bridgeRequestId, fallback);
 						log.logWarning(
-							`[${event.channel}] Run delivered no reply; resolved bridge request from accumulated text`,
+							`[${event.channel}] Run delivered no reply; resolved bridge request with: ${fallback.substring(0, 80)}`,
 						);
 					}
 				}
