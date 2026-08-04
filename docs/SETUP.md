@@ -48,9 +48,9 @@ The script will:
 3. Walk you through creating a Slack app (exact token scopes shown in-terminal) and/or a Telegram bot.
 4. Optionally set up email sending (Resend), a public domain, and a GitHub
    token — if you add one, you'll also name the repo Iris pushes her own
-   skill/sub-agent commits to (a fork of `iris-core`, or your own private
-   overlay repo — see [Extending Iris](overlay.md); never the upstream you
-   cloned from).
+   skill/sub-agent commits to (your own private overlay repo, or a private
+   mirror of `iris-core` — see [Extending Iris](overlay.md); never the upstream
+   you cloned from, and never a public fork).
 5. Write `/iris/.env` (chmod 600), build the runtime, install and start the `iris` systemd service.
 
 **Verify:**

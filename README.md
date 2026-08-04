@@ -58,9 +58,10 @@ no human in the loop.*
 
 To have Iris commit skills like this one back to GitHub (her long-term memory —
 the VM is ephemeral), answer `Y` to the GitHub token prompt during bootstrap and
-give it a repo to push to: a fork of `iris-core`, or your own private overlay
-repo (see [Company-Specific Extensions](#company-specific-extensions-overlay)) —
-never the upstream you cloned from. Bootstrap writes this as `IRIS_GITHUB_ORG` /
+give it a repo to push to: your own private overlay repo, or a private mirror of
+`iris-core` (see [Company-Specific Extensions](#company-specific-extensions-overlay)).
+Never the upstream you cloned from, and never a public fork — this repo holds
+Iris's memory. Bootstrap writes this as `IRIS_GITHUB_ORG` /
 `IRIS_GITHUB_REPO` in `/iris/.env`.
 
 Want secrets in Azure Key Vault, or every command isolated in a Firecracker microVM?
@@ -144,7 +145,7 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 | `IRIS_WEBUI_PORT` / `IRIS_WEBUI_PASSWORD` | — (off) / — | Enable the built-in web UI on this port; shared-secret login (set it before exposing beyond loopback) |
 | `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in encrypted store / injection-proxy credential broker (see `docs/secrets.md`) |
 | `IRIS_SECRET_BROKER_URL` / `IRIS_SECRET_BROKER_TOKEN` | — | External secret broker for `GET /secrets/:name` (the bundled iris-broker in `proxy` mode, Vault, Infisical, or any HTTP service speaking the contract); default backend is env vars, then Key Vault if `IRIS_KEY_VAULT` is set |
-| `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills/sub-agents/self-edits to (see [Company-Specific Extensions](#company-specific-extensions-overlay)) — a fork or your own private overlay, never the upstream you cloned from. Prompted by bootstrap alongside the GitHub token |
+| `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills/sub-agents/self-edits to (see [Company-Specific Extensions](#company-specific-extensions-overlay)) — your own private overlay or a private mirror of `iris-core`; never the upstream you cloned from, and never a public fork. Prompted by bootstrap alongside the GitHub token |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_BASE_DOMAIN` / `IRIS_EMAIL_FROM` | — | Public serving domain / outbound email sender |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — (off) | Presence enables Langfuse tracing — one session-correlated trace per turn, with per-message token/cost and a `TOOL` observation per tool call. Tune with `LANGFUSE_HOST` (default `https://cloud.langfuse.com`), `LANGFUSE_ENVIRONMENT`, `LANGFUSE_RELEASE`, `LANGFUSE_TIMEOUT_MS`, `LANGFUSE_ENABLED=false`. Traces carry prompts, replies, and tool arguments/results — set `LANGFUSE_CAPTURE_IO=false` for cost/token telemetry only (see `docs/observability.md`) |
@@ -213,9 +214,11 @@ Add a `bootstrap-yourcompany.sh` wrapper that sets `REPO_DIR` before calling
 `core/bootstrap.sh`, then symlinks your overlay into the workspace. Pin `core` to a
 release tag and bump deliberately (see [docs/RELEASING.md](docs/RELEASING.md)).
 
-Fork instead when you need to change core's own code — a proprietary transport,
-say. [docs/overlay.md](docs/overlay.md) compares the three install shapes and
-covers the fork upgrade path.
+If you need to change core's own code — a new transport, say — fork to
+contribute it upstream, or take a **private mirror** if you can't publish it:
+iris-core is public, and GitHub forks of a public repo can't be made private.
+[docs/overlay.md](docs/overlay.md) compares the install shapes and covers both
+upgrade paths.
 
 ## Operating
 

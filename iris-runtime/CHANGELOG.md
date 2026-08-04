@@ -64,11 +64,17 @@
 
 ### Changed
 
-- Forking core is now a documented option rather than a prohibition: `docs/overlay.md`
-  recommends the overlay+submodule shape, compares it against a pinned clone and a
-  fork, and covers the fork upgrade path for installs that need core code changes
-  (e.g. a proprietary transport). `bootstrap.sh` now advises forks to rebase onto a
-  release tag instead of merging `upstream/main`, and fetches `--tags` so that works.
+- Changing core's own code is now a documented option rather than a prohibition:
+  `docs/overlay.md` still recommends the overlay+submodule shape, and compares it
+  against a pinned clone, a public fork (for upstream contributions), and a private
+  mirror (for changes that can't be published — iris-core is public and GitHub forks
+  of a public repo can't be private). `bootstrap.sh` advises rebasing onto a release
+  tag instead of merging `upstream/main`, and fetches `--tags` so that works.
+
+- `bootstrap.sh`, `README.md`, `docs/SETUP.md`, and `docs/configuration.md` no longer
+  offer a fork of `iris-core` as the `IRIS_GITHUB_ORG`/`IRIS_GITHUB_REPO` push target.
+  That repo holds Iris's memory and self-edits, and a fork of a public repo is always
+  public — they now call for a private overlay repo or a private mirror.
 
 - Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 

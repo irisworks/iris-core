@@ -46,4 +46,5 @@ minor version without reading intermediate release notes.
 
 - Installs may lag behind; core keeps workspace/data migrations one-way-safe.
 - Don't edit files under an install's `core/` submodule — contribute upstream, or
-  fork if upstream can't take the change (see [Extending Iris](overlay.md)).
+  keep a private mirror if the change can't be published (see
+  [Extending Iris](overlay.md)).

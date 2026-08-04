@@ -629,7 +629,8 @@ prompt_secrets() {
     echo "  This token needs a repo to push to: the one Iris commits her own"
     echo "  skills, sub-agents, and self-edits to (GitHub is her long-term"
     echo "  memory — see docs/overlay.md). Use your own private overlay repo,"
-    echo "  or a fork of iris-core — not this upstream checkout."
+    echo "  or a private mirror of iris-core — not this upstream checkout, and"
+    echo "  not a public fork: what Iris commits here is yours, keep it private."
     echo ""
     GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
     if [[ -n "$GH_ORG_REPO" ]]; then
