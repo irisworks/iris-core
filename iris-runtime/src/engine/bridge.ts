@@ -52,6 +52,15 @@ export function resolveBridgeRequest(requestId: string, text: string): boolean {
 	return true;
 }
 
+/**
+ * Is a bridge request still waiting for a reply? Used by the engine's post-run
+ * fallback (engine/index.ts) to tell "the run already delivered its answer"
+ * from "the run finished without delivering anything".
+ */
+export function hasPendingBridgeRequest(requestId: string): boolean {
+	return pendingRequests.has(requestId);
+}
+
 // ============================================================================
 // Bridge server (runs inside each sub-agent)
 // ============================================================================

@@ -68,6 +68,15 @@
 
 ### Fixed
 
+- Sub-agent bridge replies are no longer silently lost (#128). The engine now
+  resolves any still-pending bridge request after a run — from the run's own
+  output or an explicit `(run failed: …)` — instead of leaving the caller to time
+  out with nothing, and the events watchers are constructed before the bridge
+  server so a request accepted during startup isn't dropped as a stale event.
+  `BridgeTransport` also keeps progress markers (`_→ running bash_`) out of its
+  accumulated text, so neither that reply nor a `POST /sessions/:id/message`
+  response carries them.
+
 - `skills/spawn-agent/SKILL.md`'s Step 3 told callers to "fill in AGENT_NAME
   and BRIDGE_PORT" in the copied bootstrap script with no prescribed method;
   doing it as two concurrent edits to the same file raced and silently
