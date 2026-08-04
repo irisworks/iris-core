@@ -604,7 +604,16 @@ function writeChannelLog(workingDir, channelId, entries) {
 	writeFileSync(join(dir, "log.jsonl"), entries.map((e) => JSON.stringify(e)).join("\n"));
 }
 
+// Recent, so the IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS staleness guard doesn't fire —
+// these fixtures exercise the re-dispatch path, not the age cutoff.
+const nowSecs = Date.now() / 1000;
 const interruptedLog = [
+	{ ts: nowSecs.toFixed(4), user: "U1", text: "please do the thing", isBot: false },
+	{ ts: (nowSecs + 1).toFixed(4), user: "UBOT", text: "_Thinking ...", isBot: true },
+];
+
+// Epoch 100 — decades old, well past any sane cutoff.
+const staleInterruptedLog = [
 	{ ts: "100.0001", user: "U1", text: "please do the thing", isBot: false },
 	{ ts: "100.0002", user: "UBOT", text: "_Thinking ...", isBot: true },
 ];
@@ -618,6 +627,52 @@ test("resume: interrupted run in a dm channel is re-dispatched", async () => {
 	await settle();
 	assert.equal(calls.events.length, 1);
 	assert.equal(calls.events[0].event.text, "please do the thing");
+});
+
+test("resume: a stale interrupted run is not re-dispatched, but its placeholders are cleaned up", async () => {
+	const { bot, calls, workingDir } = makeBot({});
+	bot.channels.set("CDM", { id: "CDM", name: "general" });
+	const deleted = [];
+	bot.webClient = {
+		chat: {
+			delete: async ({ ts }) => {
+				deleted.push(ts);
+				return {};
+			},
+		},
+	};
+	writeChannelLog(workingDir, "CDM", staleInterruptedLog);
+	await bot.resumeInterruptedRuns();
+	await settle();
+	assert.equal(calls.events.length, 0, "stale run must not be re-dispatched");
+	assert.deepEqual(deleted, ["100.0002"], "stale placeholder should still be deleted");
+});
+
+test("resume: the staleness cutoff is configurable via IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS", async () => {
+	const { bot, calls, workingDir } = makeBot({});
+	bot.channels.set("CDM", { id: "CDM", name: "general" });
+	bot.webClient = { chat: { delete: async () => ({}) } };
+	// Six hours old: skipped at the default 4h, resumed when the cutoff is raised to 8h.
+	const sixHoursAgo = Date.now() / 1000 - 6 * 3600;
+	writeChannelLog(workingDir, "CDM", [
+		{ ts: sixHoursAgo.toFixed(4), user: "U1", text: "please do the thing", isBot: false },
+		{ ts: (sixHoursAgo + 1).toFixed(4), user: "UBOT", text: "_Thinking ...", isBot: true },
+	]);
+
+	await bot.resumeInterruptedRuns();
+	await settle();
+	assert.equal(calls.events.length, 0, "6h-old run is past the 4h default");
+
+	const prev = process.env.IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS;
+	process.env.IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS = "8";
+	try {
+		await bot.resumeInterruptedRuns();
+		await settle();
+		assert.equal(calls.events.length, 1, "raising the cutoff to 8h resumes it");
+	} finally {
+		if (prev === undefined) delete process.env.IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS;
+		else process.env.IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS = prev;
+	}
 });
 
 test("resume: completed runs are not re-dispatched", async () => {
