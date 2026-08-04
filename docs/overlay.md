@@ -59,10 +59,10 @@ through symlinks, so overlay skills behave exactly like core skills.
 
 ## Rules that keep this clean
 
-1. **Don't edit files under `core/`** — contribute upstream instead. If you need a
-   core change, that's a PR to iris-core, not a local patch. If upstream can't
-   take it, use a fork or private mirror rather than patching the submodule in
-   place.
+1. **Don't patch a pinned `core/` in place** — contribute upstream instead. If you
+   need a core change, that's a PR to iris-core. If upstream can't take it, point
+   the submodule at your own fork or private mirror rather than editing the
+   pinned upstream checkout.
 2. **Overlay wins on name collision** — override a core skill by shipping one with
    the same name.
 3. **Pin to tags, bump deliberately** — a core upgrade is a one-line submodule
@@ -105,19 +105,29 @@ the commits. Never put a proprietary transport, unpublished branding, or company
 data in a fork. Use a private mirror instead:
 
 ```bash
+gh repo create yourorg/iris-private --private   # empty — --mirror overwrites all refs
 git clone --bare https://github.com/irisworks/iris-core.git
 git -C iris-core.git push --mirror https://github.com/yourorg/iris-private.git
 gh repo view yourorg/iris-private --json visibility   # confirm PRIVATE
 ```
 
-Then clone the private repo and wire core as the upstream remote. `bootstrap.sh`
-does this for you: when `origin` isn't `irisworks/iris-core` it adds an
-`upstream` remote pointing at core and fetches its tags, so the upgrade path is
-in place at install time either way.
+Then clone the private repo and wire core as the upstream remote. When
+`bootstrap.sh` does the cloning itself (the default `install.sh` path, no
+`REPO_DIR` set) it wires this for you: if `origin` isn't `irisworks/iris-core` it
+adds an `upstream` remote pointing at core and fetches its tags. If you cloned
+the mirror yourself and point `REPO_DIR` at it — the same shape an overlay
+install uses — add the remote by hand:
+
+```bash
+git remote add upstream https://github.com/irisworks/iris-core.git
+```
+
+Upgrades then rebase your changes onto a release tag:
 
 ```bash
 git fetch upstream --tags
-git rebase v0.90.0          # rebase onto a release tag, not upstream/main
+git rebase v0.90.0             # rebase onto a release tag, not upstream/main
+git push --force-with-lease    # rebase rewrote history; a plain push is rejected
 ```
 
 Rebase onto tags for the same reason overlays pin to them: `upstream/main` is
@@ -127,8 +137,10 @@ back as a PR from a real fork — the smaller your private diff, the cheaper eve
 rebase.
 
 A private mirror is a heavier thing to maintain than an overlay: you own every
-rebase, forever. Reach for it only for the code you genuinely can't publish, and
-keep everything else in `overlay/`.
+rebase, forever, and because each one rewrites your `main`, treat the mirror as
+single-maintainer — a force-push invalidates everyone else's clone. Reach for it
+only for the code you genuinely can't publish, and keep everything else in
+`overlay/`.
 
 ## Upgrading core
 

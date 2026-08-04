@@ -1202,8 +1202,9 @@ if [[ "$REPO_DIR" == "${IRIS_DIR}/repo" ]]; then
       log "upstream remote added → $IRIS_CORE_URL"
     fi
     git -C "$REPO_DIR" fetch upstream --tags --quiet 2>/dev/null || log "Warning: could not fetch upstream — continuing (you can run 'git fetch upstream --tags' manually later)"
-    log "To take future iris-core updates: git fetch upstream --tags && git rebase vX.Y.Z"
-    log "  (rebase onto a release tag, not upstream/main — see docs/overlay.md)"
+    log "To take future iris-core updates: git fetch upstream --tags && git rebase <tag>"
+    log "  (pick a release tag with 'git tag -l' — not upstream/main; the rebase"
+    log "   rewrites history, so push back with --force-with-lease. See docs/overlay.md)"
   fi
 else
   [[ -d "$REPO_DIR/.git" ]] || die "REPO_DIR '$REPO_DIR' is not a git checkout."

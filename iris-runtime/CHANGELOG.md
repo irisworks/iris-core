@@ -64,17 +64,14 @@
 
 ### Changed
 
-- Changing core's own code is now a documented option rather than a prohibition:
-  `docs/overlay.md` still recommends the overlay+submodule shape, and compares it
-  against a pinned clone, a public fork (for upstream contributions), and a private
-  mirror (for changes that can't be published — iris-core is public and GitHub forks
-  of a public repo can't be private). `bootstrap.sh` advises rebasing onto a release
-  tag instead of merging `upstream/main`, and fetches `--tags` so that works.
+- `docs/overlay.md` keeps overlay+submodule as the default and now documents core code
+  changes too: fork to contribute upstream, private mirror when the change can't be
+  published, with the upgrade path for each. `bootstrap.sh` advises rebasing onto a
+  release tag instead of merging `upstream/main`, and fetches `--tags` so that works.
 
-- `bootstrap.sh`, `README.md`, `docs/SETUP.md`, and `docs/configuration.md` no longer
-  offer a fork of `iris-core` as the `IRIS_GITHUB_ORG`/`IRIS_GITHUB_REPO` push target.
-  That repo holds Iris's memory and self-edits, and a fork of a public repo is always
-  public — they now call for a private overlay repo or a private mirror.
+- `IRIS_GITHUB_ORG`/`IRIS_GITHUB_REPO` guidance in `bootstrap.sh`, `README.md`,
+  `docs/SETUP.md`, and `docs/configuration.md` no longer offers a fork of `iris-core` —
+  a fork of a public repo is always public, and Iris's memory lands in that repo.
 
 - Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 
