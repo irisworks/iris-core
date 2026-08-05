@@ -32,6 +32,14 @@ import {
 // Slack message text limit (safely under the actual 40K limit); IRIS_SLACK_MAX_CHARS overrides
 const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
 
+// How long a live message dispatch bound-waits for its own attachments to finish
+// downloading before proceeding anyway (see logUserMessage()).
+const ATTACHMENT_DOWNLOAD_TIMEOUT_MS = Number(process.env.IRIS_ATTACHMENT_DOWNLOAD_TIMEOUT_MS) || 10000;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Passthrough/relay configuration (meta/channels.json, mode "passthrough"):
  *   url          — external endpoint messages are forwarded to (required)
@@ -918,7 +926,7 @@ export class SlackBot implements ChannelTransport {
 
 				// SYNC: Log to log.jsonl (ALWAYS, even for old messages)
 				// Also downloads attachments in background and stores local paths
-				slackEvent.attachments = this.logUserMessage(slackEvent);
+				slackEvent.attachments = await this.logUserMessage(slackEvent);
 
 				// Only trigger processing for messages AFTER startup (not replayed old messages)
 				if (this.startupTs && e.ts < this.startupTs) {
@@ -1081,7 +1089,7 @@ export class SlackBot implements ChannelTransport {
 
 				// SYNC: Log to log.jsonl (ALL messages - channel chatter and DMs)
 				// Also downloads attachments in background and stores local paths
-				slackEvent.attachments = this.logUserMessage(slackEvent);
+				slackEvent.attachments = await this.logUserMessage(slackEvent);
 
 				// Only trigger processing for messages AFTER startup (not replayed old messages),
 				// unless this channel's config replays missed messages (the leads recipe).
@@ -1161,13 +1169,19 @@ export class SlackBot implements ChannelTransport {
 	}
 
 	/**
-	 * Log a user message to log.jsonl (SYNC)
-	 * Downloads attachments in background via store
+	 * Log a user message to log.jsonl (SYNC) and bound-wait for its attachments
+	 * to finish downloading before returning, so the caller doesn't dispatch the
+	 * message for processing while the download queue is still racing it — see
+	 * ChannelStore.processAttachments()'s `ready` promise. Bounded, not awaited
+	 * to completion: a slow/stalled Slack download shouldn't stall dispatch
+	 * indefinitely; after the timeout the file is just reported as unavailable
+	 * downstream instead of pretending it's there.
 	 */
-	private logUserMessage(event: SlackEvent): Attachment[] {
+	private async logUserMessage(event: SlackEvent): Promise<Attachment[]> {
 		const user = this.users.get(event.user);
-		// Process attachments - queues downloads in background
-		const attachments = event.files ? this.store.processAttachments(event.channel, event.files, event.ts) : [];
+		const { attachments, ready } = event.files
+			? this.store.processAttachments(event.channel, event.files, event.ts)
+			: { attachments: [] as Attachment[], ready: Promise.resolve() };
 		this.logToFile(event.channel, {
 			date: new Date(parseFloat(event.ts) * 1000).toISOString(),
 			ts: event.ts,
@@ -1178,6 +1192,9 @@ export class SlackBot implements ChannelTransport {
 			attachments,
 			isBot: false,
 		});
+		if (attachments.length > 0) {
+			await Promise.race([ready, sleep(ATTACHMENT_DOWNLOAD_TIMEOUT_MS)]);
+		}
 		return attachments;
 	}
 
@@ -1259,8 +1276,9 @@ export class SlackBot implements ChannelTransport {
 			const user = this.users.get(msg.user!);
 			// Strip @mentions from text (same as live messages)
 			const text = (msg.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim();
-			// Process attachments - queues downloads in background
-			const attachments = msg.files ? this.store.processAttachments(channelId, msg.files, msg.ts!) : [];
+			// Process attachments - queues downloads in background. This is historical
+			// backfill, not a live dispatch, so no need to bound-wait on `ready` here.
+			const attachments = msg.files ? this.store.processAttachments(channelId, msg.files, msg.ts!).attachments : [];
 
 			this.logToFile(channelId, {
 				date: new Date(parseFloat(msg.ts!) * 1000).toISOString(),
