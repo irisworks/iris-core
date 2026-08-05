@@ -120,3 +120,14 @@ Two mechanisms keep long-running channels healthy:
   `IRIS_COMPACT_THRESHOLD` of the model window, Iris summarises older history down
   toward `IRIS_COMPACT_TARGET` (up to 3 passes). A post-run check at ≥70% real
   usage acts as a backstop.
+
+## Prompt caching
+
+Anthropic and Bedrock cache the prompt on a strict byte-for-byte prefix match:
+any change anywhere in the system prompt invalidates the entire cached prefix
+(tools + system + full message history) for that turn. The system prompt is
+kept fully static across turns for a given channel and skill set — `MEMORY.md`
+contents and live MCP server connection status, both of which change turn to
+turn, are prepended to the current turn's user message instead (visible as a
+`<dynamic_context>` block in `last_prompt.jsonl`), after the cached history,
+where their churn doesn't invalidate anything.
