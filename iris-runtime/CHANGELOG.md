@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `IRIS_COMPACT_THRESHOLD`'s default rises from `0.6` to `0.7` (see
+  `docs/configuration.md`), now that pre-run auto-compaction is in place to
+  keep it from being needed sooner. Note this doesn't change how the pre-run
+  check handles an oversized image attachment in the *current* turn: that
+  check is a char-count estimate over the system prompt and existing message
+  history, computed before the new turn's message/images are appended, so a
+  single large attachment isn't visible to it at any threshold — only the
+  hardcoded ≥70% post-run check (real token counts from the provider) catches
+  that case.
+
 ## [1.2.0] - 2026-08-05
 
 Streaming bridge replies, Langfuse observability, deterministic `@agentname`
