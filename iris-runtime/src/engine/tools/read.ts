@@ -2,6 +2,7 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import type { Executor } from "../sandbox.js";
+import { resizeImageIfNeeded } from "../image-resize.js";
 import { detectImageMimeType, MIME_SNIFF_BYTES } from "../mime.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
@@ -80,10 +81,16 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				}
 				const base64 = result.stdout.replace(/\s/g, ""); // Remove whitespace from base64
 
+				// Downscale oversized images before they reach the model — same reasoning
+				// as agent.ts's inbound-attachment path. Undefined means it couldn't be
+				// decoded/shrunk under the ceiling; send the original and let the provider
+				// decide rather than failing the read.
+				const resized = resizeImageIfNeeded(base64, mimeType);
+
 				return {
 					content: [
-						{ type: "text", text: `Read image file [${mimeType}]` },
-						{ type: "image", data: base64, mimeType },
+						{ type: "text", text: `Read image file [${resized?.mimeType ?? mimeType}]` },
+						{ type: "image", data: resized?.data ?? base64, mimeType: resized?.mimeType ?? mimeType },
 					],
 					details: undefined,
 				};

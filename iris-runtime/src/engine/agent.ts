@@ -19,6 +19,7 @@ import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./langfuse.js";
 import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
+import { resizeImageIfNeeded } from "./image-resize.js";
 import * as log from "./log.js";
 import { detectImageMimeType, MIME_SNIFF_BYTES } from "./mime.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
@@ -1181,10 +1182,23 @@ function createRunner(
 						continue;
 					}
 					try {
+						const rawData = readFileSync(fullPath).toString("base64");
+						// Downscale oversized images (e.g. an unresized phone photo) before
+						// they reach the model — base64 inflates the encoded size ~33%, and
+						// an unresized image can exceed a provider's per-image payload limit
+						// outright, failing the whole turn. Undefined means it couldn't be
+						// decoded/shrunk under the ceiling; send the original and let the
+						// provider decide rather than dropping the attachment entirely.
+						const resized = resizeImageIfNeeded(rawData, mimeType);
+						if (resized?.wasResized) {
+							log.logInfo(
+								`[${channelId}] Resized image attachment ${a.local} to ${resized.width}x${resized.height}`,
+							);
+						}
 						imageAttachments.push({
 							type: "image",
-							mimeType,
-							data: readFileSync(fullPath).toString("base64"),
+							mimeType: resized?.mimeType ?? mimeType,
+							data: resized?.data ?? rawData,
 						});
 					} catch {
 						nonImagePaths.push(fullPath);
