@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `MEMORY.md` contents and live MCP server status no longer live in the
+  system prompt — both change turn to turn (memory whenever Iris writes to
+  it, MCP status when a server flaps), and the system prompt sits at
+  position 0 of the prefix Anthropic/Bedrock cache, so touching it
+  invalidated the entire cached prefix (tools + system + full message
+  history) on every turn regardless of how stable everything else was.
+  They're now prepended to each turn's user message instead
+  (`buildDynamicContext()` in `agent.ts`), after the cached history, where
+  their churn is free. `buildSystemPrompt()`'s `memory`/`mcpStatus`
+  parameters are removed accordingly.
+
 ## [1.2.0] - 2026-08-05
 
 Streaming bridge replies, Langfuse observability, deterministic `@agentname`
