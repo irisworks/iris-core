@@ -142,10 +142,17 @@ export const slackPromptProfile: TransportPromptProfile = {
 Bold: *text*, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: <url|text>
 Do NOT use **double asterisks** or [markdown](links).`,
 	directorySection: (channels: ChannelInfo[], users: UserInfo[]) => {
+		// Sort by id (stable across runs, unlike the Map insertion order these arrive
+		// in) so the directory renders byte-identical turn to turn and doesn't
+		// invalidate the prompt cache just because a new user/channel was discovered.
+		const sortedChannels = [...channels].sort((a, b) => a.id.localeCompare(b.id));
+		const sortedUsers = [...users].sort((a, b) => a.id.localeCompare(b.id));
 		const channelMappings =
-			channels.length > 0 ? channels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
+			sortedChannels.length > 0 ? sortedChannels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
 		const userMappings =
-			users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
+			sortedUsers.length > 0
+				? sortedUsers.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n")
+				: "(no users loaded)";
 		return `## Slack IDs
 Channels: ${channelMappings}
 

@@ -130,8 +130,10 @@ Bold: **text**, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`
 Do NOT use single *asterisks* for bold. Write URLs plainly rather than as [markdown](links) —
 and never wrap an attached file's name in link syntax, since attachments are sent separately.`,
 	directorySection: (channels: ChannelInfo[], _users: UserInfo[]) => {
+		// Sort by id — see the matching comment in slack.ts's directorySection.
+		const sortedChannels = [...channels].sort((a, b) => a.id.localeCompare(b.id));
 		const chatMappings =
-			channels.length > 0 ? channels.map((c) => `${c.id}\t${c.name}`).join("\n") : "(no chats loaded)";
+			sortedChannels.length > 0 ? sortedChannels.map((c) => `${c.id}\t${c.name}`).join("\n") : "(no chats loaded)";
 		return `## Telegram Chats
 ${chatMappings}
 

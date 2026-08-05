@@ -179,7 +179,6 @@ function loadIrisSkills(channelDir: string, workspacePath: string, workingDir: s
 export function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
-	memory: string,
 	constitution: string,
 	sandboxConfig: SandboxConfig,
 	channels: ChannelInfo[],
@@ -187,7 +186,6 @@ export function buildSystemPrompt(
 	skills: Skill[],
 	agents: AgentRegistry = {},
 	profile: TransportPromptProfile,
-	mcpStatus: McpStatusSummary | null = null,
 ): string {
 	const channelRelPath = resolveChannelPath(channelId);
 	const channelPath = `${workspacePath}/${channelRelPath}`;
@@ -269,7 +267,9 @@ Only delegate when the user's intent clearly matches a sub-agent's domain. Handl
 	: "(no sub-agents configured)"}
 
 ## MCP Servers
-${formatMcpSection(mcpStatus, workspacePath)}
+External toolsets can be added via ${workspacePath}/meta/mcp.json (hot-reloads before each message — see the mcp skill).
+Tools from connected servers are callable directly (prefix mcp__<server>__). Live per-server connection status is
+included with each message below, since it can change between turns.
 
 ## Events
 You can schedule events that wake you up at specific times or when external things happen. Events are JSON files in \`${workspacePath}/events/\`.
@@ -336,9 +336,7 @@ Write to MEMORY.md files to persist context across conversations.
 - Global (${workspacePath}/MEMORY.md): skills, preferences, project info
 - Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
 Update when you learn something important or when asked to remember something.
-
-### Current Memory
-${memory}
+Current memory contents are included with each message below, since they can change between turns.
 
 ## System Configuration Log
 Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
@@ -374,6 +372,24 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 
 Each built-in tool requires a "label" parameter (shown to user). MCP tools (mcp__*) take only the arguments in their schema — no label.
 `;
+}
+
+/**
+ * Volatile per-turn context (current memory, live MCP server status) that must
+ * NOT live in the system prompt: both can change between turns, and the system
+ * prompt sits at position 0 of the prefix Anthropic/Bedrock cache — touching it
+ * invalidates the entire cached prefix (tools + system + full message history)
+ * on every turn. Prepended to the new user message instead, after the cached
+ * history, where its churn doesn't cost anything.
+ */
+function buildDynamicContext(memory: string, mcpStatus: McpStatusSummary | null, workspacePath: string): string {
+	return `<dynamic_context>
+## Current Memory
+${memory}
+
+## MCP Servers
+${formatMcpSection(mcpStatus, workspacePath)}
+</dynamic_context>`;
 }
 
 function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: string): string {
@@ -584,11 +600,10 @@ function createRunner(
 		attachmentsTagName: "attachments",
 		maxMessageChars: 30000,
 	};
-	const memory = getMemory(channelDir, workingDir);
 	const constitution = loadConstitution(workspaceDir);
 	const skills = loadIrisSkills(channelDir, workspacePath, workingDir);
 	const agents = loadAgentRegistry(workspaceDir);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, constitution, sandboxConfig, [], [], skills, agents, placeholderProfile);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, constitution, sandboxConfig, [], [], skills, agents, placeholderProfile);
 
 	// Create session manager and settings manager
 	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
@@ -606,6 +621,11 @@ function createRunner(
 		},
 		convertToLlm,
 		getApiKey,
+		// Forwarded to providers that key caching/routing off it (openai-responses'
+		// prompt_cache_key, mistral's x-affinity). Anthropic/Bedrock ignore it — they
+		// cache off cache_control breakpoints instead. Channel id is a stable,
+		// natural session boundary since each channel gets its own runner/history.
+		sessionId: channelId,
 	});
 
 	// Load existing messages
@@ -991,7 +1011,13 @@ function createRunner(
 			await mcpManager.refresh();
 			agent.state.tools = [...tools, ...mcpManager.getTools()];
 
-			// Update system prompt with fresh memory, constitution, channel/user info, and skills
+			// Update system prompt with fresh constitution, channel/user info, and skills.
+			// Memory and MCP status are NOT baked in here — they're volatile (memory
+			// changes whenever Iris writes to MEMORY.md; MCP status flaps with server
+			// health) and sit at position 0 of the prompt, so touching them would
+			// invalidate the entire cached prefix (tools + system + full history) on
+			// every turn. They're prepended to the per-turn user message instead,
+			// after the cached prefix, where their churn is free (see buildDynamicContext).
 			const memory = getMemory(channelDir, workingDir);
 			const constitution = loadConstitution(workspaceDir);
 			let skills = loadIrisSkills(channelDir, workspacePath, workingDir);
@@ -1003,7 +1029,6 @@ function createRunner(
 			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
-				memory,
 				constitution,
 				sandboxConfig,
 				ctx.channels,
@@ -1011,7 +1036,6 @@ function createRunner(
 				skills,
 				agents,
 				profile,
-				mcpManager.getStatus(),
 			);
 			session.agent.state.systemPrompt = systemPrompt;
 
@@ -1124,7 +1148,8 @@ function createRunner(
 			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
 			const offsetMins = pad(Math.abs(offset) % 60);
 			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
-			let userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
+			const dynamicContext = buildDynamicContext(memory, mcpManager.getStatus(), workspacePath);
+			let userMessage = `${dynamicContext}\n\n[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
 
 			const imageAttachments: ImageContent[] = [];
 			const nonImagePaths: string[] = [];
@@ -1183,11 +1208,15 @@ function createRunner(
 			sanitizeDanglingToolCalls();
 
 			// Pre-run auto-compaction: if the estimated context exceeds IRIS_COMPACT_THRESHOLD
-			// (default 60%) of the model window, compact down toward IRIS_COMPACT_TARGET
+			// (default 70%) of the model window, compact down toward IRIS_COMPACT_TARGET
 			// (default 10%) before prompting — prevents mid-run context overflow.
-			// The post-run >=70% check below remains as a backstop using real usage numbers.
+			// The post-run >=70% check below remains as a backstop using real usage numbers
+			// (it catches what this char-based estimate misses, e.g. image attachment tokens —
+			// this estimate only counts systemPrompt + session.messages, computed BEFORE the
+			// new turn's message/images are appended, so a single oversized image attachment
+			// isn't visible here at any threshold; only the post-run check sees it).
 			const windowTokens = model.contextWindow || 200000;
-			const compactThreshold = (Number(process.env.IRIS_COMPACT_THRESHOLD) || 0.6) * windowTokens;
+			const compactThreshold = (Number(process.env.IRIS_COMPACT_THRESHOLD) || 0.7) * windowTokens;
 			const compactTarget = (Number(process.env.IRIS_COMPACT_TARGET) || 0.1) * windowTokens;
 			// Rough token estimate: chars / 4 (good enough for cl100k/tiktoken-like encodings)
 			const estimateTokens = () =>

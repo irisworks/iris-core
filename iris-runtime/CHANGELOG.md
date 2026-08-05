@@ -89,6 +89,8 @@
 
 - Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 
+- Prompt-caching hygiene: `MEMORY.md` contents and live MCP server status no longer live in the system prompt — both change turn to turn (memory whenever Iris writes to it, MCP status when a server flaps), and the system prompt sits at position 0 of the prefix Anthropic/Bedrock cache, so touching it invalidated the entire cached prefix (tools + system + full message history) on every turn regardless of how stable everything else was. They're now prepended to each turn's user message instead (`buildDynamicContext()` in `agent.ts`), after the cached history, where their churn is free. `buildSystemPrompt()`'s `memory`/`mcpStatus` parameters are removed accordingly. Slack's and Telegram's channel/user directory sections are now sorted by ID before rendering — they were built from `Map.values()` insertion order, which reorders as new channels/users are discovered and would otherwise invalidate the cache for no reason. The `Agent` is now constructed with `sessionId: channelId`, which providers that key caching/routing off it (`openai-responses`'s `prompt_cache_key`, Mistral's `x-affinity`) can use; Anthropic and Bedrock are unaffected, since they cache off `cache_control` breakpoints. `IRIS_COMPACT_THRESHOLD`'s default rises from `0.6` to `0.7` (see `docs/configuration.md`), now that pre-run auto-compaction is in place to catch the case that motivated the lower threshold.
+
 ### Fixed
 
 - Sub-agent bridge replies are no longer silently lost (#128). The engine now
