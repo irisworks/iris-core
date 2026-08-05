@@ -59,13 +59,14 @@ When deploying Iris Core:
   credential broker (`IRIS_SECRETS_MODE=store|proxy` — see `docs/secrets.md`),
   or an external broker (`IRIS_SECRET_BROKER_URL` — Vault, Infisical, or any
   HTTP service speaking the contract)
-- `env` mode (the default) puts every secret in the runtime's process
+- `store` mode (the default) moves secrets into an encrypted local file and
+  scrubs them from the process environment after startup; `proxy` mode adds a
+  separate-uid broker daemon so the agent process can't read the key material
+  at all, and secrets marked proxy-only can be *used* (via the injection
+  gateway) but never read as plaintext by anyone. `env` mode is a legacy
+  opt-out (`--secrets-mode=env`): every secret sits in the runtime's process
   environment, so any bash tool call the agent runs — `env`, `cat /iris/.env`
-  — can read and echo it. `store` mode moves secrets into an encrypted local
-  file and scrubs them from the process environment after startup; `proxy`
-  mode adds a separate-uid broker daemon so the agent process can't read the
-  key material at all, and secrets marked proxy-only can be *used* (via the
-  injection gateway) but never read as plaintext by anyone
+  — can read and echo it
 - Rotate secrets regularly
 - Use separate secrets for preview and prod environments
 - Never ask a user to paste a secret into chat — it lands in the LLM's
@@ -102,6 +103,32 @@ On installs using the opt-in Azure/Terraform profile:
   2. Use `git-filter-repo` to remove from history
   3. Force push (coordinate with team)
 
+### Host Isolation (`bootstrap.sh` default path)
+
+- `iris.service` runs as a dedicated, unprivileged system user (`iris`) —
+  not the operator's own account (`$TARGET_USER`), which on stock cloud
+  images has passwordless `sudo` plus `docker`/`lxd` group membership, each
+  independently root-equivalent. A prompt injection against the agent's bash
+  tool lands on this confined uid, not on root
+- Docker group membership for the `iris` uid is opt-in
+  (`bootstrap.sh --allow-docker`) for installs that use `spawn-agent`'s
+  Docker sub-agent path — stated as root-equivalent in the flag's own log
+  output, since it grants `docker run -v /:/host`
+- The one skill that needs elevation, `serve-public` (writes nginx vhosts,
+  requests certs), gets a narrow `/etc/sudoers.d/iris-serve-public` grant with
+  explicit command paths — no blanket `sudo`
+- `iris.service` carries systemd sandboxing beyond the defaults:
+  `NoNewPrivileges`, `ProtectSystem=strict` (read-only except `/iris`),
+  `ProtectHome`, `CapabilityBoundingSet=` (all capabilities dropped),
+  `SystemCallFilter=@system-service`, plus kernel/namespace/realtime
+  restrictions — check current coverage with
+  `systemd-analyze security iris.service`
+- The cloud metadata endpoint (`169.254.169.254`, used by Azure/AWS/GCP to
+  serve managed-identity credentials) is dropped by an nftables rule scoped
+  to the `iris` uid, so the agent can't trade its confined uid for a cloud
+  credential even if host-level confinement is otherwise bypassed. Root and
+  `$TARGET_USER` (az/aws/gcloud CLIs, cloud-init) are unaffected
+
 ### Sub-Agent Isolation
 
 - Run sub-agents in separate Docker containers, or — for the strongest
@@ -136,7 +163,12 @@ Iris runs with `--sandbox=host` which means:
 - Skills have full system access
 - No containerization of the orchestrator itself
 
-**Mitigation:** Run Iris on a dedicated VM with minimal privileges and careful skill auditing.
+**Mitigation:** `bootstrap.sh`'s default path already runs Iris on the
+confined `iris` uid described in [Host Isolation](#host-isolation-bootstrapsh-default-path)
+above — no sudo, no docker/lxd by default, systemd sandboxing,
+metadata-endpoint egress blocked. Still run Iris on a dedicated VM and audit
+skills carefully; host confinement narrows a prompt injection to "this uid on
+this box," not "no access."
 
 ### LLM Provider Trust
 
