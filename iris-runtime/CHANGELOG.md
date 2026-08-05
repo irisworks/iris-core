@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Slack's and Telegram's channel/user directory sections in the system prompt
+  are now sorted by ID before rendering. They were built from `Map.values()`
+  insertion order, which reorders as new channels/users are discovered — a
+  reordered-but-otherwise-unchanged directory still changes the rendered
+  prompt bytes, which invalidates the Anthropic/Bedrock prompt cache for no
+  reason (any byte change in the system prompt invalidates the entire cached
+  prefix: tools + system + full message history).
+
 ## [1.2.0] - 2026-08-05
 
 Streaming bridge replies, Langfuse observability, deterministic `@agentname`
