@@ -12,7 +12,7 @@ import {
 	SessionManager,
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, writeFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
@@ -20,6 +20,7 @@ import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./langfuse.js";
 import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
 import * as log from "./log.js";
+import { detectImageMimeType, MIME_SNIFF_BYTES } from "./mime.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
 import { getSecretProvider } from "./secrets.js";
@@ -68,16 +69,32 @@ async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
 	return key;
 }
 
-const IMAGE_MIME_TYPES: Record<string, string> = {
-	jpg: "image/jpeg",
-	jpeg: "image/jpeg",
-	png: "image/png",
-	gif: "image/gif",
-	webp: "image/webp",
-};
-
-function getImageMimeType(filename: string): string | undefined {
-	return IMAGE_MIME_TYPES[filename.toLowerCase().split(".").pop() || ""];
+/**
+ * Sniff whether a file is a supported image format from its magic bytes, not
+ * its filename — a Telegram document with no name downloads as a bare "file",
+ * and any transport can hand over a mislabeled or extensionless attachment.
+ * Only reads the small header window sniffing needs, not the whole file.
+ * Returns undefined (not a throw) on any read failure — the caller's existing
+ * try/catch around the full readFileSync() a few lines later is what should
+ * decide a truly unreadable file falls back to a plain path reference, not
+ * this best-effort sniff.
+ */
+async function sniffImageMimeType(fullPath: string): Promise<string | undefined> {
+	let fd: number;
+	try {
+		fd = openSync(fullPath, "r");
+	} catch {
+		return undefined;
+	}
+	try {
+		const head = Buffer.alloc(MIME_SNIFF_BYTES);
+		const bytesRead = readSync(fd, head, 0, MIME_SNIFF_BYTES, 0);
+		return await detectImageMimeType(head.subarray(0, bytesRead));
+	} catch {
+		return undefined;
+	} finally {
+		closeSync(fd);
+	}
 }
 
 /**
@@ -1154,7 +1171,7 @@ function createRunner(
 					continue;
 				}
 
-				const mimeType = getImageMimeType(a.local);
+				const mimeType = await sniffImageMimeType(fullPath);
 				if (mimeType) {
 					if (!supportsImageInput) {
 						// Model can't accept image input — don't hand it an ImageContent

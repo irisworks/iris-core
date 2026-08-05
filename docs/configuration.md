@@ -73,6 +73,13 @@ file as unreadable rather than claiming success. If a model here does accept
 images but a Slack/Telegram photo isn't getting through, check `"input"` for
 that model id first.
 
+Separately, "is this attachment an image" is decided from the file's actual
+content (magic-byte sniffing), not its filename or extension — a Telegram
+document with no filename, or any attachment with a missing/wrong extension,
+is still recognized correctly. If `"input"` includes `"image"` and an
+attachment still isn't picked up, it likely isn't a supported format (jpeg,
+png, gif, webp).
+
 DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
 API key — both go through `pi-ai`'s `openai-completions` provider module,
 since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
