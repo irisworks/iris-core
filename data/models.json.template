@@ -33,7 +33,7 @@
           "id": "Kimi-K2.5",
           "name": "Kimi K2.5 (Azure Foundry)",
           "reasoning": true,
-          "input": ["text"],
+          "input": ["text", "image"],
           "contextWindow": 131072,
           "maxTokens": 16384,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
@@ -42,7 +42,7 @@
           "id": "Kimi-K2.6",
           "name": "Kimi K2.6 (Azure Foundry)",
           "reasoning": true,
-          "input": ["text"],
+          "input": ["text", "image"],
           "contextWindow": 131072,
           "maxTokens": 16384,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }

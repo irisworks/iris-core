@@ -497,9 +497,6 @@ function createRunner(
 	const workspaceDir = workingDir;
 	const workspacePath = executor.getWorkspacePath(workspaceDir);
 
-	// Create tools
-	const tools = createIrisTools(executor);
-
 	// Create AuthStorage and ModelRegistry early so we can resolve custom providers.
 	// models.json from the workspace is passed so Foundry/custom providers are loaded.
 	// Auth stored outside workspace so agent can't access it.
@@ -512,6 +509,8 @@ function createRunner(
 
 	// Resolve model from registry (handles built-in providers and custom providers from models.json).
 	// Fall back to getModel() for built-in-only providers if registry doesn't find it.
+	// Resolved before tool creation below so the read tool knows whether this model
+	// accepts image input.
 	const model = (() => {
 		const found = modelRegistry.find(provider, modelId);
 		if (found) {
@@ -528,6 +527,12 @@ function createRunner(
 			);
 		}
 	})();
+
+	// Create tools — read needs to know up front whether the active model accepts
+	// image input, so it can tell the model an image was skipped instead of
+	// claiming success while pi-ai silently strips the image content downstream.
+	const supportsImageInput = model.input.includes("image");
+	const tools = createIrisTools(executor, { supportsImageInput });
 
 	// pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders)
 	// falls back to echoing the raw config string when the env var it names isn't
@@ -1128,12 +1133,20 @@ function createRunner(
 
 			const imageAttachments: ImageContent[] = [];
 			const nonImagePaths: string[] = [];
+			const droppedImagePaths: string[] = [];
 
 			for (const a of ctx.message.attachments || []) {
 				const fullPath = `${workspacePath}/${a.local}`;
 				const mimeType = getImageMimeType(a.local);
 
 				if (mimeType && existsSync(fullPath)) {
+					if (!supportsImageInput) {
+						// Model can't accept image input — don't hand it an ImageContent
+						// block pi-ai will silently drop downstream (see model.input
+						// filtering in every provider module). Tell the model instead.
+						droppedImagePaths.push(fullPath);
+						continue;
+					}
 					try {
 						imageAttachments.push({
 							type: "image",
@@ -1146,6 +1159,14 @@ function createRunner(
 				} else {
 					nonImagePaths.push(fullPath);
 				}
+			}
+
+			if (droppedImagePaths.length > 0) {
+				log.logWarning(
+					`[${channelId}] Dropping ${droppedImagePaths.length} image attachment(s): model ${provider}/${modelId} does not accept image input`,
+					droppedImagePaths.join(", "),
+				);
+				userMessage += `\n\n<dropped_image_attachments reason="current model '${modelId}' does not accept image input">\n${droppedImagePaths.join("\n")}\n</dropped_image_attachments>`;
 			}
 
 			if (nonImagePaths.length > 0) {

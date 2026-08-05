@@ -98,6 +98,28 @@ and MCP support as documented profiles.
 
 ### Fixed
 
+- Image attachments were silently dropped instead of read, on any model
+  declared `"input": ["text"]` in `models.json` — including `Kimi-K2.5` and
+  `Kimi-K2.6` in `data/models.json.template`, despite both being natively
+  multimodal. `pi-ai` filters image content out of the request in every
+  provider module (`openai-completions`, `anthropic`, `google-shared`,
+  `mistral`, `openai-responses-shared`) based on `model.input`, with no
+  signal back to the caller — so a user-sent photo vanished with no trace,
+  and the `read` tool's image branch claimed `"Read image file [...]"` while
+  the image itself never reached the model, leaving it to confabulate the
+  contents. `data/models.json.template`'s Kimi entries now declare
+  `["text", "image"]`. For any model still declared text-only (e.g. a
+  `custom`-provider endpoint from `bootstrap.sh`, which defaults new custom
+  models to `["text"]`), inbound image attachments are now diverted to a
+  `<dropped_image_attachments
+  reason="...">` block instead of being base64'd into a doomed `ImageContent`
+  block, and a warning is logged; the `read` tool does the same for an
+  in-conversation image read, returning an explicit "cannot be read this
+  way" text result instead of a fabricated success. `createIrisTools()` and
+  `createReadTool()` now take an `IrisToolsOptions`/`ReadToolOptions` with
+  `supportsImageInput`, derived from `model.input` at runner construction
+  (moved earlier in `agent.ts` so tools are built after the model is known).
+
 - Startup no longer re-dispatches stale interrupted runs. `resumeInterruptedRuns()`
   treated any last user message followed only by placeholders as an interrupted run,
   so a service that had been down for hours — or an agent that legitimately finished
