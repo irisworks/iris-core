@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- Image attachments and `read`-tool image reads were sent to the model at
+  their original size, with no check against provider payload limits. Base64
+  inflates the encoded size by roughly a third, so an ordinary unresized
+  phone photo (often 3-5MB) can exceed a provider's per-image limit
+  (Anthropic's is ~5MB) outright and fail the whole turn on nothing more
+  than "the user sent a normal photo". Both paths now downscale through a
+  new `engine/image-resize.ts` (Photon, `@silvia-odwyer/photon-node` — the
+  same library `pi-coding-agent`'s own read tool uses upstream for this, not
+  exposed through its public API, so reimplemented directly) if the image
+  exceeds 2000px on its longest edge or 4.5MB encoded; images already within
+  both limits (the common case) are returned unchanged. A decode failure or
+  an image that can't be shrunk under the ceiling falls back to sending the
+  original as-is rather than dropping the attachment or failing the read.
+
 - Image attachments were recognized (or missed) by filename extension, not
   content — `agent.ts`'s inbound-attachment path and the `read` tool both
   looked at `.jpg`/`.png`/etc. before deciding whether to treat a file as an

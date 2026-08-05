@@ -80,6 +80,12 @@ is still recognized correctly. If `"input"` includes `"image"` and an
 attachment still isn't picked up, it likely isn't a supported format (jpeg,
 png, gif, webp).
 
+An image over 2000px on its longest edge or 4.5MB once base64-encoded is
+downscaled before it's sent — an unresized phone photo can otherwise exceed
+a provider's per-image payload limit and fail the whole turn. This is
+automatic and has no env var to tune; a decode failure just falls back to
+sending the original size as-is.
+
 DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
 API key — both go through `pi-ai`'s `openai-completions` provider module,
 since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
