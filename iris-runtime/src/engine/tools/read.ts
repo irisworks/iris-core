@@ -1,27 +1,30 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
-import { extname } from "path";
 import type { Executor } from "../sandbox.js";
+import { detectImageMimeType, MIME_SNIFF_BYTES } from "../mime.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
 /**
- * Map of file extensions to MIME types for common image formats
+ * Sniff whether a file is a supported image format from its magic bytes, not
+ * its filename — a mislabeled or extensionless attachment (e.g. a Telegram
+ * document with no name) would otherwise never be recognized. Reads only the
+ * small header window sniffing needs, via the same executor as everything
+ * else in this tool (the path may be inside a sandboxed container/VM, not
+ * the host filesystem, so this can't just open() the file directly).
+ * Returns undefined (not an error) if `path` doesn't exist — the caller's
+ * existing text-read path below will surface that as its normal "no such
+ * file" error instead.
  */
-const IMAGE_MIME_TYPES: Record<string, string> = {
-	".jpg": "image/jpeg",
-	".jpeg": "image/jpeg",
-	".png": "image/png",
-	".gif": "image/gif",
-	".webp": "image/webp",
-};
-
-/**
- * Check if a file is an image based on its extension
- */
-function isImageFile(filePath: string): string | null {
-	const ext = extname(filePath).toLowerCase();
-	return IMAGE_MIME_TYPES[ext] || null;
+async function sniffImageMimeType(
+	executor: Executor,
+	path: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const result = await executor.exec(`head -c ${MIME_SNIFF_BYTES} ${shellEscape(path)} | base64`, { signal });
+	if (result.code !== 0) return undefined;
+	const head = Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
+	return detectImageMimeType(head);
 }
 
 const readSchema = Type.Object({
@@ -51,7 +54,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 			{ path, offset, limit }: { label: string; path: string; offset?: number; limit?: number },
 			signal?: AbortSignal,
 		): Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }> => {
-			const mimeType = isImageFile(path);
+			const mimeType = await sniffImageMimeType(executor, path, signal);
 
 			if (mimeType) {
 				if (!options.supportsImageInput) {
