@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   docs-guard:
+    if: github.repository == 'irisworks/iris-core'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
