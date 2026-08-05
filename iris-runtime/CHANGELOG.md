@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Slack attachments raced their own message dispatch: `processAttachments()`
+  queued a file download in the background and returned immediately, so a
+  live message could reach `agent.ts`'s prompt-building before the download
+  finished — `existsSync()` would come back `false` for a file that was
+  simply still in flight, and it silently fell into the same bucket as a
+  genuinely non-existent path. `processAttachments()` now also returns a
+  `ready` promise that settles once every attachment in that call has been
+  downloaded or failed; `logUserMessage()` bound-waits on it (default 10s,
+  `IRIS_ATTACHMENT_DOWNLOAD_TIMEOUT_MS`) before the message is dispatched for
+  processing. Telegram already awaited its own downloads synchronously per
+  message and didn't have this race. `agent.ts` now also checks
+  `existsSync()` for every attachment *before* branching on mime type, and
+  anything still missing (download still running past the bound, or failed
+  outright — `ChannelStore.didDownloadFail()`) goes into a
+  `<unavailable_attachments>` note instead of being silently handed over
+  as an apparently-normal path.
+
+- Attachments on messages logged while Iris was offline or mid-run vanished
+  on replay. `log.jsonl` already records each message's `attachments` (`ChannelStore.logMessage()`
+  writes the full `LoggedMessage`), but `syncLogToSessionManager()`'s
+  `LogMessage` parsing type never read that field back out, so a photo or
+  file sent during an outage or a long-running turn reappeared in context
+  with no trace it had ever been attached. It now rebuilds the same
+  `<transport_attachments>` block the live path uses (existence-checked, so
+  a since-failed download is flagged `(not available)` rather than
+  asserted). Fixed alongside: the session-dedup normalization that strips a
+  message's attachments section before comparing against already-synced
+  history was hardcoded to `<slack_attachments>`, so a Telegram or web
+  message with attachments could dedupe incorrectly against its own live
+  copy; it now uses the transport's actual tag name.
+
 ## [1.2.0] - 2026-08-05
 
 Streaming bridge replies, Langfuse observability, deterministic `@agentname`

@@ -64,6 +64,18 @@ interface PendingDownload {
 	channelId: string;
 	localPath: string; // relative path
 	url: string;
+	/** Settled (not rejected) once this specific item has been attempted, success or failure —
+	 * lets a caller bound-await just its own message's attachments instead of the whole queue. */
+	settle: () => void;
+}
+
+export interface ProcessAttachmentsResult {
+	attachments: Attachment[];
+	/** Resolves once every attachment in this call has been downloaded or failed —
+	 * never rejects. Bound-await this (with a timeout) before dispatching the message
+	 * for processing so `existsSync()` checks downstream reflect reality instead of
+	 * racing the background download queue. */
+	ready: Promise<void>;
 }
 
 export class ChannelStore {
@@ -71,6 +83,10 @@ export class ChannelStore {
 	private botToken: string;
 	private pendingDownloads: PendingDownload[] = [];
 	private isDownloading = false;
+	// localPath of any attachment whose download failed — checked by agent.ts so a
+	// failed download is reported as "download failed", not silently handed over
+	// as a path that looks readable but never arrives.
+	private failedDownloads = new Set<string>();
 	// Track recently logged message timestamps to prevent duplicates
 	// Key: "channelId:ts", automatically cleaned up after 60 seconds
 	private recentlyLogged = new Map<string, number>();
@@ -135,15 +151,18 @@ export class ChannelStore {
 	}
 
 	/**
-	 * Process attachments from a Slack message event
-	 * Returns attachment metadata and queues downloads
+	 * Process attachments from a Slack message event.
+	 * Returns attachment metadata immediately and queues downloads in the
+	 * background, plus a `ready` promise a caller can bound-await so it isn't
+	 * racing the download queue when it next checks the files on disk.
 	 */
 	processAttachments(
 		channelId: string,
 		files: Array<{ name?: string; url_private_download?: string; url_private?: string }>,
 		timestamp: string,
-	): Attachment[] {
+	): ProcessAttachmentsResult {
 		const attachments: Attachment[] = [];
+		const settled: Promise<void>[] = [];
 
 		for (const file of files) {
 			const url = file.url_private_download || file.url_private;
@@ -162,13 +181,22 @@ export class ChannelStore {
 			});
 
 			// Queue for background download
-			this.pendingDownloads.push({ channelId, localPath, url });
+			settled.push(
+				new Promise<void>((resolve) => {
+					this.pendingDownloads.push({ channelId, localPath, url, settle: resolve });
+				}),
+			);
 		}
 
 		// Trigger background download
 		this.processDownloadQueue();
 
-		return attachments;
+		return { attachments, ready: Promise.all(settled).then(() => undefined) };
+	}
+
+	/** True if this attachment's download failed (as opposed to just not having run yet). */
+	didDownloadFail(localPath: string): boolean {
+		return this.failedDownloads.has(localPath);
 	}
 
 	/**
@@ -263,6 +291,9 @@ export class ChannelStore {
 			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error);
 				log.logWarning(`Failed to download attachment`, `${item.localPath}: ${errorMsg}`);
+				this.failedDownloads.add(item.localPath);
+			} finally {
+				item.settle();
 			}
 		}
 

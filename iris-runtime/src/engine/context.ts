@@ -14,6 +14,7 @@ import type { UserMessage } from "@mariozechner/pi-ai";
 import { type SessionManager, type SessionMessageEntry, SettingsManager } from "@mariozechner/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
+import type { Attachment } from "./store.js";
 
 // ============================================================================
 // Sync log.jsonl to SessionManager
@@ -26,16 +27,24 @@ interface LogMessage {
 	userName?: string;
 	text?: string;
 	isBot?: boolean;
+	attachments?: Attachment[];
 }
 
 /**
  * Sync user messages from log.jsonl to SessionManager.
  *
  * This ensures that messages logged while Iris wasn't running (channel chatter,
- * backfilled messages, messages while busy) are added to the LLM context.
+ * backfilled messages, messages while busy) are added to the LLM context —
+ * including any attachments on those messages, which log.jsonl already carries
+ * (ChannelStore.logMessage() writes the full LoggedMessage) but earlier versions
+ * of this function silently dropped by never reading the field back out.
  *
  * @param sessionManager - The SessionManager to sync to
  * @param channelDir - Path to channel directory containing log.jsonl
+ * @param workspacePath - Executor-visible workspace root attachment paths are resolved against,
+ *   matching how the live prompt path in agent.ts builds `${workspacePath}/${attachment.local}`
+ * @param attachmentsTagName - Transport's attachment tag (e.g. "slack_attachments"), so a
+ *   replayed message's attachments are wrapped the same way a live one's are
  * @param excludeSlackTs - Slack timestamp of current message (will be added via prompt(), not sync)
  * @param sinceDate - ISO timestamp watermark (see readResetWatermark); log.jsonl entries at or
  *   before it are skipped so a `/reset`/`/clear` isn't immediately undone by replaying the
@@ -45,6 +54,8 @@ interface LogMessage {
 export function syncLogToSessionManager(
 	sessionManager: SessionManager,
 	channelDir: string,
+	workspacePath: string,
+	attachmentsTagName: string,
 	excludeSlackTs?: string,
 	sinceDate?: string,
 ): number {
@@ -64,8 +75,9 @@ export function syncLogToSessionManager(
 					// Strip timestamp prefix for comparison (live messages have it, synced don't)
 					// Format: [YYYY-MM-DD HH:MM:SS+HH:MM] [username]: text
 					let normalized = content.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
-					// Strip attachments section
-					const attachmentsIdx = normalized.indexOf("\n\n<slack_attachments>\n");
+					// Strip attachments section — tag name is transport-specific
+					// ("slack_attachments" / "telegram_attachments" / "web_attachments")
+					const attachmentsIdx = normalized.indexOf(`\n\n<${attachmentsTagName}>\n`);
 					if (attachmentsIdx !== -1) {
 						normalized = normalized.substring(0, attachmentsIdx);
 					}
@@ -81,7 +93,7 @@ export function syncLogToSessionManager(
 						) {
 							let normalized = (part as { type: "text"; text: string }).text;
 							normalized = normalized.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
-							const attachmentsIdx = normalized.indexOf("\n\n<slack_attachments>\n");
+							const attachmentsIdx = normalized.indexOf(`\n\n<${attachmentsTagName}>\n`);
 							if (attachmentsIdx !== -1) {
 								normalized = normalized.substring(0, attachmentsIdx);
 							}
@@ -118,7 +130,14 @@ export function syncLogToSessionManager(
 			if (logMsg.isBot) continue;
 
 			// Build the message text as it would appear in context
-			const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
+			let messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
+			if (logMsg.attachments && logMsg.attachments.length > 0) {
+				const paths = logMsg.attachments.map((a) => {
+					const fullPath = `${workspacePath}/${a.local}`;
+					return existsSync(fullPath) ? fullPath : `${fullPath} (not available)`;
+				});
+				messageText += `\n\n<${attachmentsTagName}>\n${paths.join("\n")}\n</${attachmentsTagName}>`;
+			}
 
 			// Skip if this exact message text is already in context
 			if (existingMessages.has(messageText)) continue;
