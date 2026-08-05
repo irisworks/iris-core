@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The per-channel `Agent` is now constructed with `sessionId: channelId`.
+  `pi-ai` forwards `sessionId` to providers that key caching/routing off it —
+  `openai-responses`'s `prompt_cache_key` and Mistral's native `x-affinity`
+  header — neither of which Iris was previously setting, since nothing ever
+  populated `sessionId`. Anthropic and Bedrock are unaffected: they cache off
+  `cache_control` breakpoints, not a session id.
+
 ## [1.2.0] - 2026-08-05
 
 Streaming bridge replies, Langfuse observability, deterministic `@agentname`
