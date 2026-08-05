@@ -91,6 +91,15 @@
 
 ### Fixed
 
+- Startup no longer re-dispatches stale interrupted runs. `resumeInterruptedRuns()`
+  treated any last user message followed only by placeholders as an interrupted run,
+  so a service that had been down for hours — or an agent that legitimately finished
+  with `[SILENT]`, leaving only placeholders — caused hours-old requests to be acted
+  on at restart. Re-dispatch is now capped by
+  `IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS` (default `4`); stale placeholders are still
+  deleted from the channel, only the LLM run is suppressed. Ported from
+  `30Signals/iris-core@c3a3e7c`. See `docs/configuration.md`.
+
 - Sub-agent bridge replies are no longer silently lost (#128). The engine now
   resolves any still-pending bridge request after a run — from the run's own
   output or an explicit `(run failed: …)` — instead of leaving the caller to time
