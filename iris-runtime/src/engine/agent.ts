@@ -611,6 +611,11 @@ function createRunner(
 		},
 		convertToLlm,
 		getApiKey,
+		// Forwarded to providers that key caching/routing off it (openai-responses'
+		// prompt_cache_key, mistral's x-affinity). Anthropic/Bedrock ignore it — they
+		// cache off cache_control breakpoints instead. Channel id is a stable,
+		// natural session boundary since each channel gets its own runner/history.
+		sessionId: channelId,
 	});
 
 	// Load existing messages

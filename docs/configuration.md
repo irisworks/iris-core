@@ -120,3 +120,13 @@ Two mechanisms keep long-running channels healthy:
   `IRIS_COMPACT_THRESHOLD` of the model window, Iris summarises older history down
   toward `IRIS_COMPACT_TARGET` (up to 3 passes). A post-run check at ≥70% real
   usage acts as a backstop.
+
+## Prompt caching
+
+Iris's per-channel `Agent` is constructed with `sessionId` set to the channel
+id. Anthropic and Bedrock ignore it — they cache off explicit `cache_control`
+breakpoints — but `pi-ai`'s `openai-responses` provider forwards it as
+`prompt_cache_key`, and Mistral's native provider uses it for the
+`x-affinity` header (KV-cache prefix affinity). Channel id is a stable,
+natural session boundary since each channel already gets its own long-lived
+runner and message history.
