@@ -19,6 +19,7 @@ permissions:
 
 jobs:
   analyze:
+    if: github.repository == 'irisworks/iris-core'
     runs-on: ubuntu-latest
     permissions:
       security-events: write

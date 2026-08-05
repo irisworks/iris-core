@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-05
+
+Streaming bridge replies, Langfuse observability, deterministic `@agentname`
+routing, and a much simpler `spawn-agent` default. First release on the
+`engine/` + `transports/` + `broker/` layout to also ship the credential broker
+and MCP support as documented profiles.
+
 ### Added
 
 - Streaming bridge replies with progress passthrough (#128). A sub-agent request
@@ -113,6 +120,15 @@
   `supportsImageInput`, derived from `model.input` at runner construction
   (moved earlier in `agent.ts` so tools are built after the model is known).
 
+- Startup no longer re-dispatches stale interrupted runs. `resumeInterruptedRuns()`
+  treated any last user message followed only by placeholders as an interrupted run,
+  so a service that had been down for hours — or an agent that legitimately finished
+  with `[SILENT]`, leaving only placeholders — caused hours-old requests to be acted
+  on at restart. Re-dispatch is now capped by
+  `IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS` (default `4`); stale placeholders are still
+  deleted from the channel, only the LLM run is suppressed. Ported from
+  `30Signals/iris-core@c3a3e7c`. See `docs/configuration.md`.
+
 - Sub-agent bridge replies are no longer silently lost (#128). The engine now
   resolves any still-pending bridge request after a run — from the run's own
   output or an explicit `(run failed: …)` — instead of leaving the caller to time
@@ -199,6 +215,35 @@
 - `search-web`'s error handler (`skills/search-web/search.sh`) unconditionally blamed Azure Key Vault ("not found in Key Vault", "Set it with: az keyvault secret set...") whenever `get-secret PERPLEXITY-API-KEY` failed, regardless of which secrets backend (env, store, broker) actually resolved it — on the zero-cloud default (`env` mode, no `IRIS_KEY_VAULT`), Key Vault was never even tried, so the message sent operators debugging the wrong system. It also masked the actual common cause: `.env` is only read once at `iris-runtime` process startup (`dotenv/config`), so adding a key to `/iris/.env` after the service is already running — including via the agent's own shell/file tools, since `set-secret`/`PUT /secrets/:name` has no writable backend in `env` mode — has no effect until `iris.service` is restarted. Error message now points at `set-secret` and the `.env`-requires-restart gap instead of assuming Key Vault; `docs/secrets.md` documents the restart requirement.
 - `bootstrap.sh`'s "Add GitHub token for repo access?" prompt defaulted to Yes (`confirm` with no explicit default arg falls back to `y`) while every other optional integration (Slack aside, which is a core transport) — Resend, and now Perplexity — defaults to No. A GitHub PAT isn't needed for a basic install (it's only for Iris's self-extension/PR features), so accepting the default at an unattended or fast-clicked `--setup` run opted users into a flow they likely didn't intend. Now defaults to No, matching the rest of the optional-integration prompts.
 - An invalid or revoked `TELEGRAM_BOT_TOKEN` (or no network path to `api.telegram.org`) crashed the entire `iris` process: `TelegramBot.start()` throws from its `getMe` call, and `main.ts` awaited it unguarded, so Slack, the bridge, and the web UI died alongside Telegram even though they were fine. `start()` is now wrapped in try/catch — the failure is logged clearly (`[telegram] Failed to start Telegram transport; Telegram disabled.` plus the underlying error), the broken transport is dropped from the registry so `routeEvent` stops dispatching to it, and the process continues with whatever other transports are configured (#90). The claim/QR flow and the `SIGINT`/`SIGTERM` `tgBot.stop()` handlers are skipped (nothing to stop). A token that's simply absent still prints the existing "Telegram token not set — Telegram transport disabled" message. Complements the `[1.1.0]` bootstrap-side fix that verifies the token live via `getMe` at install time — this is the runtime-side resilience for tokens that go bad later (revoked, rotated, network partition).
+
+### UPGRADING
+
+- **Workspace metadata moved from `<workspace>/data/` to `<workspace>/meta/`.**
+  This holds `sessions.json`, `mcp.json`, `channels.json`, and
+  `telegram-owner.json`. `main.ts` migrates an existing `data/` to `meta/`
+  automatically at startup when `meta/` doesn't already exist, so no manual step
+  is needed — but the migration only runs once, and anything that references
+  `<workspace>/data/channels.json` by absolute path (your own scripts, a
+  sub-agent's mount, a systemd unit) must be repointed at `meta/`.
+- **Verbose tool-call and thinking output is now off by default.** A run shows a
+  single status line that updates in place instead of posting every tool call and
+  thinking chunk. Restore the old behaviour globally with `IRIS_VERBOSE_TOOLS=1`,
+  or per channel at runtime with `verbose on` (Slack) / `/verbose on` (Telegram).
+- **`spawn-agent`'s default path no longer uses Terraform or Docker.** It now
+  provisions a plain systemd service and registers it on the bridge. Pass
+  `--mode=docker` for the previous container path. Existing agents are unaffected.
+- **Interrupted runs older than 4 hours are no longer re-dispatched at startup.**
+  Previously any last user message followed only by placeholders was replayed on
+  restart regardless of age, so a long outage would act on stale requests. Tune
+  or disable with `IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS` (default `4`; set it very
+  high to always resume). Stale placeholders are still cleaned up either way.
+- **`skills/serve-public/serve-public.sh` was removed** — it was a byte-identical,
+  unreferenced duplicate of `serve-public/serve-public`. Anything invoking the
+  `.sh` name should call `serve-public` instead.
+- **Re-run `bootstrap.sh` to pick up new `PATH` symlinks.** `schedule`,
+  `self-heal`, `send-email`, `serve-public`, `status`, `search-web`, and
+  `transcribe-audio` are now symlinked into `/usr/local/bin`; without a re-run,
+  their documented bare-command form still costs a failed call per invocation.
 
 ## [1.1.0] - 2026-07-22
 

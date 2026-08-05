@@ -1357,6 +1357,20 @@ export class SlackBot implements ChannelTransport {
 				}
 			}
 
+			// Don't re-dispatch a message that has gone stale. The agent may have
+			// legitimately finished with [SILENT] (leaving only placeholders behind), or the
+			// service may have been down for hours — either way, acting on an hours-old
+			// request at startup surprises the operator. Placeholders are still cleaned up
+			// above; only the LLM run is suppressed.
+			const maxAgeHours = Number(process.env.IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS) || 4;
+			const ageMs = Date.now() - parseFloat(userEntry.ts) * 1000;
+			if (Number.isFinite(ageMs) && ageMs > maxAgeHours * 60 * 60 * 1000) {
+				log.logInfo(
+					`[${channelId}] Skipping stale interrupted run (${Math.round(ageMs / 3600000)}h old, limit ${maxAgeHours}h)`,
+				);
+				continue;
+			}
+
 			// Re-dispatch as a DM (all Iris-monitored DMs are DMs or mentions — use same type)
 			const slackEvent: SlackEvent = {
 				type: "dm",

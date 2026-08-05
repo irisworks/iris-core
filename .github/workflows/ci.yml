@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   gitleaks:
+    if: github.repository == 'irisworks/iris-core'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +22,7 @@ jobs:
           ./gitleaks git --no-banner --redact .
 
   build:
+    if: github.repository == 'irisworks/iris-core'
     runs-on: ubuntu-latest
     defaults:
       run:
