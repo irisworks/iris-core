@@ -35,11 +35,16 @@ interface ReadToolDetails {
 	truncation?: TruncationResult;
 }
 
-export function createReadTool(executor: Executor): AgentTool<typeof readSchema> {
+export interface ReadToolOptions {
+	/** Whether the active model's provider accepts image input. */
+	supportsImageInput: boolean;
+}
+
+export function createReadTool(executor: Executor, options: ReadToolOptions): AgentTool<typeof readSchema> {
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
+		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp)${options.supportsImageInput ? "" : " — NOTE: the active model does not accept image input, so images will be reported as unreadable"}. Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
 		parameters: readSchema,
 		execute: async (
 			_toolCallId: string,
@@ -49,6 +54,22 @@ export function createReadTool(executor: Executor): AgentTool<typeof readSchema>
 			const mimeType = isImageFile(path);
 
 			if (mimeType) {
+				if (!options.supportsImageInput) {
+					// Don't return an ImageContent block — pi-ai's provider layer filters
+					// it out based on model.input before the request goes out, and the
+					// model would otherwise see this as a successful read and confabulate
+					// the image's contents.
+					return {
+						content: [
+							{
+								type: "text",
+								text: `[${path}] is a ${mimeType} image, but the active model does not accept image input. Its contents cannot be read this way.`,
+							},
+						],
+						details: undefined,
+					};
+				}
+
 				// Read as image (binary) - use base64
 				const result = await executor.exec(`base64 < ${shellEscape(path)}`, { signal });
 				if (result.code !== 0) {

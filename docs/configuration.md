@@ -58,6 +58,18 @@ For Azure AI Foundry (`azure-foundry`), bootstrap asks for the **bare account
 name** (e.g. `my-account-eastus2`), not the full endpoint URL. Pasted URLs or
 hostnames are trimmed automatically, and the generated `baseUrl` is validated —
 bootstrap aborts on a malformed hostname and warns if it doesn't resolve in DNS.
+Its `Kimi-K2.5` / `Kimi-K2.6` entries declare `"input": ["text", "image"]` —
+both are natively multimodal.
+
+Each model entry's `"input"` array is a capability declaration, not a hint:
+`pi-ai` strips image content out of the request for any model that doesn't
+list `"image"`, silently on the wire. Iris now catches this at her end too —
+an image attachment sent to a text-only model is diverted into a
+`<dropped_image_attachments>` note in the prompt (and a logged warning)
+instead of being sent and vanishing, and the `read` tool reports the same
+file as unreadable rather than claiming success. If a model here does accept
+images but a Slack/Telegram photo isn't getting through, check `"input"` for
+that model id first.
 
 DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
 API key — both go through `pi-ai`'s `openai-completions` provider module,
