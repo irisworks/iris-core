@@ -27,15 +27,25 @@
 #     bash bootstrap.sh --setup --keyvault --firecracker      # Azure Key Vault + microVMs
 #     bash bootstrap.sh --setup --firecracker --pool          # dynamic pool (fresh VM per channel)
 #
+#   Let the agent's spawn-agent skill talk to the local Docker daemon
+#   (root-equivalent — see the flag's warning below when it's passed):
+#     bash bootstrap.sh --setup --no-keyvault --allow-docker
+#
 # All config can be passed via env vars to skip prompts.
 # ============================================================
 set -euo pipefail
 
 IRIS_DIR="/iris"
 # The real operating user, even when this script is invoked via `sudo bash bootstrap.sh`
-# (plain $USER gets reset to "root" by sudo in that case, which would leave iris.service
-# and /iris file ownership pointed at root instead of the actual VM user).
+# (plain $USER gets reset to "root" by sudo in that case, which would leave file
+# ownership during setup pointed at root instead of the actual VM user).
 TARGET_USER="${SUDO_USER:-$(id -un)}"
+# iris.service (and everything the agent's bash tool runs) executes as this
+# dedicated, unprivileged system user — not $TARGET_USER, which on stock cloud
+# images has passwordless sudo plus docker/lxd group membership (each
+# independently root-equivalent). A prompt injection against the agent should
+# land on a confined uid, not on root three different ways. See issue #130.
+RUNTIME_USER="iris"
 REPO_URL="${REPO_URL:-}"
 IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}"
 KV_NAME="${KV_NAME:-}"
@@ -45,6 +55,7 @@ SETUP_MODE=false
 NO_KEYVAULT=false
 KEYVAULT_EXPLICIT=false   # true when --keyvault or --no-keyvault was passed
 FIRECRACKER_MODE=false
+ALLOW_DOCKER="${ALLOW_DOCKER:-false}"
 SA_NAME="${SA_NAME:-}"
 FIRECRACKER_SANDBOX="${FIRECRACKER_SANDBOX:-static}"
 SANDBOX_FLAG=""
@@ -53,7 +64,7 @@ FC_GUEST_IP="172.20.1.2"
 IRIS_PROVIDER="${IRIS_PROVIDER:-}"
 IRIS_MODEL="${IRIS_MODEL:-}"
 IRIS_ENV="${IRIS_ENV:-prod}"
-SECRETS_MODE="${IRIS_SECRETS_MODE:-env}"   # env | store | proxy (see docs/secrets.md)
+SECRETS_MODE="${IRIS_SECRETS_MODE:-store}"   # store (default) | proxy | env — legacy/opt-out (see docs/secrets.md)
 IRIS_BROKER_PORT="${IRIS_BROKER_PORT:-9099}"
 IRIS_BASE_DOMAIN="${IRIS_BASE_DOMAIN:-}"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
@@ -115,6 +126,7 @@ for arg in "$@"; do
     --firecracker)  FIRECRACKER_MODE=true ;;
     --pool)         FIRECRACKER_SANDBOX="pool" ;;
     --static)       FIRECRACKER_SANDBOX="static" ;;
+    --allow-docker) ALLOW_DOCKER=true ;;
     --secrets-mode=*) SECRETS_MODE="${arg#--secrets-mode=}" ;;
     *) die "Unknown argument: $arg" ;;
   esac
@@ -182,7 +194,12 @@ sudo apt-get update -qq
 if ! command -v docker &>/dev/null; then
   log "Installing Docker..."
   curl -fsSL https://get.docker.com | sudo bash
-  sudo usermod -aG docker "$TARGET_USER"
+  # $TARGET_USER is deliberately NOT added to the docker group here — on stock
+  # cloud images docker group membership is root-equivalent (docker run -v
+  # /:/host), and $TARGET_USER already builds/administers via passwordless
+  # sudo, so docker_cmd()'s `sudo docker` fallback below covers bootstrap's
+  # own needs (e.g. the Firecracker rootfs build). The agent's own uid only
+  # gets docker access via --allow-docker (see "Dedicated runtime user" below).
 fi
 
 # Azure CLI only needed when using Key Vault
@@ -228,6 +245,75 @@ if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versi
   log "Installing Node.js 22..."
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
+fi
+
+# ────────────────────────────────────────────────────────────
+# 1a. Dedicated runtime user + metadata-endpoint lockdown
+#
+# iris.service runs as $RUNTIME_USER, not $TARGET_USER: no sudo, no docker/lxd
+# group membership. A prompt injection against the agent's bash tool lands on
+# this confined uid instead of root. See issue #130.
+# ────────────────────────────────────────────────────────────
+log_h "Dedicated runtime user ($RUNTIME_USER)"
+
+if ! id "$RUNTIME_USER" &>/dev/null; then
+  sudo useradd --system --no-create-home --home-dir "$IRIS_DIR" \
+    --shell /usr/sbin/nologin "$RUNTIME_USER"
+  log "✓ created system user $RUNTIME_USER (no sudo, no docker/lxd)"
+fi
+
+if [[ "$ALLOW_DOCKER" == true ]]; then
+  sudo usermod -aG docker "$RUNTIME_USER"
+  log "⚠ $RUNTIME_USER added to the docker group (--allow-docker) — this is"
+  log "  root-equivalent (docker run -v /:/host). Only pass this flag if"
+  log "  spawn-agent's Docker sub-agents are actually in use."
+else
+  log "$RUNTIME_USER has no docker group membership (pass --allow-docker to enable spawn-agent's Docker path)"
+fi
+
+# Block the cloud-provider metadata endpoint (169.254.169.254 — Azure/AWS/GCP
+# all serve managed-identity credentials there) for the runtime uid only. Root
+# and $TARGET_USER (az/aws/gcloud CLIs, cloud-init, this script) are
+# unaffected; only the agent's bash tool loses the ability to trade its
+# confined uid for a cloud credential via IMDS.
+if ! command -v nft &>/dev/null; then
+  log "Installing nftables..."
+  sudo apt-get install -y nftables
+fi
+if command -v nft &>/dev/null; then
+  sudo tee /etc/nftables-iris-imds-block.conf > /dev/null << NFT
+table inet iris_imds_block {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    meta skuid ${RUNTIME_USER} ip daddr 169.254.169.254 drop
+    meta skuid ${RUNTIME_USER} ip6 daddr fd00:ec2::254 drop
+  }
+}
+NFT
+  sudo tee /etc/systemd/system/iris-imds-block.service > /dev/null << UNIT
+[Unit]
+Description=Block cloud metadata endpoint for the ${RUNTIME_USER} uid
+After=network.target
+Before=iris.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables-iris-imds-block.conf
+ExecStop=/usr/sbin/nft delete table inet iris_imds_block
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable iris-imds-block
+  if sudo systemctl restart iris-imds-block; then
+    log "✓ 169.254.169.254 blocked for uid $RUNTIME_USER"
+  else
+    log "⚠ Warning: could not apply the IMDS nftables rule — check 'sudo systemctl status iris-imds-block'"
+  fi
+else
+  log "⚠ Warning: nftables unavailable — the cloud metadata endpoint is NOT blocked for $RUNTIME_USER"
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -1099,6 +1185,32 @@ NGINX
   sudo rm -f /etc/nginx/sites-enabled/default
   sudo nginx -t 2>/dev/null && sudo systemctl reload nginx
   log "nginx ready"
+
+  # skills/serve-public is the one skill $RUNTIME_USER needs elevation for
+  # (it writes an nginx vhost and requests a cert for whatever FQDN the agent
+  # is asked to expose). Narrow, explicit-path grant — no blanket sudo.
+  TEE_BIN="$(command -v tee)"
+  LN_BIN="$(command -v ln)"
+  NGINX_BIN="$(command -v nginx)"
+  SYSTEMCTL_BIN="$(command -v systemctl)"
+  CERTBOT_BIN="$(command -v certbot)"
+  sudo tee /etc/sudoers.d/iris-serve-public > /dev/null << SUDOERS
+# Narrow elevation for skills/serve-public (issue #130) — $RUNTIME_USER has no
+# other sudo access. Regenerated by bootstrap.sh on every run where
+# IRIS_BASE_DOMAIN is set; do not hand-edit.
+${RUNTIME_USER} ALL=(root) NOPASSWD: ${TEE_BIN} /etc/nginx/sites-available/*
+${RUNTIME_USER} ALL=(root) NOPASSWD: ${LN_BIN} -sfn /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
+${RUNTIME_USER} ALL=(root) NOPASSWD: ${NGINX_BIN} -t
+${RUNTIME_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL_BIN} reload nginx
+${RUNTIME_USER} ALL=(root) NOPASSWD: ${CERTBOT_BIN} --nginx -d * --non-interactive --agree-tos -m * --redirect
+SUDOERS
+  sudo chmod 440 /etc/sudoers.d/iris-serve-public
+  if sudo visudo -cf /etc/sudoers.d/iris-serve-public &>/dev/null; then
+    log "✓ narrow sudoers grant installed for $RUNTIME_USER (serve-public only)"
+  else
+    sudo rm -f /etc/sudoers.d/iris-serve-public
+    log "⚠ Warning: generated sudoers file failed validation — removed. serve-public will not work as $RUNTIME_USER until this is fixed."
+  fi
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -1245,9 +1357,17 @@ elif [[ -f "$REPO_DIR/data/models.json.template" ]]; then
   log "Warning: using models.json.template — edit $IRIS_DIR/data/models.json to configure your provider"
 fi
 
+# $IRIS_DIR/data is the runtime's mutable working set (memory, events, skill
+# state) — hand it to $RUNTIME_USER now. $REPO_DIR (source, node_modules,
+# terraform/) stays owned by $TARGET_USER; it only needs to be *readable* by
+# $RUNTIME_USER, which the world-readable chmod after the build step below
+# grants without disturbing $TARGET_USER's unprivileged git/npm/terraform ops.
+sudo chown -R "${RUNTIME_USER}:${RUNTIME_USER}" "$IRIS_DIR/data"
+
 # Secrets-mode tokens: preserved across re-runs (read back from the existing
-# .env), generated once otherwise. Env mode gets neither — default installs
-# keep today's loopback-trust behavior byte for byte.
+# .env), generated once otherwise. Legacy env mode gets neither — installs
+# that opt out via --secrets-mode=env keep the old loopback-trust behavior
+# byte for byte.
 IRIS_API_TOKEN="${IRIS_API_TOKEN:-}"
 BROKER_TOKEN="${BROKER_TOKEN:-}"
 if [[ "$SECRETS_MODE" != "env" ]]; then
@@ -1313,14 +1433,14 @@ e() { printf '%s' "${1:-}" | tr -d '\n\r'; }  # strip newlines from a value
     echo "IRIS_API_TOKEN=$(e "$IRIS_API_TOKEN")"
   fi
 } | sudo tee "$IRIS_DIR/.env" > /dev/null
-# sudo tee creates the file as root; iris.service runs as User=$TARGET_USER
+# sudo tee creates the file as root; iris.service runs as User=$RUNTIME_USER
 # and reads this file itself via dotenv/config at process startup (there's no
 # systemd EnvironmentFile= — the unit never touches it, so ownership matters).
 # Without this chown, iris.service can't read its own config: dotenv silently
 # loads nothing, every var falls back to hardcoded defaults, and anything
 # resolved through the broker (IRIS_SECRET_BROKER_URL) or Telegram/Slack
 # breaks with no obvious error tying it back to a permissions problem.
-sudo chown "$TARGET_USER:$TARGET_USER" "$IRIS_DIR/.env"
+sudo chown "$RUNTIME_USER:$RUNTIME_USER" "$IRIS_DIR/.env"
 sudo chmod 600 "$IRIS_DIR/.env"
 log "✓ /iris/.env written"
 
@@ -1334,9 +1454,19 @@ npm install --prefer-offline 2>&1 | tail -3
 npm run build 2>&1 | tail -5
 cd - > /dev/null
 
+# $REPO_DIR stays owned by $TARGET_USER (so re-runs can keep using
+# unprivileged `git pull`/`npm`/`terraform`), but $RUNTIME_USER's process
+# tree — iris.service, and every skill/sub-agent tool it execs from
+# $REPO_DIR/skills and $REPO_DIR/iris-runtime/dist — needs to read and
+# traverse it. `o+rX` grants read (and execute, only where already
+# executable) to every unprivileged user, which is fine here: source code
+# isn't secret, and secrets live under $IRIS_DIR/data, .env, secret.key with
+# their own tighter, $RUNTIME_USER-only permissions.
+sudo chmod -R o+rX "$REPO_DIR"
+
 # ────────────────────────────────────────────────────────────
 # 9b. Secrets mode (store / proxy) — encrypted store, broker daemon, CLI,
-#     .env migration. Skipped entirely in env mode (the default).
+#     .env migration. Skipped only in legacy env mode.
 #     See docs/secrets.md.
 # ────────────────────────────────────────────────────────────
 if [[ "$SECRETS_MODE" != "env" ]]; then
@@ -1357,7 +1487,7 @@ WRAPPER
     # uid boundary (docs/secrets.md threat model).
     if [[ ! -f "$IRIS_DIR/secret.key" ]]; then
       openssl rand -hex 32 | sudo tee "$IRIS_DIR/secret.key" > /dev/null
-      sudo chown "$TARGET_USER" "$IRIS_DIR/secret.key"
+      sudo chown "$RUNTIME_USER" "$IRIS_DIR/secret.key"
       sudo chmod 600 "$IRIS_DIR/secret.key"
       log "✓ generated $IRIS_DIR/secret.key"
     fi
@@ -1424,10 +1554,13 @@ UNIT
   # prune rewrites .env without those lines). The runtime resolves them via
   # the store/broker from here on.
   sudo /usr/local/bin/iris-secret import-env "$IRIS_DIR/.env" --prune
+  # import-env ran as root, which rewrites .env owned by root — hand it back
+  # to $RUNTIME_USER, which reads it at process startup.
+  sudo chown "$RUNTIME_USER:$RUNTIME_USER" "$IRIS_DIR/.env"
   sudo chmod 600 "$IRIS_DIR/.env"
   if [[ "$SECRETS_MODE" == "store" && -f "$IRIS_DIR/secrets.json.enc" ]]; then
-    # import-env ran as root; the runtime (TARGET_USER) owns the store file.
-    sudo chown "$TARGET_USER" "$IRIS_DIR/secrets.json.enc"
+    # import-env ran as root; the runtime ($RUNTIME_USER) owns the store file.
+    sudo chown "$RUNTIME_USER" "$IRIS_DIR/secrets.json.enc"
     sudo chmod 600 "$IRIS_DIR/secrets.json.enc"
   fi
   log "✓ secret migration complete"
@@ -1440,10 +1573,22 @@ log_h "Installing systemd service"
 NODE_BIN="$(which node)"
 IRIS_RUNTIME_BIN="$REPO_DIR/iris-runtime/dist/main.js"
 DOTENV_CONFIG="$RUNTIME_DIR/node_modules/dotenv/config"
+# Percentages of host resources, not fixed values — scales with the VM's
+# actual size. Override via IRIS_SERVICE_MEMORY_MAX / IRIS_SERVICE_TASKS_MAX
+# if the default is too tight for a given install.
+IRIS_SERVICE_MEMORY_MAX="${IRIS_SERVICE_MEMORY_MAX:-80%}"
+IRIS_SERVICE_TASKS_MAX="${IRIS_SERVICE_TASKS_MAX:-4096}"
 
 # Remove any drop-in overrides that may have been created by previous sessions
 # (e.g. switching sandbox to firecracker-pool without Firecracker installed)
 sudo rm -rf /etc/systemd/system/iris.service.d
+
+# Pre-create the log file owned by $RUNTIME_USER — StandardOutput=append:
+# opens it as the unit's configured User, but a stale file from a previous
+# run (back when the service ran as $TARGET_USER) would otherwise block
+# $RUNTIME_USER from appending to it.
+sudo touch "$IRIS_DIR/iris-runtime.log"
+sudo chown "$RUNTIME_USER:$RUNTIME_USER" "$IRIS_DIR/iris-runtime.log"
 
 sudo tee /etc/systemd/system/iris.service > /dev/null << UNIT
 [Unit]
@@ -1453,7 +1598,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${TARGET_USER}
+User=${RUNTIME_USER}
 WorkingDirectory=${IRIS_DIR}
 ExecStart=${NODE_BIN} --require ${DOTENV_CONFIG} ${IRIS_RUNTIME_BIN} --sandbox=host ${IRIS_DIR}/data
 Restart=always
@@ -1461,6 +1606,28 @@ RestartSec=10
 StandardOutput=append:${IRIS_DIR}/iris-runtime.log
 StandardError=append:${IRIS_DIR}/iris-runtime.log
 SyslogIdentifier=iris
+
+# Confinement (issue #130) — mirrors and extends iris-broker.service below.
+# Not MemoryDenyWriteExecute: it breaks the V8 JIT.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=${IRIS_DIR}
+ProtectHome=yes
+PrivateTmp=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+UMask=0077
+MemoryMax=${IRIS_SERVICE_MEMORY_MAX}
+TasksMax=${IRIS_SERVICE_TASKS_MAX}
 
 [Install]
 WantedBy=multi-user.target
@@ -1778,7 +1945,7 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   elif [[ ! -r "$CLAIM_FILE" ]]; then
     log ""
     log "  ⚠ Could not read $CLAIM_FILE after 30s — either Telegram never connected, or"
-    log "    iris.service (User=${TARGET_USER}) can't read its own /iris/.env (dotenv fails"
+    log "    iris.service (User=${RUNTIME_USER}) can't read its own /iris/.env (dotenv fails"
     log "    silently, so every setting falls back to hardcoded defaults, including a"
     log "    disabled Telegram transport)."
     log "    Check both with: ls -la ${IRIS_DIR}/.env ${IRIS_DIR}/data/meta/ && sudo journalctl -u iris -n 30"

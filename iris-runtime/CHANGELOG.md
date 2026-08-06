@@ -11,6 +11,21 @@ and MCP support as documented profiles.
 
 ### Added
 
+- Hardened the default `bootstrap.sh` install path (#130). `iris.service` now
+  runs as a dedicated unprivileged `iris` system user instead of the
+  operator's own account (no sudo, no docker/lxd group by default — the
+  latter is now opt-in via `--allow-docker`); `serve-public` gets a narrow
+  `/etc/sudoers.d` grant instead of blanket sudo. `iris.service` carries
+  systemd sandboxing (`ProtectSystem=strict`, `NoNewPrivileges`,
+  `CapabilityBoundingSet=`, `SystemCallFilter=@system-service`, etc.). The
+  cloud metadata endpoint (`169.254.169.254`) is now blocked for the `iris`
+  uid via nftables. `IRIS_SECRETS_MODE` now defaults to `store`
+  (encrypted local file) instead of `env`; existing installs keep their
+  current mode until they're next re-run without an explicit
+  `--secrets-mode`, at which point they migrate automatically (pass
+  `--secrets-mode=env` on that re-run to opt back out). See `SECURITY.md`
+  and `docs/secrets.md`.
+
 - Streaming bridge replies with progress passthrough (#128). A sub-agent request
   sent with `Accept: application/x-ndjson` gets a chunked NDJSON stream —
   `accepted`, `status`, and `heartbeat` lines, then one terminal `final`/`error`

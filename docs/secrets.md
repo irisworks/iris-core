@@ -5,12 +5,14 @@ description: The opt-in credential broker — encrypted store, injection proxy, 
 
 # Secrets
 
-By default (`IRIS_SECRETS_MODE=env`), Iris reads credentials from `/iris/.env`
-exactly as every release before this one — nothing on this page applies until
-you opt in. The two opt-in modes exist because the default has a sharp edge:
-everything in `.env` is loaded into the runtime's environment, agent shell
-commands inherit that environment, and a single `env` or `cat /iris/.env` in a
-tool call can leak every credential into the conversation.
+By default (`IRIS_SECRETS_MODE=store`), Iris keeps credentials in an
+encrypted local store instead of the process environment. `env` mode —
+Iris reads credentials straight from `/iris/.env`, as every release before
+this one did — still exists as a legacy/opt-out for installs that need it
+(`--secrets-mode=env`), but is no longer the default: everything in `.env` is
+loaded into the runtime's environment, agent shell commands inherit that
+environment, and a single `env` or `cat /iris/.env` in a tool call can leak
+every credential into the conversation.
 
 `.env` is only read once, at process startup (`dotenv/config`, plus whatever
 systemd exported at spawn). Editing the file after the fact — whether by hand
@@ -23,17 +25,18 @@ direct file write, not through the secrets API. `store`/`proxy` mode doesn't
 have this restart gap: the encrypted store file is re-read on every lookup,
 so secrets added there apply immediately.
 
-Pick a mode at bootstrap (`bootstrap.sh --secrets-mode=store` or
-`--secrets-mode=proxy`) or set `IRIS_SECRETS_MODE` in `/iris/.env` and follow
+`store` is the default for both `bootstrap.sh --setup` and re-runs; pick a
+different mode with `bootstrap.sh --secrets-mode=proxy` or
+`--secrets-mode=env`, or set `IRIS_SECRETS_MODE` in `/iris/.env` and follow
 the migration section below.
 
 ## What each mode protects against
 
 | Mode | Protects against |
 |---|---|
-| `env` (default) | Nothing new — status quo. |
-| `store` | Accidental leakage: `env` dumps, `cat /iris/.env`, sub-agent `--env-file` inheritance, plaintext store backups. The agent shares a uid with the runtime, so it can still read the key file; `get-secret` still returns plaintext. |
+| `store` (default) | Accidental leakage: `env` dumps, `cat /iris/.env`, sub-agent `--env-file` inheritance, plaintext store backups. The agent shares a uid with the runtime, so it can still read the key file; `get-secret` still returns plaintext. |
 | `proxy` | All of the above, **plus**: key/store files are owned by a dedicated `iris-broker` user the agent cannot read as, and secrets marked *proxy-only* can never be read in plaintext by anyone — only exercised through the injection gateway. |
+| `env` (legacy/opt-out) | Nothing new — the pre-#130 status quo. Every secret sits in `/iris/.env` and the runtime's process environment. |
 
 Honest limits: in `store` mode encryption-at-rest mainly stops *accidental*
 leaks, not a deliberately malicious agent on the same uid. `proxy` mode adds a
@@ -126,6 +129,13 @@ bare-command form documented above and used by skills works directly — no need
 to invoke them through a skill's absolute path.
 
 ## Migration from `.env`
+
+Installs that already exist keep whatever mode they were bootstrapped with —
+the default only changed for `bootstrap.sh --setup` and bare re-runs. An
+existing `env`-mode install stays on `env` until it's next re-run with
+`bootstrap.sh` (no explicit `--secrets-mode`), at which point it picks up the
+new `store` default and migrates automatically; pass `--secrets-mode=env`
+on that re-run to opt back out.
 
 Re-running `bootstrap.sh --secrets-mode=<mode>` does everything: generates the
 key (and, for proxy, the `iris-broker` user + `iris-broker.service` systemd
