@@ -21,11 +21,30 @@ description: Version scheme, changelog rules, and the install upgrade procedure.
 - Features ported from install forks cite the source repo and commit SHA.
 - Breaking changes (renamed env vars, config schema, data-dir layout) get an `UPGRADING` note in the release entry.
 
+## Signing key
+
+Release tags are GPG-signed. `install.sh` verifies them by fetching the
+maintainer's public key from `https://github.com/<user>.gpg` — GitHub's
+built-in endpoint for a user's published GPG keys — so there is no key file
+to keep in sync in this repo. See [`docs/SETUP.md`](SETUP.md#release-tag-verification)
+for how installs consume this.
+
+- **Maintainer:** `katrohit`
+- **Fingerprint:** _publish here once the signing key is generated and added
+  to the maintainer's GitHub account (Settings → SSH and GPG keys)._
+
+Update the fingerprint above whenever the signing key rotates, and call it
+out in the release's CHANGELOG entry so installs pinning
+`IRIS_CORE_SIGNING_FINGERPRINT` know to update.
+
 ## Cutting a release
 
 1. Ensure CI is green on `main` (build + smoke).
 2. Bump `iris-runtime/package.json` version; finalize CHANGELOG entry.
-3. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. `git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` — the `-s` signs
+   the tag with the key listed under [Signing key](#signing-key). Don't drop
+   the `-s`: `install.sh` treats any `v*` tag as a release and aborts if it
+   isn't signed by the published key.
 
 ## Upgrading an install (submodule consumers)
 
