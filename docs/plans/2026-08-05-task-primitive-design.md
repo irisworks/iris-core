@@ -1,3 +1,8 @@
+---
+title: "Design: task — an optional in-process, fresh-context primitive"
+description: Design proposal for a fresh-context in-process sub-agent primitive, distinct from the long-lived bridge sub-agent.
+---
+
 # Design: `task` — an optional in-process, fresh-context primitive
 
 Status: design validated, not yet implemented.
