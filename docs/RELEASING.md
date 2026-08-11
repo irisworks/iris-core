@@ -30,11 +30,7 @@ to keep in sync in this repo. See [`docs/SETUP.md`](SETUP.md#release-tag-verific
 for how installs consume this.
 
 - **Maintainer:** `katrohit`
-- **Fingerprint:** not yet published — no signing key has been generated and
-  added to the maintainer's GitHub account (Settings → SSH and GPG keys) yet.
-  Until this is filled in, `IRIS_CORE_SIGNING_FINGERPRINT` pinning is inert
-  and installs fall back to trust-on-first-use of whatever key
-  `https://github.com/katrohit.gpg` currently serves.
+- **Fingerprint:** `9F505B84EA2FDF0137D0E22A5F386F000F63CF1B`
 
 Fill in the fingerprint above as soon as the signing key exists, update it
 whenever the key rotates, and call out both events in the release's

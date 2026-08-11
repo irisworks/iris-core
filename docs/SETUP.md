@@ -247,9 +247,8 @@ curl -fsSL .../install.sh | IRIS_CORE_SIGNING_FINGERPRINT="<published fingerprin
 ```
 
 The current maintainer signing key fingerprint is published in
-[`docs/RELEASING.md`](RELEASING.md#signing-key) — as of this writing, no key
-has been generated yet, so pinning is not yet possible. To bypass
-verification entirely (not recommended): `IRIS_SKIP_TAG_VERIFY=1`.
+[`docs/RELEASING.md`](RELEASING.md#signing-key). To bypass verification
+entirely (not recommended): `IRIS_SKIP_TAG_VERIFY=1`.
 
 ---
 
