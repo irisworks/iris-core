@@ -255,6 +255,19 @@ iris-core/
 └── terraform/            # optional profile — dynamic Azure resources
 ```
 
+## Design Discussions
+
+Proposed features get a design doc under `docs/plans/` before any code lands —
+context, alternatives considered, and open questions, so the tradeoffs are
+visible before the implementation is. See
+[`docs/plans/2026-08-05-task-primitive-design.md`](docs/plans/2026-08-05-task-primitive-design.md)
+for an example.
+
+To weigh in on one, open a [GitHub Discussion](https://github.com/irisworks/iris-core/discussions)
+linking the doc rather than commenting on a PR — Discussions persist after a PR
+merges or closes, which is where the conversation actually needs to live for a
+proposal still being shaped.
+
 ## Releases
 
 Semver tags (`vX.Y.Z`); installs pin their `core` submodule to a tag. Changelog in
