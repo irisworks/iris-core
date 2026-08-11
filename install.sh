@@ -64,71 +64,17 @@ fi
 # fetched over the same TLS+GitHub channel as the clone — but it does catch
 # a tampered or force-moved tag inside the repo we just cloned, and gives
 # mirrors/forks of iris-core something to check against.
-verify_tag_signature() {
-	local ref="$1"
-	if ! git -C "$REPO_DIR" show-ref --tags --verify --quiet "refs/tags/$ref"; then
-		echo "[iris-install] $ref is not a tag — skipping signature verification"
-		return 0
-	fi
-
-	if [ "${IRIS_SKIP_TAG_VERIFY:-}" = "1" ]; then
-		echo "[iris-install] IRIS_SKIP_TAG_VERIFY=1 — skipping signature verification for tag $ref"
-		return 0
-	fi
-
-	if ! command -v gpg >/dev/null 2>&1; then
-		echo "[iris-install] gpg not found — installing..."
-		if ! (sudo apt-get update -y -qq && sudo apt-get install -y -qq gnupg); then
-			echo "[iris-install] Could not install gpg — skipping signature verification for tag $ref"
-			return 0
-		fi
-	fi
-
-	local gnupg_home
-	gnupg_home="$(mktemp -d)"
-	trap 'rm -rf "$gnupg_home"' RETURN
-	chmod 700 "$gnupg_home"
-
-	local key_url="https://github.com/${IRIS_CORE_SIGNING_GH_USER}.gpg"
-	local key
-	key="$(curl -fsSL "$key_url" 2>/dev/null || true)"
-	if [ -z "$key" ]; then
-		echo "[iris-install] No signing key published at $key_url — skipping signature verification for tag $ref"
-		return 0
-	fi
-
-	if ! GNUPGHOME="$gnupg_home" gpg --batch --import <<<"$key" >/dev/null 2>&1; then
-		echo "[iris-install] Could not import signing key from $key_url — skipping signature verification for tag $ref"
-		return 0
-	fi
-
-	local fingerprint
-	fingerprint="$(GNUPGHOME="$gnupg_home" gpg --batch --with-colons --fingerprint 2>/dev/null \
-		| awk -F: '/^fpr:/ {print $10; exit}')"
-
-	local expected_fingerprint="${IRIS_CORE_SIGNING_FINGERPRINT//[[:space:]]/}"
-	if [ -n "$expected_fingerprint" ] && [ "$fingerprint" != "$expected_fingerprint" ]; then
-		echo "[iris-install] Signing key fingerprint mismatch for tag $ref:"
-		echo "  expected: $expected_fingerprint"
-		echo "  fetched:  $fingerprint"
-		echo "[iris-install] Aborting — the key served by $key_url does not match IRIS_CORE_SIGNING_FINGERPRINT."
+#
+# Shared with the manual submodule upgrade procedure in docs/RELEASING.md —
+# see scripts/verify-tag-signature.sh so both paths enforce the same check.
+VERIFY_SCRIPT="$REPO_DIR/scripts/verify-tag-signature.sh"
+if [ -f "$VERIFY_SCRIPT" ]; then
+	if ! bash "$VERIFY_SCRIPT" "$REPO_DIR" "$IRIS_CORE_REF"; then
 		exit 1
 	fi
-
-	if ! GNUPGHOME="$gnupg_home" git -C "$REPO_DIR" -c gpg.format=openpgp verify-tag "$ref"; then
-		echo "[iris-install] Signature verification FAILED for tag $ref."
-		echo "  This tag is either unsigned or its signature does not match the"
-		echo "  published key for $IRIS_CORE_SIGNING_GH_USER ($key_url)."
-		echo "  Aborting install. Set IRIS_SKIP_TAG_VERIFY=1 to bypass (not recommended)."
-		exit 1
-	fi
-
-	echo "[iris-install] Verified tag $ref — signing key fingerprint: $fingerprint"
-	trap - RETURN
-	rm -rf "$gnupg_home"
-}
-
-verify_tag_signature "$IRIS_CORE_REF"
+else
+	echo "[iris-install] $VERIFY_SCRIPT not found in this checkout — skipping signature verification"
+fi
 
 echo "[iris-install] Resolved ref: $IRIS_CORE_REF"
 

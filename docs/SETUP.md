@@ -239,15 +239,17 @@ Verification is best-effort by design:
   something is wrong.
 
 Pin the exact key you trust instead of whatever `github.com/<user>.gpg` serves
-today:
+today. The env var must be set on `bash`, the process that actually reads
+it — not on `curl`, which never sees it:
 
 ```bash
-IRIS_CORE_SIGNING_FINGERPRINT="<published fingerprint>" curl -fsSL .../install.sh | bash
+curl -fsSL .../install.sh | IRIS_CORE_SIGNING_FINGERPRINT="<published fingerprint>" bash
 ```
 
 The current maintainer signing key fingerprint is published in
-[`docs/RELEASING.md`](RELEASING.md#signing-key). To bypass verification
-entirely (not recommended): `IRIS_SKIP_TAG_VERIFY=1`.
+[`docs/RELEASING.md`](RELEASING.md#signing-key) — as of this writing, no key
+has been generated yet, so pinning is not yet possible. To bypass
+verification entirely (not recommended): `IRIS_SKIP_TAG_VERIFY=1`.
 
 ---
 

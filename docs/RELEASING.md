@@ -30,12 +30,16 @@ to keep in sync in this repo. See [`docs/SETUP.md`](SETUP.md#release-tag-verific
 for how installs consume this.
 
 - **Maintainer:** `katrohit`
-- **Fingerprint:** _publish here once the signing key is generated and added
-  to the maintainer's GitHub account (Settings → SSH and GPG keys)._
+- **Fingerprint:** not yet published — no signing key has been generated and
+  added to the maintainer's GitHub account (Settings → SSH and GPG keys) yet.
+  Until this is filled in, `IRIS_CORE_SIGNING_FINGERPRINT` pinning is inert
+  and installs fall back to trust-on-first-use of whatever key
+  `https://github.com/katrohit.gpg` currently serves.
 
-Update the fingerprint above whenever the signing key rotates, and call it
-out in the release's CHANGELOG entry so installs pinning
-`IRIS_CORE_SIGNING_FINGERPRINT` know to update.
+Fill in the fingerprint above as soon as the signing key exists, update it
+whenever the key rotates, and call out both events in the release's
+CHANGELOG entry so installs pinning `IRIS_CORE_SIGNING_FINGERPRINT` know to
+update.
 
 ## Cutting a release
 
@@ -50,12 +54,19 @@ out in the release's CHANGELOG entry so installs pinning
 
 ```bash
 cd <install>/core
-git fetch --tags && git checkout vX.Y.Z
+git fetch --tags
+bash scripts/verify-tag-signature.sh . vX.Y.Z   # aborts if the tag isn't signed by the published key
+git checkout vX.Y.Z
 cd iris-runtime && npm ci && npm run build
 cd ../../..
 git add core && git commit -m "core: vX.Y.Z"
 sudo systemctl restart iris   # or: docker restart <container> / rootfs rebuild for cloud
 ```
+
+Run the verification step before checking out the tag, not after — install.sh
+uses the same script (see [`docs/SETUP.md`](SETUP.md#release-tag-verification)),
+and skipping it here is the one supported upgrade path that wouldn't catch a
+tampered or force-moved tag.
 
 Read the release's UPGRADING notes first. Data-dir migrations in the runtime are
 idempotent and safe across at least one minor version — do not skip more than one
