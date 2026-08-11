@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `IRIS_CORE_SIGNING_FINGERPRINT` pinning (`scripts/verify-tag-signature.sh`)
+  deleted the pinned key's own subkey while removing other keys from the
+  keyring, and `gpg --delete-keys` on a subkey fingerprint removes the whole
+  certificate — so pinning broke for any real key with an encryption subkey
+  (the GPG default). Fingerprint collection is now scoped to primary (`pub`)
+  keys only.
+
 ## [1.3.0] - 2026-08-11
 
 ### Security
