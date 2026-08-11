@@ -83,6 +83,21 @@ and MCP support as documented profiles.
 - `bootstrap.sh` now prompts for a Perplexity API key ("Set up web search (Perplexity)?", default No) alongside the existing optional Resend/GitHub prompts, seeding it as `PERPLEXITY-API-KEY` (Key Vault path) or writing `PERPLEXITY_API_KEY` to `/iris/.env` (zero-cloud path) — previously the `search-web` skill's key had to be added by hand after install, with no bootstrap step at all. Added to `secret-store.ts`'s `SENSITIVE_ENV_VARS` and `docs/secrets.md`'s migration list so `iris-secret import-env` and store/proxy mode pick it up like every other bootstrap-seeded credential.
 - `mistral-medium-latest` (Mistral Medium 3.5) added to the Mistral provider's model list in `data/models.json.template` and to the inline model generator in `bootstrap.sh`, alongside the existing `devstral-medium-latest`/`mistral-large-latest` entries (#113). Routed through the same `openai-completions` provider module and `compat: { supportsStore: false }` flag as the other Mistral models — config-only, no new SDK integration. Configured with a 256k context window and `["text", "image"]` input (Mistral Medium 3.5 is multimodal and has a larger context window than `mistral-large-latest`'s 128k). The bootstrap provider-menu description for option 6 is updated to `Mistral Large / Medium / Devstral` so the new model is discoverable. `docs/configuration.md` notes the new entry.
 
+### Security
+
+- `install.sh` now runs `git verify-tag` on release tags (#132), checking
+  against the maintainer's GPG key fetched from `https://github.com/<user>.gpg`
+  (`IRIS_CORE_SIGNING_GH_USER`, default `katrohit`). Branches and installs with
+  no key/gpg available skip with a notice; a bad or missing signature on a `v*`
+  tag aborts. Pin the key with `IRIS_CORE_SIGNING_FINGERPRINT`, or bypass with
+  `IRIS_SKIP_TAG_VERIFY=1`. See `docs/SETUP.md` and `docs/RELEASING.md`.
+- Verification logic moved to `scripts/verify-tag-signature.sh`, shared by
+  `install.sh` and the manual submodule-upgrade steps in `docs/RELEASING.md`.
+  `IRIS_CORE_SIGNING_FINGERPRINT` now restricts trust to the pinned key
+  itself (previously it only checked the first key in the fetched keyring,
+  while `verify-tag` would accept a signature from any key alongside it) and
+  compares case-insensitively.
+
 ### Changed
 
 - `docs/overlay.md` keeps overlay+submodule as the default and now documents core code

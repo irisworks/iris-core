@@ -21,22 +21,48 @@ description: Version scheme, changelog rules, and the install upgrade procedure.
 - Features ported from install forks cite the source repo and commit SHA.
 - Breaking changes (renamed env vars, config schema, data-dir layout) get an `UPGRADING` note in the release entry.
 
+## Signing key
+
+Release tags are GPG-signed. `install.sh` verifies them by fetching the
+maintainer's public key from `https://github.com/<user>.gpg` — GitHub's
+built-in endpoint for a user's published GPG keys — so there is no key file
+to keep in sync in this repo. See [`docs/SETUP.md`](SETUP.md#release-tag-verification)
+for how installs consume this.
+
+- **Maintainer:** `katrohit`
+- **Fingerprint:** `9F505B84EA2FDF0137D0E22A5F386F000F63CF1B`
+
+Fill in the fingerprint above as soon as the signing key exists, update it
+whenever the key rotates, and call out both events in the release's
+CHANGELOG entry so installs pinning `IRIS_CORE_SIGNING_FINGERPRINT` know to
+update.
+
 ## Cutting a release
 
 1. Ensure CI is green on `main` (build + smoke).
 2. Bump `iris-runtime/package.json` version; finalize CHANGELOG entry.
-3. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. `git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` — the `-s` signs
+   the tag with the key listed under [Signing key](#signing-key). Don't drop
+   the `-s`: `install.sh` treats any `v*` tag as a release and aborts if it
+   isn't signed by the published key.
 
 ## Upgrading an install (submodule consumers)
 
 ```bash
 cd <install>/core
-git fetch --tags && git checkout vX.Y.Z
+git fetch --tags
+bash scripts/verify-tag-signature.sh . vX.Y.Z   # aborts if the tag isn't signed by the published key
+git checkout vX.Y.Z
 cd iris-runtime && npm ci && npm run build
 cd ../../..
 git add core && git commit -m "core: vX.Y.Z"
 sudo systemctl restart iris   # or: docker restart <container> / rootfs rebuild for cloud
 ```
+
+Run the verification step before checking out the tag, not after — install.sh
+uses the same script (see [`docs/SETUP.md`](SETUP.md#release-tag-verification)),
+and skipping it here is the one supported upgrade path that wouldn't catch a
+tampered or force-moved tag.
 
 Read the release's UPGRADING notes first. Data-dir migrations in the runtime are
 idempotent and safe across at least one minor version — do not skip more than one
