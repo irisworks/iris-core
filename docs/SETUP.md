@@ -246,6 +246,10 @@ it — not on `curl`, which never sees it:
 curl -fsSL .../install.sh | IRIS_CORE_SIGNING_FINGERPRINT="<published fingerprint>" bash
 ```
 
+Pin the fingerprint of the **primary** key (the one under "Fingerprint" in
+[`docs/RELEASING.md`](RELEASING.md#signing-key)), not a subkey — the install
+only ever compares against and trusts primary keys.
+
 The current maintainer signing key fingerprint is published in
 [`docs/RELEASING.md`](RELEASING.md#signing-key). To bypass verification
 entirely (not recommended): `IRIS_SKIP_TAG_VERIFY=1`.
