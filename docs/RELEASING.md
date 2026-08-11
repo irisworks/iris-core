@@ -30,7 +30,7 @@ to keep in sync in this repo. See [`docs/SETUP.md`](SETUP.md#release-tag-verific
 for how installs consume this.
 
 - **Maintainer:** `katrohit`
-- **Fingerprint:** `9F505B84EA2FDF0137D0E22A5F386F000F63CF1B`
+- **Fingerprint:** `8790A80B95F47AA98D5DECB1BACEE877F0866BEB`
 
 Fill in the fingerprint above as soon as the signing key exists, update it
 whenever the key rotates, and call out both events in the release's
