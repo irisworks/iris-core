@@ -66,12 +66,15 @@ verify_tag_signature() {
 		return 0
 	fi
 
-	# The key_url may serve more than one key; collect every fingerprint so a
-	# pin check can't pass against the first-listed key while verify-tag below
-	# ends up trusting a different one that was imported alongside it.
+	# The key_url may serve more than one key; collect every PRIMARY key's
+	# fingerprint (not subkeys — a subkey's own fpr: record shares its
+	# primary's certificate, so treating it as a separate key would make the
+	# deletion loop below delete the pinned primary key right along with it)
+	# so a pin check can't pass against the first-listed key while verify-tag
+	# below ends up trusting a different one that was imported alongside it.
 	local fingerprints
 	fingerprints="$(GNUPGHOME="$gnupg_home" gpg --batch --with-colons --fingerprint 2>/dev/null \
-		| awk -F: '/^fpr:/ {print $10}')"
+		| awk -F: '$1=="pub"{keep=1} $1=="sub"{keep=0} $1=="fpr" && keep{print $10}')"
 
 	local expected_fingerprint="${IRIS_CORE_SIGNING_FINGERPRINT//[[:space:]]/}"
 	expected_fingerprint="${expected_fingerprint^^}"
