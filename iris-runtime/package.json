@@ -1,6 +1,6 @@
 {
 	"name": "@iris-core/runtime",
-	"version": "1.2.0",
+	"version": "1.3.0",
 	"description": "Iris runtime — always-on AI orchestrator that manages sub-agent fleets over Slack and Telegram",
 	"type": "module",
 	"bin": {
