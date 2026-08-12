@@ -46,6 +46,28 @@ update.
    the `-s`: `install.sh` treats any `v*` tag as a release and aborts if it
    isn't signed by the published key.
 
+   If the maintainer's global git config points `user.signingkey` at an SSH
+   key (`gpg.format=ssh`, e.g. for commit signing), plain `git tag -s` will
+   try to hand that SSH key path to GPG and fail with `gpg failed to sign
+   the data`. Override both settings for the tag:
+
+   ```bash
+   git -c gpg.format=openpgp -c user.signingKey=<fingerprint> tag -s vX.Y.Z -m "vX.Y.Z"
+   ```
+
+   using the fingerprint under [Signing key](#signing-key). If GPG still
+   fails with `Inappropriate ioctl for device` or `we are in batchmode`,
+   the shell has no TTY for pinentry — run `export GPG_TTY=$(tty)` first,
+   or unlock the key once with `gpg --clearsign` from an interactive shell
+   to cache it in `gpg-agent`.
+4. Pushing the tag does **not** create a GitHub Release — tags and Releases
+   are separate GitHub features. Publish one explicitly so the version shows
+   up on the repo's Releases page:
+
+   ```bash
+   gh release create vX.Y.Z --title vX.Y.Z --notes-file <(sed -n '/## \[X.Y.Z\]/,/## \[/p' iris-runtime/CHANGELOG.md | sed '$d' | tail -n +2)
+   ```
+
 ## Upgrading an install (submodule consumers)
 
 ```bash
