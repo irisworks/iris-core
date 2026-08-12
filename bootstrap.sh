@@ -632,14 +632,40 @@ prompt_secrets() {
     echo "  or a private mirror of iris-core — not this upstream checkout, and"
     echo "  not a public fork: what Iris commits here is yours, keep it private."
     echo ""
-    GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
-    if [[ -n "$GH_ORG_REPO" ]]; then
-      IRIS_GITHUB_ORG="${GH_ORG_REPO%%/*}"
-      IRIS_GITHUB_REPO="${GH_ORG_REPO#*/}"
-    else
-      log "Warning: no org/repo set — Iris can't push skill commits until"
-      log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
-    fi
+    while true; do
+      GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
+      if [[ -z "$GH_ORG_REPO" ]]; then
+        log "Warning: no org/repo set — Iris can't push skill commits until"
+        log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
+        break
+      fi
+      CANDIDATE_ORG="${GH_ORG_REPO%%/*}"
+      CANDIDATE_REPO="${GH_ORG_REPO#*/}"
+      IRIS_CORE_ORG_REPO=$(echo "$IRIS_CORE_URL" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+      if [[ "${CANDIDATE_ORG,,}/${CANDIDATE_REPO,,}" == "$(echo "$IRIS_CORE_ORG_REPO" | tr '[:upper:]' '[:lower:]')" ]]; then
+        log "Refusing: ${GH_ORG_REPO} is the iris-core upstream you cloned from."
+        log "  This must be your own private overlay repo or a private mirror —"
+        log "  see docs/overlay.md."
+        continue
+      fi
+      if command -v gh &>/dev/null && [[ -n "$GITHUB_TOKEN" ]]; then
+        if ! GH_VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "$GH_ORG_REPO" --json visibility -q .visibility 2>&1); then
+          log "Warning: could not verify ${GH_ORG_REPO}'s visibility (gh error:"
+          log "  ${GH_VISIBILITY}). Proceeding, but double check it's private —"
+          log "  run 'gh repo view ${GH_ORG_REPO}' manually if unsure."
+          GH_VISIBILITY=""
+        fi
+        if [[ "$GH_VISIBILITY" == "PUBLIC" ]]; then
+          log "Refusing: ${GH_ORG_REPO} is a public repo. Iris commits her own"
+          log "  memory (MEMORY.md), skills, and business context here — it must"
+          log "  be private. Never a public fork; see docs/overlay.md."
+          continue
+        fi
+      fi
+      IRIS_GITHUB_ORG="$CANDIDATE_ORG"
+      IRIS_GITHUB_REPO="$CANDIDATE_REPO"
+      break
+    done
   fi
 
   # ── Email (optional) ──
@@ -1228,6 +1254,7 @@ ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 # are named after the documented command, not the source file.
 sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret"     /usr/local/bin/get-secret
 sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret"     /usr/local/bin/set-secret
+sudo ln -sfn "$REPO_DIR/skills/github/github-commit"      /usr/local/bin/github-commit
 sudo ln -sfn "$REPO_DIR/skills/schedule/schedule"         /usr/local/bin/schedule
 sudo ln -sfn "$REPO_DIR/skills/self-heal/self-heal"       /usr/local/bin/self-heal
 sudo ln -sfn "$REPO_DIR/skills/send-email/send-email"     /usr/local/bin/send-email

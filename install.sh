@@ -11,14 +11,19 @@
 # Handles git clone/update into $IRIS_DIR/repo, then hands off to bootstrap.sh.
 #
 # Env overrides:
-#   IRIS_DIR        install root            (default /iris)
-#   IRIS_CORE_URL   repo to clone           (default https://github.com/irisworks/iris-core.git)
-#   IRIS_CORE_REF   branch or tag to check out (default: latest release tag, falls back to main)
+#   IRIS_DIR                   install root            (default /iris)
+#   IRIS_CORE_URL              repo to clone           (default https://github.com/irisworks/iris-core.git)
+#   IRIS_CORE_REF              branch or tag to check out (default: latest release tag, falls back to main)
+#   IRIS_CORE_SIGNING_GH_USER  GitHub user whose public key signs release tags (default: katrohit)
+#   IRIS_CORE_SIGNING_FINGERPRINT  pin the expected signing key fingerprint (optional; see docs/SETUP.md)
+#   IRIS_SKIP_TAG_VERIFY       set to 1 to skip signature verification entirely
 # ============================================================
 set -euo pipefail
 
 IRIS_DIR="${IRIS_DIR:-/iris}"
 IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}"
+IRIS_CORE_SIGNING_GH_USER="${IRIS_CORE_SIGNING_GH_USER:-katrohit}"
+IRIS_CORE_SIGNING_FINGERPRINT="${IRIS_CORE_SIGNING_FINGERPRINT:-}"
 REPO_DIR="$IRIS_DIR/repo"
 
 if ! command -v git >/dev/null 2>&1; then
@@ -30,6 +35,9 @@ if [ -n "${IRIS_CORE_REF:-}" ]; then
 	echo "[iris-install] Using IRIS_CORE_REF override: $IRIS_CORE_REF"
 else
 	echo "[iris-install] Resolving latest release tag from $IRIS_CORE_URL"
+	# This runs before iris-core is cloned (install.sh is curl-piped), so it
+	# can't source scripts/resolve-latest-tag.sh yet — keep this pipeline in
+	# sync with that file, which post-clone scripts (e.g. upgrade.sh) use.
 	IRIS_CORE_REF="$(git ls-remote --tags --sort=-v:refname "$IRIS_CORE_URL" 'v*' 2>/dev/null \
 		| awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}$' | head -n1)"
 	if [ -z "$IRIS_CORE_REF" ]; then
@@ -46,12 +54,32 @@ sudo chown "$(id -un):$(id -gn)" "$IRIS_DIR"
 if [ -d "$REPO_DIR/.git" ]; then
 	echo "[iris-install] Existing checkout found — updating"
 	git -C "$REPO_DIR" fetch --tags origin
-	git -C "$REPO_DIR" checkout "$IRIS_CORE_REF"
+	git -C "$REPO_DIR" -c advice.detachedHead=false checkout "$IRIS_CORE_REF"
 	# Fast-forward only; a tag checkout leaves a detached HEAD, which is fine
 	git -C "$REPO_DIR" pull --ff-only origin "$IRIS_CORE_REF" 2>/dev/null || true
 else
-	git clone --branch "$IRIS_CORE_REF" "$IRIS_CORE_URL" "$REPO_DIR"
+	git -c advice.detachedHead=false clone --branch "$IRIS_CORE_REF" "$IRIS_CORE_URL" "$REPO_DIR"
 fi
+
+# Signature verification: only annotated/signed tags carry a signature to
+# check. Branch refs (e.g. IRIS_CORE_REF=main) always skip, since there's
+# nothing to verify. This doesn't move the trust root — the key itself is
+# fetched over the same TLS+GitHub channel as the clone — but it does catch
+# a tampered or force-moved tag inside the repo we just cloned, and gives
+# mirrors/forks of iris-core something to check against.
+#
+# Shared with the manual submodule upgrade procedure in docs/RELEASING.md —
+# see scripts/verify-tag-signature.sh so both paths enforce the same check.
+VERIFY_SCRIPT="$REPO_DIR/scripts/verify-tag-signature.sh"
+if [ -f "$VERIFY_SCRIPT" ]; then
+	if ! bash "$VERIFY_SCRIPT" "$REPO_DIR" "$IRIS_CORE_REF"; then
+		exit 1
+	fi
+else
+	echo "[iris-install] $VERIFY_SCRIPT not found in this checkout — skipping signature verification"
+fi
+
+echo "[iris-install] Resolved ref: $IRIS_CORE_REF"
 
 cd "$REPO_DIR"
 
