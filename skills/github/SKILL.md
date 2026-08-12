@@ -43,9 +43,8 @@ if [[ -z "${GITHUB_TOKEN:-}" || -z "${IRIS_GITHUB_ORG:-}" || -z "${IRIS_GITHUB_R
   exit 1
 fi
 
-IRIS_CORE_ORG_REPO=$(echo "${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
-if [[ "${IRIS_GITHUB_ORG,,}/${IRIS_GITHUB_REPO,,}" == "$(echo "$IRIS_CORE_ORG_REPO" | tr '[:upper:]' '[:lower:]')" ]]; then
-  echo "[github] IRIS_GITHUB_ORG/IRIS_GITHUB_REPO points at ${IRIS_CORE_ORG_REPO}, the iris-core upstream — refusing to push Iris's own commits (memory, skills) there. Point it at your own private overlay or mirror; see docs/overlay.md." >&2
+if [[ "${IRIS_GITHUB_ORG,,}/${IRIS_GITHUB_REPO,,}" == "irisworks/iris-core" ]]; then
+  echo "[github] IRIS_GITHUB_ORG/IRIS_GITHUB_REPO points at irisworks/iris-core — refusing to push Iris's own commits (memory, skills) to the public upstream. Point it at your own private overlay or mirror; see docs/overlay.md." >&2
   exit 1
 fi
 
