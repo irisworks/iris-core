@@ -51,11 +51,11 @@ sudo chown "$(id -un):$(id -gn)" "$IRIS_DIR"
 if [ -d "$REPO_DIR/.git" ]; then
 	echo "[iris-install] Existing checkout found — updating"
 	git -C "$REPO_DIR" fetch --tags origin
-	git -C "$REPO_DIR" checkout "$IRIS_CORE_REF"
+	git -C "$REPO_DIR" -c advice.detachedHead=false checkout "$IRIS_CORE_REF"
 	# Fast-forward only; a tag checkout leaves a detached HEAD, which is fine
 	git -C "$REPO_DIR" pull --ff-only origin "$IRIS_CORE_REF" 2>/dev/null || true
 else
-	git clone --branch "$IRIS_CORE_REF" "$IRIS_CORE_URL" "$REPO_DIR"
+	git -c advice.detachedHead=false clone --branch "$IRIS_CORE_REF" "$IRIS_CORE_URL" "$REPO_DIR"
 fi
 
 # Signature verification: only annotated/signed tags carry a signature to

@@ -11,6 +11,13 @@
   visibility can't be verified (no `gh`, PAT scope, network), it now warns
   loudly instead of silently assuming "not public".
 
+### Changed
+
+- `install.sh` suppresses git's detached-HEAD advice when cloning/checking
+  out a release tag, since that's expected and not an error.
+
+## [1.3.1] - 2026-08-12
+
 ### Fixed
 
 - `IRIS_CORE_SIGNING_FINGERPRINT` pinning (`scripts/verify-tag-signature.sh`)
