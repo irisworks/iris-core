@@ -1228,6 +1228,7 @@ ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 # are named after the documented command, not the source file.
 sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret"     /usr/local/bin/get-secret
 sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret"     /usr/local/bin/set-secret
+sudo ln -sfn "$REPO_DIR/skills/github/github-commit"      /usr/local/bin/github-commit
 sudo ln -sfn "$REPO_DIR/skills/schedule/schedule"         /usr/local/bin/schedule
 sudo ln -sfn "$REPO_DIR/skills/self-heal/self-heal"       /usr/local/bin/self-heal
 sudo ln -sfn "$REPO_DIR/skills/send-email/send-email"     /usr/local/bin/send-email
