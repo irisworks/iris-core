@@ -43,8 +43,9 @@ if [[ -z "${GITHUB_TOKEN:-}" || -z "${IRIS_GITHUB_ORG:-}" || -z "${IRIS_GITHUB_R
   exit 1
 fi
 
-if [[ "${IRIS_GITHUB_ORG,,}/${IRIS_GITHUB_REPO,,}" == "irisworks/iris-core" ]]; then
-  echo "[github] IRIS_GITHUB_ORG/IRIS_GITHUB_REPO points at irisworks/iris-core — refusing to push Iris's own commits (memory, skills) to the public upstream. Point it at your own private overlay or mirror; see docs/overlay.md." >&2
+IRIS_CORE_ORG_REPO=$(echo "${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+if [[ "${IRIS_GITHUB_ORG,,}/${IRIS_GITHUB_REPO,,}" == "$(echo "$IRIS_CORE_ORG_REPO" | tr '[:upper:]' '[:lower:]')" ]]; then
+  echo "[github] IRIS_GITHUB_ORG/IRIS_GITHUB_REPO points at ${IRIS_CORE_ORG_REPO}, the iris-core upstream — refusing to push Iris's own commits (memory, skills) there. Point it at your own private overlay or mirror; see docs/overlay.md." >&2
   exit 1
 fi
 
@@ -52,7 +53,10 @@ fi
 git remote set-url origin "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git"
 
 if command -v gh &>/dev/null; then
-  VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}" --json visibility -q .visibility 2>/dev/null || echo "")
+  if ! VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}" --json visibility -q .visibility 2>&1); then
+    echo "[github] Could not verify ${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}'s visibility (gh error: ${VISIBILITY}) — refusing to push until this is confirmed private. Check the token's scopes or run 'gh repo view' manually." >&2
+    exit 1
+  fi
   if [[ "$VISIBILITY" == "PUBLIC" ]]; then
     echo "[github] ${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO} is a public repo — refusing to push. This repo carries Iris's memory and skills, and must be private." >&2
     exit 1
