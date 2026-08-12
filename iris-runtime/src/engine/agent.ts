@@ -1209,11 +1209,15 @@ function createRunner(
 			sanitizeDanglingToolCalls();
 
 			// Pre-run auto-compaction: if the estimated context exceeds IRIS_COMPACT_THRESHOLD
-			// (default 60%) of the model window, compact down toward IRIS_COMPACT_TARGET
+			// (default 70%) of the model window, compact down toward IRIS_COMPACT_TARGET
 			// (default 10%) before prompting — prevents mid-run context overflow.
-			// The post-run >=70% check below remains as a backstop using real usage numbers.
+			// The post-run >=70% check below remains as a backstop using real usage numbers
+			// (it catches what this char-based estimate misses, e.g. image attachment tokens —
+			// this estimate only counts systemPrompt + session.messages, computed BEFORE the
+			// new turn's message/images are appended, so a single oversized image attachment
+			// isn't visible here at any threshold; only the post-run check sees it).
 			const windowTokens = model.contextWindow || 200000;
-			const compactThreshold = (Number(process.env.IRIS_COMPACT_THRESHOLD) || 0.6) * windowTokens;
+			const compactThreshold = (Number(process.env.IRIS_COMPACT_THRESHOLD) || 0.7) * windowTokens;
 			const compactTarget = (Number(process.env.IRIS_COMPACT_TARGET) || 0.1) * windowTokens;
 			// Rough token estimate: chars / 4 (good enough for cl100k/tiktoken-like encodings)
 			const estimateTokens = () =>
