@@ -28,6 +28,45 @@ interface LogMessage {
 	isBot?: boolean;
 }
 
+// Per-turn user messages are prefixed with a `<dynamic_context>` block (live memory
+// + MCP status, see buildDynamicContext in agent.ts) before the timestamp/username.
+// log.jsonl entries never have this block, so it must be stripped before comparing
+// against synced log lines or resending old turns to the LLM.
+// Greedy, not lazy: the block embeds raw MEMORY.md content, which Iris herself
+// writes and could plausibly contain the literal text "</dynamic_context>\n\n"
+// (e.g. a memory note about this very mechanism). A lazy match would latch onto
+// that embedded occurrence instead of the real closing tag. Greedy matches the
+// last occurrence in the string, which is always the true closing tag since the
+// block is anchored to the very start.
+const DYNAMIC_CONTEXT_PREFIX_RE = /^<dynamic_context>[\s\S]*<\/dynamic_context>\n\n/;
+
+/** Strip a leading `<dynamic_context>...</dynamic_context>` block, if present. */
+export function stripDynamicContext(text: string): string {
+	return text.replace(DYNAMIC_CONTEXT_PREFIX_RE, "");
+}
+
+/**
+ * Strip stale `<dynamic_context>` blocks from already-persisted user messages.
+ *
+ * The block only reflects live memory/MCP state at the moment it was sent, so once
+ * a turn is history it's just a stale, potentially-conflicting snapshot taking up
+ * context space — the current turn gets a fresh one instead. Mutates in place.
+ */
+export function stripDynamicContextFromMessages(messages: Array<{ role: string; content?: unknown }>): void {
+	for (const m of messages) {
+		if (m.role !== "user" || m.content === undefined) continue;
+		if (typeof m.content === "string") {
+			m.content = stripDynamicContext(m.content);
+		} else if (Array.isArray(m.content)) {
+			for (const part of m.content) {
+				if (part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part) {
+					(part as { text: string }).text = stripDynamicContext((part as { text: string }).text);
+				}
+			}
+		}
+	}
+}
+
 /**
  * Sync user messages from log.jsonl to SessionManager.
  *
@@ -61,9 +100,13 @@ export function syncLogToSessionManager(
 			if (msg.role === "user" && msg.content !== undefined) {
 				const content = msg.content;
 				if (typeof content === "string") {
-					// Strip timestamp prefix for comparison (live messages have it, synced don't)
+					// Strip dynamic_context block, then timestamp prefix for comparison
+					// (live messages have both, synced don't).
 					// Format: [YYYY-MM-DD HH:MM:SS+HH:MM] [username]: text
-					let normalized = content.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
+					let normalized = stripDynamicContext(content).replace(
+						/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /,
+						"",
+					);
 					// Strip attachments section
 					const attachmentsIdx = normalized.indexOf("\n\n<slack_attachments>\n");
 					if (attachmentsIdx !== -1) {
@@ -79,7 +122,7 @@ export function syncLogToSessionManager(
 							part.type === "text" &&
 							"text" in part
 						) {
-							let normalized = (part as { type: "text"; text: string }).text;
+							let normalized = stripDynamicContext((part as { type: "text"; text: string }).text);
 							normalized = normalized.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] /, "");
 							const attachmentsIdx = normalized.indexOf("\n\n<slack_attachments>\n");
 							if (attachmentsIdx !== -1) {

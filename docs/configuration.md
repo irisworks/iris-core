@@ -130,9 +130,14 @@ Two mechanisms keep long-running channels healthy:
 
 Anthropic and Bedrock cache the prompt on a strict byte-for-byte prefix match:
 any change anywhere in the system prompt invalidates the entire cached prefix
-(tools + system + full message history) for that turn. The Slack/Telegram
-channel/user directory embedded in the system prompt is now sorted by id
-before rendering, rather than left in `Map` insertion order — insertion order
+(tools + system + full message history) for that turn. The system prompt is
+kept fully static across turns for a given channel and skill set — `MEMORY.md`
+contents and live MCP server connection status, both of which change turn to
+turn, are prepended to the current turn's user message instead (visible as a
+`<dynamic_context>` block in `last_prompt.jsonl`), after the cached history,
+where their churn doesn't invalidate anything. The Slack/Telegram channel/user
+directory embedded in the system prompt is also sorted by id before
+rendering, rather than left in `Map` insertion order — insertion order
 reorders every time a new user or channel is discovered, which would
 invalidate the cache even though nothing about the directory's actual content
 changed.

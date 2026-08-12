@@ -12,7 +12,13 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
-import { readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "../dist/engine/context.js";
+import {
+	readResetWatermark,
+	stripDynamicContext,
+	stripDynamicContextFromMessages,
+	syncLogToSessionManager,
+	writeResetWatermark,
+} from "../dist/engine/context.js";
 
 /** Minimal stand-in for pi-coding-agent's SessionManager — only the two methods syncLogToSessionManager uses. */
 function makeFakeSessionManager(initialEntries = []) {
@@ -84,6 +90,83 @@ test("syncLogToSessionManager: a reset watermark stops pre-reset log.jsonl histo
 	const text = sessionManager.entries[0].message.content[0].text;
 	assert.match(text, /fresh start/);
 	assert.doesNotMatch(text, /secret plan/);
+});
+
+// ============================================================================
+// Regression coverage for the `<dynamic_context>` prefix (memory + MCP status,
+// see buildDynamicContext in agent.ts) that per-turn user messages now carry.
+// syncLogToSessionManager's dedup must see through it (log.jsonl entries never
+// have the block), and reloaded history must have it stripped before being
+// resent to the LLM, or every past turn's stale memory/MCP snapshot piles up
+// as permanent context bloat.
+// ============================================================================
+
+test("stripDynamicContext: removes a leading dynamic_context block", () => {
+	const text = "<dynamic_context>\nmemory stuff\n</dynamic_context>\n\n[2026-01-01 00:00:00+00:00] [kat]: hello";
+	assert.equal(stripDynamicContext(text), "[2026-01-01 00:00:00+00:00] [kat]: hello");
+});
+
+test("stripDynamicContext: no-op when there is no dynamic_context block", () => {
+	const text = "[2026-01-01 00:00:00+00:00] [kat]: hello";
+	assert.equal(stripDynamicContext(text), text);
+});
+
+test("stripDynamicContext: matches the real closing tag even when memory content quotes a fake one", () => {
+	// Iris's own memory content is embedded raw inside the block, so a note that
+	// happens to mention this exact tag must not fool the strip into stopping early.
+	const text =
+		"<dynamic_context>\n## Current Memory\nremember: block ends with </dynamic_context>\n\n then the timestamp\n\n## MCP Servers\nnone\n</dynamic_context>\n\n[2026-01-01 00:00:00+00:00] [kat]: hello";
+	assert.equal(stripDynamicContext(text), "[2026-01-01 00:00:00+00:00] [kat]: hello");
+});
+
+test("stripDynamicContextFromMessages: strips the block from array-content user messages in place", () => {
+	const messages = [
+		{
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: "<dynamic_context>\nmemory stuff\n</dynamic_context>\n\n[2026-01-01 00:00:00+00:00] [kat]: hello",
+				},
+			],
+		},
+		{ role: "assistant", content: [{ type: "text", text: "hi there" }] },
+	];
+
+	stripDynamicContextFromMessages(messages);
+
+	assert.equal(messages[0].content[0].text, "[2026-01-01 00:00:00+00:00] [kat]: hello");
+	assert.equal(messages[1].content[0].text, "hi there");
+});
+
+test("syncLogToSessionManager: a dynamic_context-prefixed session message still dedupes against its plain log.jsonl entry", () => {
+	const channelDir = mkdtempSync(join(tmpdir(), "iris-context-test-"));
+	writeLog(channelDir, [
+		{ ts: "1", date: "2026-01-01T00:00:00.000Z", user: "U1", userName: "kat", text: "hello", isBot: false },
+	]);
+
+	// Simulates a message already persisted via agent.ts's per-turn prompt(),
+	// which prepends a <dynamic_context> block ahead of the timestamp/username.
+	const sessionManager = makeFakeSessionManager([
+		{
+			type: "message",
+			message: {
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text: "<dynamic_context>\nmemory stuff\n</dynamic_context>\n\n[2026-01-01 00:00:00+00:00] [kat]: hello",
+					},
+				],
+			},
+		},
+	]);
+
+	const synced = syncLogToSessionManager(sessionManager, channelDir);
+
+	// Without the dynamic_context strip, this would re-sync as "new" and duplicate the message.
+	assert.equal(synced, 0);
+	assert.equal(sessionManager.entries.length, 1);
 });
 
 // ============================================================================

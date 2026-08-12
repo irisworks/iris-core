@@ -10,23 +10,18 @@
   `/iris/.env`, calls `bootstrap.sh` without `--setup`) vs. the overlay +
   submodule shape (bumps the `core/` submodule, rebuilds, restarts `iris`).
 
-### Security
-
-- The `github` skill and bootstrap's org/repo prompt now refuse to push Iris's
-  commits to `irisworks/iris-core` itself or to any confirmed-public repo —
-  previously, a missing `GITHUB_TOKEN` silently left `origin` pointed at the
-  upstream clone and `git push origin main` pushed straight there. When
-  visibility can't be verified (no `gh`, PAT scope, network), it now warns
-  loudly instead of silently assuming "not public".
-
-### Fixed
-
-- `github-commit` was documented in `skills/github/SKILL.md` but never shipped
-  as a script, so bootstrap had nothing to put on `PATH`. Extracted it to
-  `skills/github/github-commit` and symlinked it in `bootstrap.sh`.
-
 ### Changed
 
+- `MEMORY.md` contents and live MCP server status no longer live in the
+  system prompt — both change turn to turn (memory whenever Iris writes to
+  it, MCP status when a server flaps), and the system prompt sits at
+  position 0 of the prefix Anthropic/Bedrock cache, so touching it
+  invalidated the entire cached prefix (tools + system + full message
+  history) on every turn regardless of how stable everything else was.
+  They're now prepended to each turn's user message instead
+  (`buildDynamicContext()` in `agent.ts`), after the cached history, where
+  their churn is free. `buildSystemPrompt()`'s `memory`/`mcpStatus`
+  parameters are removed accordingly.
 - `install.sh` suppresses git's detached-HEAD advice when cloning/checking
   out a release tag, since that's expected and not an error.
 - The per-channel `Agent` is now constructed with `sessionId: channelId`.
@@ -48,6 +43,29 @@
   single large attachment isn't visible to it at any threshold — only the
   hardcoded ≥70% post-run check (real token counts from the provider) catches
   that case.
+
+### Security
+
+- The `github` skill and bootstrap's org/repo prompt now refuse to push Iris's
+  commits to `irisworks/iris-core` itself or to any confirmed-public repo —
+  previously, a missing `GITHUB_TOKEN` silently left `origin` pointed at the
+  upstream clone and `git push origin main` pushed straight there. When
+  visibility can't be verified (no `gh`, PAT scope, network), it now warns
+  loudly instead of silently assuming "not public".
+
+### Fixed
+
+- `github-commit` was documented in `skills/github/SKILL.md` but never shipped
+  as a script, so bootstrap had nothing to put on `PATH`. Extracted it to
+  `skills/github/github-commit` and symlinked it in `bootstrap.sh`.
+- The per-turn `<dynamic_context>` block broke `syncLogToSessionManager`'s
+  dedup (it only stripped a leading timestamp) and left every past turn's
+  stale memory/MCP snapshot baked into history. Both the dynamic_context
+  stripping in dedup comparisons and in reloaded history are now handled.
+- `stripDynamicContext`'s block-closing match is now greedy so it can't be
+  fooled by MEMORY.md content that happens to quote the literal closing tag.
+  Post-run auto-compaction also strips the current turn's still-raw block
+  before summarizing, instead of feeding the summarizer a full memory dump.
 
 ## [1.3.1] - 2026-08-12
 

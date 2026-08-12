@@ -18,7 +18,13 @@ import { homedir } from "os";
 import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./langfuse.js";
-import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
+import {
+	createIrisSettingsManager,
+	readResetWatermark,
+	stripDynamicContextFromMessages,
+	syncLogToSessionManager,
+	writeResetWatermark,
+} from "./context.js";
 import * as log from "./log.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
@@ -179,7 +185,6 @@ function loadIrisSkills(channelDir: string, workspacePath: string, workingDir: s
 export function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
-	memory: string,
 	constitution: string,
 	sandboxConfig: SandboxConfig,
 	channels: ChannelInfo[],
@@ -187,7 +192,6 @@ export function buildSystemPrompt(
 	skills: Skill[],
 	agents: AgentRegistry = {},
 	profile: TransportPromptProfile,
-	mcpStatus: McpStatusSummary | null = null,
 ): string {
 	const channelRelPath = resolveChannelPath(channelId);
 	const channelPath = `${workspacePath}/${channelRelPath}`;
@@ -269,7 +273,9 @@ Only delegate when the user's intent clearly matches a sub-agent's domain. Handl
 	: "(no sub-agents configured)"}
 
 ## MCP Servers
-${formatMcpSection(mcpStatus, workspacePath)}
+External toolsets can be added via ${workspacePath}/meta/mcp.json (hot-reloads before each message — see the mcp skill).
+Tools from connected servers are callable directly (prefix mcp__<server>__). Live per-server connection status is
+included with each message below, since it can change between turns.
 
 ## Events
 You can schedule events that wake you up at specific times or when external things happen. Events are JSON files in \`${workspacePath}/events/\`.
@@ -336,9 +342,7 @@ Write to MEMORY.md files to persist context across conversations.
 - Global (${workspacePath}/MEMORY.md): skills, preferences, project info
 - Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
 Update when you learn something important or when asked to remember something.
-
-### Current Memory
-${memory}
+Current memory contents are included with each message below, since they can change between turns.
 
 ## System Configuration Log
 Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
@@ -374,6 +378,24 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 
 Each built-in tool requires a "label" parameter (shown to user). MCP tools (mcp__*) take only the arguments in their schema — no label.
 `;
+}
+
+/**
+ * Volatile per-turn context (current memory, live MCP server status) that must
+ * NOT live in the system prompt: both can change between turns, and the system
+ * prompt sits at position 0 of the prefix Anthropic/Bedrock cache — touching it
+ * invalidates the entire cached prefix (tools + system + full message history)
+ * on every turn. Prepended to the new user message instead, after the cached
+ * history, where its churn doesn't cost anything.
+ */
+function buildDynamicContext(memory: string, mcpStatus: McpStatusSummary | null, workspacePath: string): string {
+	return `<dynamic_context>
+## Current Memory
+${memory}
+
+## MCP Servers
+${formatMcpSection(mcpStatus, workspacePath)}
+</dynamic_context>`;
 }
 
 function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: string): string {
@@ -589,11 +611,10 @@ function createRunner(
 		attachmentsTagName: "attachments",
 		maxMessageChars: 30000,
 	};
-	const memory = getMemory(channelDir, workingDir);
 	const constitution = loadConstitution(workspaceDir);
 	const skills = loadIrisSkills(channelDir, workspacePath, workingDir);
 	const agents = loadAgentRegistry(workspaceDir);
-	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, constitution, sandboxConfig, [], [], skills, agents, placeholderProfile);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, constitution, sandboxConfig, [], [], skills, agents, placeholderProfile);
 
 	// Create session manager and settings manager
 	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
@@ -621,6 +642,7 @@ function createRunner(
 	// Load existing messages
 	const loadedSession = sessionManager.buildSessionContext();
 	if (loadedSession.messages.length > 0) {
+		stripDynamicContextFromMessages(loadedSession.messages);
 		agent.state.messages = loadedSession.messages;
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
 	}
@@ -878,9 +900,16 @@ function createRunner(
 
 	async function doCompact(): Promise<{ tokensBefore: number } | null> {
 		try {
+			// The post-run compaction path (>=70% full, after this turn's reply) still has
+			// the current turn's raw <dynamic_context> block (full memory + MCP status) sitting
+			// unstripped in agent.state.messages === session.messages — strip it before handing
+			// the history to the summarizer so compaction doesn't burn tokens re-processing a
+			// memory dump that has nothing to do with the conversation being summarized.
+			stripDynamicContextFromMessages(session.messages);
 			const result = await session.compact();
 			const reloaded = sessionManager.buildSessionContext();
 			if (reloaded.messages.length > 0) {
+				stripDynamicContextFromMessages(reloaded.messages);
 				agent.state.messages = reloaded.messages;
 			}
 			return result ? { tokensBefore: result.tokensBefore } : null;
@@ -989,6 +1018,7 @@ function createRunner(
 			// This picks up any messages synced above
 			const reloadedSession = sessionManager.buildSessionContext();
 			if (reloadedSession.messages.length > 0) {
+				stripDynamicContextFromMessages(reloadedSession.messages);
 				agent.state.messages = reloadedSession.messages;
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}
@@ -1001,7 +1031,13 @@ function createRunner(
 			await mcpManager.refresh();
 			agent.state.tools = [...tools, ...mcpManager.getTools()];
 
-			// Update system prompt with fresh memory, constitution, channel/user info, and skills
+			// Update system prompt with fresh constitution, channel/user info, and skills.
+			// Memory and MCP status are NOT baked in here — they're volatile (memory
+			// changes whenever Iris writes to MEMORY.md; MCP status flaps with server
+			// health) and sit at position 0 of the prompt, so touching them would
+			// invalidate the entire cached prefix (tools + system + full history) on
+			// every turn. They're prepended to the per-turn user message instead,
+			// after the cached prefix, where their churn is free (see buildDynamicContext).
 			const memory = getMemory(channelDir, workingDir);
 			const constitution = loadConstitution(workspaceDir);
 			let skills = loadIrisSkills(channelDir, workspacePath, workingDir);
@@ -1013,7 +1049,6 @@ function createRunner(
 			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
-				memory,
 				constitution,
 				sandboxConfig,
 				ctx.channels,
@@ -1021,7 +1056,6 @@ function createRunner(
 				skills,
 				agents,
 				profile,
-				mcpManager.getStatus(),
 			);
 			session.agent.state.systemPrompt = systemPrompt;
 
@@ -1134,7 +1168,8 @@ function createRunner(
 			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
 			const offsetMins = pad(Math.abs(offset) % 60);
 			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
-			let userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
+			const dynamicContext = buildDynamicContext(memory, mcpManager.getStatus(), workspacePath);
+			let userMessage = `${dynamicContext}\n\n[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
 
 			const imageAttachments: ImageContent[] = [];
 			const nonImagePaths: string[] = [];
