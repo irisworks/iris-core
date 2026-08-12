@@ -62,8 +62,10 @@ cat > /iris/repo/skills/slack-notify/SKILL.md << 'EOF'
 ...
 EOF
 
-# 2. Commit
-github-commit "skills/slack-notify/SKILL.md" "feat: add slack-notify skill"
+# 2. Commit (see the github skill for the commit/push pattern)
+cd /iris/repo && git add "skills/slack-notify/SKILL.md" && \
+  git commit -m "feat: add slack-notify skill" && \
+  git push "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git" main
 
 # 3. Test (iris-runtime reloads skills automatically)
 slack-notify "#iris-dev" "test message from iris"
