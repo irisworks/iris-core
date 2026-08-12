@@ -136,3 +136,11 @@ before rendering, rather than left in `Map` insertion order — insertion order
 reorders every time a new user or channel is discovered, which would
 invalidate the cache even though nothing about the directory's actual content
 changed.
+
+Iris's per-channel `Agent` is constructed with `sessionId` set to the channel
+id. Anthropic and Bedrock ignore it — they cache off explicit `cache_control`
+breakpoints — but `pi-ai`'s `openai-responses` provider forwards it as
+`prompt_cache_key`, and Mistral's native provider uses it for the
+`x-affinity` header (KV-cache prefix affinity). Channel id is a stable,
+natural session boundary since each channel already gets its own long-lived
+runner and message history.

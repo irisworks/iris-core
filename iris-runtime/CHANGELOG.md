@@ -29,6 +29,12 @@
 
 - `install.sh` suppresses git's detached-HEAD advice when cloning/checking
   out a release tag, since that's expected and not an error.
+- The per-channel `Agent` is now constructed with `sessionId: channelId`.
+  `pi-ai` forwards `sessionId` to providers that key caching/routing off it —
+  `openai-responses`'s `prompt_cache_key` and Mistral's native `x-affinity`
+  header — neither of which Iris was previously setting, since nothing ever
+  populated `sessionId`. Anthropic and Bedrock are unaffected: they cache off
+  `cache_control` breakpoints, not a session id.
 - Slack's and Telegram's channel/user directory sections in the system prompt
   are now sorted by ID (ordinal, not locale-aware) before rendering, so the
   directory renders byte-identical turn to turn and doesn't invalidate the
