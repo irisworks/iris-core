@@ -639,10 +639,10 @@ prompt_secrets() {
         log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
         break
       fi
-      IRIS_GITHUB_ORG="${GH_ORG_REPO%%/*}"
-      IRIS_GITHUB_REPO="${GH_ORG_REPO#*/}"
+      CANDIDATE_ORG="${GH_ORG_REPO%%/*}"
+      CANDIDATE_REPO="${GH_ORG_REPO#*/}"
       IRIS_CORE_ORG_REPO=$(echo "$IRIS_CORE_URL" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
-      if [[ "${IRIS_GITHUB_ORG,,}/${IRIS_GITHUB_REPO,,}" == "$(echo "$IRIS_CORE_ORG_REPO" | tr '[:upper:]' '[:lower:]')" ]]; then
+      if [[ "${CANDIDATE_ORG,,}/${CANDIDATE_REPO,,}" == "$(echo "$IRIS_CORE_ORG_REPO" | tr '[:upper:]' '[:lower:]')" ]]; then
         log "Refusing: ${GH_ORG_REPO} is the iris-core upstream you cloned from."
         log "  This must be your own private overlay repo or a private mirror —"
         log "  see docs/overlay.md."
@@ -662,6 +662,8 @@ prompt_secrets() {
           continue
         fi
       fi
+      IRIS_GITHUB_ORG="$CANDIDATE_ORG"
+      IRIS_GITHUB_REPO="$CANDIDATE_REPO"
       break
     done
   fi
