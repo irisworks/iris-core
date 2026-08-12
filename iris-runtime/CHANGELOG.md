@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `install.sh` suppresses git's detached-HEAD advice when cloning/checking
+  out a release tag, since that's expected and not an error.
+
 ## [1.3.1] - 2026-08-12
 
 ### Fixed
