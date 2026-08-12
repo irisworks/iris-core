@@ -35,6 +35,9 @@ if [ -n "${IRIS_CORE_REF:-}" ]; then
 	echo "[iris-install] Using IRIS_CORE_REF override: $IRIS_CORE_REF"
 else
 	echo "[iris-install] Resolving latest release tag from $IRIS_CORE_URL"
+	# This runs before iris-core is cloned (install.sh is curl-piped), so it
+	# can't source scripts/resolve-latest-tag.sh yet — keep this pipeline in
+	# sync with that file, which post-clone scripts (e.g. upgrade.sh) use.
 	IRIS_CORE_REF="$(git ls-remote --tags --sort=-v:refname "$IRIS_CORE_URL" 'v*' 2>/dev/null \
 		| awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}$' | head -n1)"
 	if [ -z "$IRIS_CORE_REF" ]; then
