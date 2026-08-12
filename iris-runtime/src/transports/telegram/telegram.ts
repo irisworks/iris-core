@@ -8,6 +8,7 @@ import { resolveChannelDir, resolveChannelPath, type Attachment } from "../../en
 import { TelegramClaimManager } from "./telegram-claim.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
+	byId,
 	registerPromptProfile,
 	type ChannelInfo,
 	type ChannelTransport,
@@ -131,7 +132,7 @@ Do NOT use single *asterisks* for bold. Write URLs plainly rather than as [markd
 and never wrap an attached file's name in link syntax, since attachments are sent separately.`,
 	directorySection: (channels: ChannelInfo[], _users: UserInfo[]) => {
 		// Sort by id — see the matching comment in slack.ts's directorySection.
-		const sortedChannels = [...channels].sort((a, b) => a.id.localeCompare(b.id));
+		const sortedChannels = [...channels].sort(byId);
 		const chatMappings =
 			sortedChannels.length > 0 ? sortedChannels.map((c) => `${c.id}\t${c.name}`).join("\n") : "(no chats loaded)";
 		return `## Telegram Chats

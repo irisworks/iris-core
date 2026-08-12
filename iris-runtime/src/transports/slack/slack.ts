@@ -20,6 +20,7 @@ import { loadSessions, registerSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, type Attachment, type ChannelStore } from "../../engine/store.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
+	byId,
 	registerPromptProfile,
 	type ChannelInfo,
 	type ChannelTransport,
@@ -145,8 +146,10 @@ Do NOT use **double asterisks** or [markdown](links).`,
 		// Sort by id (stable across runs, unlike the Map insertion order these arrive
 		// in) so the directory renders byte-identical turn to turn and doesn't
 		// invalidate the prompt cache just because a new user/channel was discovered.
-		const sortedChannels = [...channels].sort((a, b) => a.id.localeCompare(b.id));
-		const sortedUsers = [...users].sort((a, b) => a.id.localeCompare(b.id));
+		// Ordinal comparison, not localeCompare, so the order can't shift with the
+		// host's ICU/locale configuration.
+		const sortedChannels = [...channels].sort(byId);
+		const sortedUsers = [...users].sort(byId);
 		const channelMappings =
 			sortedChannels.length > 0 ? sortedChannels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
 		const userMappings =

@@ -212,6 +212,50 @@ both backends.
 
 ---
 
+## Release Tag Verification
+
+`install.sh` resolves the latest `v*` release tag and, once checked out, runs
+`git verify-tag` against it. This doesn't change the delivery mechanism's root
+of trust — `curl -fsSL … | bash` from `raw.githubusercontent.com` is still
+TLS-plus-GitHub either way — but it does catch a tampered or force-moved tag
+inside the repo you just cloned, and gives installs that mirror or vendor
+`iris-core` something to check against.
+
+The signing key is fetched at install time from `https://github.com/<user>.gpg`
+— the maintainer's public GPG key(s) as published on their GitHub profile
+(**Settings → SSH and GPG keys**), no key file stored in this repo. The
+GitHub user checked is `katrohit` by default; override with
+`IRIS_CORE_SIGNING_GH_USER` if a different maintainer's key should be trusted.
+
+Verification is best-effort by design:
+
+- **`IRIS_CORE_REF` is a branch** (e.g. `main`, or any non-tag override) —
+  skipped, with a notice. Branches aren't signed.
+- **No key published, or `gpg` unavailable** — skipped, with a notice, so a
+  first install on a minimal box isn't blocked by tooling it doesn't have.
+- **A release tag is unsigned or its signature doesn't match the published
+  key** — the install **aborts** with an actionable message. Release tags are
+  always signed as part of `docs/RELEASING.md`, so a bad signature here means
+  something is wrong.
+
+Pin the exact key you trust instead of whatever `github.com/<user>.gpg` serves
+today. The env var must be set on `bash`, the process that actually reads
+it — not on `curl`, which never sees it:
+
+```bash
+curl -fsSL .../install.sh | IRIS_CORE_SIGNING_FINGERPRINT="<published fingerprint>" bash
+```
+
+Pin the fingerprint of the **primary** key (the one under "Fingerprint" in
+[`docs/RELEASING.md`](RELEASING.md#signing-key)), not a subkey — the install
+only ever compares against and trusts primary keys.
+
+The current maintainer signing key fingerprint is published in
+[`docs/RELEASING.md`](RELEASING.md#signing-key). To bypass verification
+entirely (not recommended): `IRIS_SKIP_TAG_VERIFY=1`.
+
+---
+
 ## Resetting a Firecracker VM Between Sessions
 
 ```bash
