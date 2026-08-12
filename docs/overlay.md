@@ -19,8 +19,8 @@ bump. The one thing linking can't give you is editing core code — see
 
 | Shape | Use when | Upgrade path |
 |---|---|---|
-| **Pinned clone** (`install.sh`) | Trying Iris out, or running her unmodified | Re-run `install.sh`; it pins the latest release tag |
-| **Overlay + submodule** | You're adding skills, sub-agents, or config — the default for a company install | `git -C core checkout vX.Y.Z`, commit the submodule |
+| **Pinned clone** (`install.sh`) | Trying Iris out, or running her unmodified | `bash core/scripts/upgrade.sh` (or re-run `install.sh`, which re-prompts for secrets) |
+| **Overlay + submodule** | You're adding skills, sub-agents, or config — the default for a company install | `bash core/scripts/upgrade.sh` from the overlay repo root |
 | **Fork** | You're changing core's code to contribute it upstream (public — iris-core is a public repo, and forks of it can't be private) | `git fetch upstream --tags && git rebase vX.Y.Z` |
 | **Private mirror** | You're changing core's code and can't publish it | same, from a private duplicate rather than a fork |
 
@@ -147,6 +147,15 @@ only for the code you genuinely can't publish, and keep everything else in
 `overlay/`.
 
 ## Upgrading core
+
+```bash
+bash core/scripts/upgrade.sh          # latest release tag
+bash core/scripts/upgrade.sh vX.Y.Z   # specific tag
+```
+
+Run from the overlay repo root. It verifies the tag's signature, bumps the
+`core/` submodule, rebuilds `iris-runtime`, commits the submodule bump, and
+restarts `iris.service` — equivalent to running these by hand:
 
 ```bash
 cd core && git fetch --tags && git checkout vX.Y.Z

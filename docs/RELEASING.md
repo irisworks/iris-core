@@ -68,7 +68,15 @@ update.
    gh release create vX.Y.Z --title vX.Y.Z --notes-file <(sed -n '/## \[X.Y.Z\]/,/## \[/p' iris-runtime/CHANGELOG.md | sed '$d' | tail -n +2)
    ```
 
-## Upgrading an install (submodule consumers)
+## Upgrading an install
+
+```bash
+bash core/scripts/upgrade.sh vX.Y.Z   # or omit the tag for the latest release
+```
+
+Auto-detects a pinned-clone (`install.sh`) vs. overlay+submodule install and
+runs the right steps non-interactively — no secret re-prompting. Equivalent
+manual steps, for submodule consumers:
 
 ```bash
 cd <install>/core

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/upgrade.sh` — upgrades an install to the latest (or a given)
+  release tag without re-prompting for secrets or manual steps. Auto-detects
+  the pinned-clone shape (bumps `$IRIS_DIR/repo`, detects Key Vault vs
+  `/iris/.env`, calls `bootstrap.sh` without `--setup`) vs. the overlay +
+  submodule shape (bumps the `core/` submodule, rebuilds, restarts `iris`).
+
 ### Security
 
 - The `github` skill and bootstrap's org/repo prompt now refuse to push Iris's
