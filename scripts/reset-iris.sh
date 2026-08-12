@@ -50,7 +50,7 @@ if id irisjailer &>/dev/null; then
   log "  system user: irisjailer (Firecracker)"
   FOUND=true
 fi
-for bin in iris-git iris-secret get-secret set-secret; do
+for bin in iris-secret get-secret set-secret; do
   if [[ -e "/usr/local/bin/$bin" ]]; then
     log "  /usr/local/bin/$bin"
     FOUND=true
@@ -102,7 +102,7 @@ sudo userdel iris-broker 2>/dev/null || true
 sudo userdel irisjailer 2>/dev/null || true
 
 log "Removing /usr/local/bin symlinks/wrappers..."
-sudo rm -f /usr/local/bin/iris-git /usr/local/bin/iris-secret /usr/local/bin/get-secret /usr/local/bin/set-secret
+sudo rm -f /usr/local/bin/iris-secret /usr/local/bin/get-secret /usr/local/bin/set-secret
 
 log "Removing Firecracker data (/var/lib/iris)..."
 sudo rm -rf /var/lib/iris

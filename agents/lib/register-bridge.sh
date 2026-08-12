@@ -9,7 +9,7 @@
 #   register-bridge.sh has-pat
 #     Exit 0 if a GitHub PAT is configured (GITHUB_TOKEN env var, or
 #     `get-secret GITHUB-TOKEN` resolves), exit 1 otherwise. Callers use this
-#     to decide whether to attempt github-commit at all — no PAT means skip
+#     to decide whether to attempt a commit/push at all — no PAT means skip
 #     it cleanly, not attempt-and-fail.
 #
 #   register-bridge.sh next-port [base]
