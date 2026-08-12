@@ -11,6 +11,12 @@
   visibility can't be verified (no `gh`, PAT scope, network), it now warns
   loudly instead of silently assuming "not public".
 
+### Fixed
+
+- `github-commit` was documented in `skills/github/SKILL.md` but never shipped
+  as a script, so bootstrap had nothing to put on `PATH`. Extracted it to
+  `skills/github/github-commit` and symlinked it in `bootstrap.sh`.
+
 ### Changed
 
 - `install.sh` suppresses git's detached-HEAD advice when cloning/checking
