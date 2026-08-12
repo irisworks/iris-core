@@ -125,3 +125,14 @@ Two mechanisms keep long-running channels healthy:
   post-run check at ≥70% real usage (hardcoded, not env-configurable) is the
   backstop that catches that case, using actual token counts from the
   provider's response.
+
+## Prompt caching
+
+Anthropic and Bedrock cache the prompt on a strict byte-for-byte prefix match:
+any change anywhere in the system prompt invalidates the entire cached prefix
+(tools + system + full message history) for that turn. The Slack/Telegram
+channel/user directory embedded in the system prompt is now sorted by id
+before rendering, rather than left in `Map` insertion order — insertion order
+reorders every time a new user or channel is discovered, which would
+invalidate the cache even though nothing about the directory's actual content
+changed.

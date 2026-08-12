@@ -2,8 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/upgrade.sh` — upgrades an install to the latest (or a given)
+  release tag without re-prompting for secrets or manual steps. Auto-detects
+  the pinned-clone shape (bumps `$IRIS_DIR/repo`, detects Key Vault vs
+  `/iris/.env`, calls `bootstrap.sh` without `--setup`) vs. the overlay +
+  submodule shape (bumps the `core/` submodule, rebuilds, restarts `iris`).
+
+### Security
+
+- The `github` skill and bootstrap's org/repo prompt now refuse to push Iris's
+  commits to `irisworks/iris-core` itself or to any confirmed-public repo —
+  previously, a missing `GITHUB_TOKEN` silently left `origin` pointed at the
+  upstream clone and `git push origin main` pushed straight there. When
+  visibility can't be verified (no `gh`, PAT scope, network), it now warns
+  loudly instead of silently assuming "not public".
+
+### Fixed
+
+- `github-commit` was documented in `skills/github/SKILL.md` but never shipped
+  as a script, so bootstrap had nothing to put on `PATH`. Extracted it to
+  `skills/github/github-commit` and symlinked it in `bootstrap.sh`.
+
 ### Changed
 
+- `install.sh` suppresses git's detached-HEAD advice when cloning/checking
+  out a release tag, since that's expected and not an error.
+- Slack's and Telegram's channel/user directory sections in the system prompt
+  are now sorted by ID (ordinal, not locale-aware) before rendering, so the
+  directory renders byte-identical turn to turn and doesn't invalidate the
+  prompt cache just because a new user/channel was discovered.
 - `IRIS_COMPACT_THRESHOLD`'s default rises from `0.6` to `0.7` (see
   `docs/configuration.md`), now that pre-run auto-compaction is in place to
   keep it from being needed sooner. Note this doesn't change how the pre-run
@@ -13,6 +42,52 @@
   single large attachment isn't visible to it at any threshold — only the
   hardcoded ≥70% post-run check (real token counts from the provider) catches
   that case.
+
+## [1.3.1] - 2026-08-12
+
+### Fixed
+
+- `IRIS_CORE_SIGNING_FINGERPRINT` pinning (`scripts/verify-tag-signature.sh`)
+  deleted the pinned key's own subkey while removing other keys from the
+  keyring, and `gpg --delete-keys` on a subkey fingerprint removes the whole
+  certificate — so pinning broke for any real key with an encryption subkey
+  (the GPG default). Fingerprint collection is now scoped to primary (`pub`)
+  keys only.
+
+## [1.3.0] - 2026-08-11
+
+### Security
+
+- Verification logic moved to `scripts/verify-tag-signature.sh`, shared by
+  `install.sh` and the manual submodule-upgrade steps in `docs/RELEASING.md`.
+  `IRIS_CORE_SIGNING_FINGERPRINT` now restricts trust to the pinned key
+  itself (previously it only checked the first key in the fetched keyring,
+  while `verify-tag` would accept a signature from any key alongside it) and
+  compares case-insensitively.
+
+### Fixed
+
+- Image attachments were silently dropped instead of read, on any model
+  declared `"input": ["text"]` in `models.json` — including `Kimi-K2.5` and
+  `Kimi-K2.6` in `data/models.json.template`, despite both being natively
+  multimodal. `pi-ai` filters image content out of the request in every
+  provider module (`openai-completions`, `anthropic`, `google-shared`,
+  `mistral`, `openai-responses-shared`) based on `model.input`, with no
+  signal back to the caller — so a user-sent photo vanished with no trace,
+  and the `read` tool's image branch claimed `"Read image file [...]"` while
+  the image itself never reached the model, leaving it to confabulate the
+  contents. `data/models.json.template`'s Kimi entries now declare
+  `["text", "image"]`. For any model still declared text-only (e.g. a
+  `custom`-provider endpoint from `bootstrap.sh`, which defaults new custom
+  models to `["text"]`), inbound image attachments are now diverted to a
+  `<dropped_image_attachments
+  reason="...">` block instead of being base64'd into a doomed `ImageContent`
+  block, and a warning is logged; the `read` tool does the same for an
+  in-conversation image read, returning an explicit "cannot be read this
+  way" text result instead of a fabricated success. `createIrisTools()` and
+  `createReadTool()` now take an `IrisToolsOptions`/`ReadToolOptions` with
+  `supportsImageInput`, derived from `model.input` at runner construction
+  (moved earlier in `agent.ts` so tools are built after the model is known).
 
 ## [1.2.0] - 2026-08-05
 
@@ -95,6 +170,15 @@ and MCP support as documented profiles.
 - `bootstrap.sh` now prompts for a Perplexity API key ("Set up web search (Perplexity)?", default No) alongside the existing optional Resend/GitHub prompts, seeding it as `PERPLEXITY-API-KEY` (Key Vault path) or writing `PERPLEXITY_API_KEY` to `/iris/.env` (zero-cloud path) — previously the `search-web` skill's key had to be added by hand after install, with no bootstrap step at all. Added to `secret-store.ts`'s `SENSITIVE_ENV_VARS` and `docs/secrets.md`'s migration list so `iris-secret import-env` and store/proxy mode pick it up like every other bootstrap-seeded credential.
 - `mistral-medium-latest` (Mistral Medium 3.5) added to the Mistral provider's model list in `data/models.json.template` and to the inline model generator in `bootstrap.sh`, alongside the existing `devstral-medium-latest`/`mistral-large-latest` entries (#113). Routed through the same `openai-completions` provider module and `compat: { supportsStore: false }` flag as the other Mistral models — config-only, no new SDK integration. Configured with a 256k context window and `["text", "image"]` input (Mistral Medium 3.5 is multimodal and has a larger context window than `mistral-large-latest`'s 128k). The bootstrap provider-menu description for option 6 is updated to `Mistral Large / Medium / Devstral` so the new model is discoverable. `docs/configuration.md` notes the new entry.
 
+### Security
+
+- `install.sh` now runs `git verify-tag` on release tags (#132), checking
+  against the maintainer's GPG key fetched from `https://github.com/<user>.gpg`
+  (`IRIS_CORE_SIGNING_GH_USER`, default `katrohit`). Branches and installs with
+  no key/gpg available skip with a notice; a bad or missing signature on a `v*`
+  tag aborts. Pin the key with `IRIS_CORE_SIGNING_FINGERPRINT`, or bypass with
+  `IRIS_SKIP_TAG_VERIFY=1`. See `docs/SETUP.md` and `docs/RELEASING.md`.
+
 ### Changed
 
 - `docs/overlay.md` keeps overlay+submodule as the default and now documents core code
@@ -109,28 +193,6 @@ and MCP support as documented profiles.
 - Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 
 ### Fixed
-
-- Image attachments were silently dropped instead of read, on any model
-  declared `"input": ["text"]` in `models.json` — including `Kimi-K2.5` and
-  `Kimi-K2.6` in `data/models.json.template`, despite both being natively
-  multimodal. `pi-ai` filters image content out of the request in every
-  provider module (`openai-completions`, `anthropic`, `google-shared`,
-  `mistral`, `openai-responses-shared`) based on `model.input`, with no
-  signal back to the caller — so a user-sent photo vanished with no trace,
-  and the `read` tool's image branch claimed `"Read image file [...]"` while
-  the image itself never reached the model, leaving it to confabulate the
-  contents. `data/models.json.template`'s Kimi entries now declare
-  `["text", "image"]`. For any model still declared text-only (e.g. a
-  `custom`-provider endpoint from `bootstrap.sh`, which defaults new custom
-  models to `["text"]`), inbound image attachments are now diverted to a
-  `<dropped_image_attachments
-  reason="...">` block instead of being base64'd into a doomed `ImageContent`
-  block, and a warning is logged; the `read` tool does the same for an
-  in-conversation image read, returning an explicit "cannot be read this
-  way" text result instead of a fabricated success. `createIrisTools()` and
-  `createReadTool()` now take an `IrisToolsOptions`/`ReadToolOptions` with
-  `supportsImageInput`, derived from `model.input` at runner construction
-  (moved earlier in `agent.ts` so tools are built after the model is known).
 
 - Startup no longer re-dispatches stale interrupted runs. `resumeInterruptedRuns()`
   treated any last user message followed only by placeholders as an interrupted run,
