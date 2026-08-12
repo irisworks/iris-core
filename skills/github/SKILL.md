@@ -25,30 +25,7 @@ github-commit <path> <message>
 
 ## Implementation
 
-```bash
-#!/usr/bin/env bash
-# github — commit and push to ${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}
-set -euo pipefail
-
-REPO_DIR="${IRIS_REPO_DIR:-/iris/repo}"
-COMMIT_PATH="${1:?Usage: github-commit <path-relative-to-repo> <message>}"
-COMMIT_MSG="${2:?Usage: github-commit <path-relative-to-repo> <message>}"
-
-cd "$REPO_DIR"
-
-# Commit as Iris without touching global or repo git config
-
-# Set GitHub token for auth
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  git remote set-url origin "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git"
-fi
-
-git add "$COMMIT_PATH"
-iris-git commit -m "$COMMIT_MSG"
-git push origin main
-
-echo "[github] Committed and pushed: $COMMIT_MSG"
-```
+See `github-commit` in this skill's directory — bootstrap symlinks it to `/usr/local/bin/github-commit`.
 
 ## Common operations
 

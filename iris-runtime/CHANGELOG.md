@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `github-commit` was documented in `skills/github/SKILL.md` but never shipped
+  as a script, so bootstrap had nothing to put on `PATH`. Extracted it to
+  `skills/github/github-commit` and symlinked it in `bootstrap.sh`.
+
 ## [1.3.1] - 2026-08-12
 
 ### Fixed
