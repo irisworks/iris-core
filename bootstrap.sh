@@ -632,14 +632,33 @@ prompt_secrets() {
     echo "  or a private mirror of iris-core — not this upstream checkout, and"
     echo "  not a public fork: what Iris commits here is yours, keep it private."
     echo ""
-    GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
-    if [[ -n "$GH_ORG_REPO" ]]; then
+    while true; do
+      GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
+      if [[ -z "$GH_ORG_REPO" ]]; then
+        log "Warning: no org/repo set — Iris can't push skill commits until"
+        log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
+        break
+      fi
       IRIS_GITHUB_ORG="${GH_ORG_REPO%%/*}"
       IRIS_GITHUB_REPO="${GH_ORG_REPO#*/}"
-    else
-      log "Warning: no org/repo set — Iris can't push skill commits until"
-      log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
-    fi
+      IRIS_CORE_ORG_REPO=$(echo "$IRIS_CORE_URL" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+      if [[ "${IRIS_GITHUB_ORG,,}/${IRIS_GITHUB_REPO,,}" == "$(echo "$IRIS_CORE_ORG_REPO" | tr '[:upper:]' '[:lower:]')" ]]; then
+        log "Refusing: ${GH_ORG_REPO} is the iris-core upstream you cloned from."
+        log "  This must be your own private overlay repo or a private mirror —"
+        log "  see docs/overlay.md."
+        continue
+      fi
+      if command -v gh &>/dev/null && [[ -n "$GITHUB_TOKEN" ]]; then
+        GH_VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "$GH_ORG_REPO" --json visibility -q .visibility 2>/dev/null || echo "")
+        if [[ "$GH_VISIBILITY" == "PUBLIC" ]]; then
+          log "Refusing: ${GH_ORG_REPO} is a public repo. Iris commits her own"
+          log "  memory (MEMORY.md), skills, and business context here — it must"
+          log "  be private. Never a public fork; see docs/overlay.md."
+          continue
+        fi
+      fi
+      break
+    done
   fi
 
   # ── Email (optional) ──

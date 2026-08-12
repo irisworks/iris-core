@@ -53,6 +53,10 @@ When bootstrap prompts for a GitHub token, point `IRIS_GITHUB_ORG` /
 where the `github` skill pushes Iris's own skill/sub-agent commits — see
 [Configuration](configuration.md).
 
+Both bootstrap and the `github` skill refuse to push to `irisworks/iris-core`
+itself or to any repo that resolves as public — Iris's commits carry
+`MEMORY.md` and skill content, which must stay private.
+
 The wrapper bootstrap sets `REPO_DIR`, calls `core/bootstrap.sh`, then symlinks
 `overlay/agents/*` and `overlay/skills/*` into the workspace. Hot reload works
 through symlinks, so overlay skills behave exactly like core skills.

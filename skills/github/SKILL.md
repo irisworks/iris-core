@@ -36,11 +36,27 @@ COMMIT_MSG="${2:?Usage: github-commit <path-relative-to-repo> <message>}"
 
 cd "$REPO_DIR"
 
-# Commit as Iris without touching global or repo git config
+# Refuse to push anywhere but a configured, non-upstream, private repo — don't
+# fall through to whatever 'origin' happens to be (the iris-core clone itself).
+if [[ -z "${GITHUB_TOKEN:-}" || -z "${IRIS_GITHUB_ORG:-}" || -z "${IRIS_GITHUB_REPO:-}" ]]; then
+  echo "[github] GITHUB_TOKEN / IRIS_GITHUB_ORG / IRIS_GITHUB_REPO not fully configured — halting. Set them in /iris/.env." >&2
+  exit 1
+fi
 
-# Set GitHub token for auth
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  git remote set-url origin "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git"
+if [[ "${IRIS_GITHUB_ORG,,}/${IRIS_GITHUB_REPO,,}" == "irisworks/iris-core" ]]; then
+  echo "[github] IRIS_GITHUB_ORG/IRIS_GITHUB_REPO points at irisworks/iris-core — refusing to push Iris's own commits (memory, skills) to the public upstream. Point it at your own private overlay or mirror; see docs/overlay.md." >&2
+  exit 1
+fi
+
+# Commit as Iris without touching global or repo git config
+git remote set-url origin "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git"
+
+if command -v gh &>/dev/null; then
+  VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}" --json visibility -q .visibility 2>/dev/null || echo "")
+  if [[ "$VISIBILITY" == "PUBLIC" ]]; then
+    echo "[github] ${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO} is a public repo — refusing to push. This repo carries Iris's memory and skills, and must be private." >&2
+    exit 1
+  fi
 fi
 
 git add "$COMMIT_PATH"

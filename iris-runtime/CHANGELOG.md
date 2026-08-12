@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Security
+
+- The `github` skill and bootstrap's org/repo prompt now refuse to push Iris's
+  commits to `irisworks/iris-core` itself or to any public repo — previously,
+  a missing `GITHUB_TOKEN` silently left `origin` pointed at the upstream
+  clone and `git push origin main` pushed straight there.
+
 ### Fixed
 
 - `IRIS_CORE_SIGNING_FINGERPRINT` pinning (`scripts/verify-tag-signature.sh`)
