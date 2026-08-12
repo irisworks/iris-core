@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Security
+
+- The `github` skill and bootstrap's org/repo prompt now refuse to push Iris's
+  commits to `irisworks/iris-core` itself or to any confirmed-public repo —
+  previously, a missing `GITHUB_TOKEN` silently left `origin` pointed at the
+  upstream clone and `git push origin main` pushed straight there. When
+  visibility can't be verified (no `gh`, PAT scope, network), it now warns
+  loudly instead of silently assuming "not public".
+
 ### Changed
 
 - `install.sh` suppresses git's detached-HEAD advice when cloning/checking
