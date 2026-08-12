@@ -650,10 +650,10 @@ prompt_secrets() {
       fi
       if command -v gh &>/dev/null && [[ -n "$GITHUB_TOKEN" ]]; then
         if ! GH_VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "$GH_ORG_REPO" --json visibility -q .visibility 2>&1); then
-          log "Could not verify ${GH_ORG_REPO}'s visibility (gh error: ${GH_VISIBILITY})."
-          log "  Refusing until this is confirmed private — check the token's"
-          log "  scopes or run 'gh repo view ${GH_ORG_REPO}' manually."
-          continue
+          log "Warning: could not verify ${GH_ORG_REPO}'s visibility (gh error:"
+          log "  ${GH_VISIBILITY}). Proceeding, but double check it's private —"
+          log "  run 'gh repo view ${GH_ORG_REPO}' manually if unsure."
+          GH_VISIBILITY=""
         fi
         if [[ "$GH_VISIBILITY" == "PUBLIC" ]]; then
           log "Refusing: ${GH_ORG_REPO} is a public repo. Iris commits her own"

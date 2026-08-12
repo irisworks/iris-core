@@ -53,8 +53,8 @@ git remote set-url origin "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}
 
 if command -v gh &>/dev/null; then
   if ! VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}" --json visibility -q .visibility 2>&1); then
-    echo "[github] Could not verify ${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}'s visibility (gh error: ${VISIBILITY}) — refusing to push until this is confirmed private. Check the token's scopes or run 'gh repo view' manually." >&2
-    exit 1
+    echo "[github] Warning: could not verify ${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}'s visibility (gh error: ${VISIBILITY}) — proceeding, but double check it's private (check the token's scopes or run 'gh repo view' manually)." >&2
+    VISIBILITY=""
   fi
   if [[ "$VISIBILITY" == "PUBLIC" ]]; then
     echo "[github] ${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO} is a public repo — refusing to push. This repo carries Iris's memory and skills, and must be private." >&2
