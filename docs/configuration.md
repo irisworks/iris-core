@@ -27,7 +27,7 @@ env vars.
 | `IRIS_BRIDGE_STATUS_THROTTLE_MS` | `3000` | Minimum gap between chat edits when forwarding sub-agent progress |
 | `IRIS_LLM_TIMEOUT_SECS` | `90` | Per-attempt LLM timeout |
 | `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_RETRY_BASE_MS` | `3` / `2000` | Retry with exponential backoff on 429/timeout/transient errors |
-| `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
+| `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.7` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS` | `4` | On startup, don't re-dispatch an interrupted run whose user message is older than this. Stale placeholders are still cleaned up; only the LLM run is skipped. Raise it if you want long outages resumed, set it very high to always resume |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
@@ -117,9 +117,14 @@ Two mechanisms keep long-running channels healthy:
   up to `IRIS_LLM_MAX_RETRIES` times with jittered exponential backoff, posting a
   visible `_Retrying (n/3)..._` notice.
 - **Auto-compaction** — before each prompt, if the estimated context exceeds
-  `IRIS_COMPACT_THRESHOLD` of the model window, Iris summarises older history down
-  toward `IRIS_COMPACT_TARGET` (up to 3 passes). A post-run check at ≥70% real
-  usage acts as a backstop.
+  `IRIS_COMPACT_THRESHOLD` (default 70%) of the model window, Iris summarises
+  older history down toward `IRIS_COMPACT_TARGET` (up to 3 passes). This is a
+  char-count estimate over the system prompt and message history computed
+  *before* the new turn's message (and any image attachments) is appended, so
+  it can't see an oversized attachment in the turn that introduces it — the
+  post-run check at ≥70% real usage (hardcoded, not env-configurable) is the
+  backstop that catches that case, using actual token counts from the
+  provider's response.
 
 ## Prompt caching
 
