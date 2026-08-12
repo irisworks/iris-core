@@ -65,7 +65,7 @@ update.
    up on the repo's Releases page:
 
    ```bash
-   gh release create vX.Y.Z --title vX.Y.Z --notes-file <(sed -n '/## \[X.Y.Z\]/,/## \[/p' iris-runtime/CHANGELOG.md | sed '$d' | tail -n +2)
+   gh release create vX.Y.Z --title vX.Y.Z --notes-file <(awk '/^## \[X.Y.Z\]/{f=1;next}/^## \[/{f=0}/^---$/{f=0}f' iris-runtime/CHANGELOG.md)
    ```
 
 ## Upgrading an install (submodule consumers)
