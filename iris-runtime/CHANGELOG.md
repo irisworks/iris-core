@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-08-12
+
 ### Fixed
 
 - `IRIS_CORE_SIGNING_FINGERPRINT` pinning (`scripts/verify-tag-signature.sh`)
