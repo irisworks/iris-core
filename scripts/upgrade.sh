@@ -24,9 +24,10 @@ TARGET_REF="${1:-}"
 
 log() { echo "[iris-upgrade] $*"; }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 resolve_latest_tag() {
-  git ls-remote --tags --sort=-v:refname "$IRIS_CORE_URL" 'v*' 2>/dev/null \
-    | awk '{print $2}' | sed 's|refs/tags/||' | grep -v '\^{}$' | head -n1
+  bash "$SCRIPT_DIR/resolve-latest-tag.sh" "$IRIS_CORE_URL"
 }
 
 verify_tag() {
@@ -44,7 +45,13 @@ IS_PINNED_CLONE=false
 IS_SUBMODULE_OVERLAY=false
 
 [[ -d "$PINNED_REPO_DIR/.git" ]] && IS_PINNED_CLONE=true
-if git submodule status -- core &>/dev/null && [[ -n "$(git submodule status -- core 2>/dev/null)" ]]; then
+SUBMODULE_STATUS="$(git submodule status -- core 2>/dev/null || true)"
+if [[ -n "$SUBMODULE_STATUS" ]]; then
+  if [[ "$SUBMODULE_STATUS" == -* ]]; then
+    log "core/ is registered as a submodule but not initialized."
+    log "Run 'git submodule update --init core' first, then re-run this script."
+    exit 1
+  fi
   IS_SUBMODULE_OVERLAY=true
 fi
 
@@ -70,8 +77,13 @@ elif [[ "$IS_SUBMODULE_OVERLAY" == true ]]; then
   (cd core/iris-runtime && npm ci && npm run build)
 
   git add core
-  git commit -m "core: $TARGET_REF"
-  log "Committed submodule bump. Restarting iris.service..."
+  if git diff --cached --quiet -- core; then
+    log "core/ is already at $TARGET_REF — nothing to commit."
+  else
+    git commit -m "core: $TARGET_REF"
+    log "Committed submodule bump."
+  fi
+  log "Restarting iris.service..."
   sudo systemctl restart iris
 
 elif [[ "$IS_PINNED_CLONE" == true ]]; then
