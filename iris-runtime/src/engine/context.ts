@@ -32,7 +32,13 @@ interface LogMessage {
 // + MCP status, see buildDynamicContext in agent.ts) before the timestamp/username.
 // log.jsonl entries never have this block, so it must be stripped before comparing
 // against synced log lines or resending old turns to the LLM.
-const DYNAMIC_CONTEXT_PREFIX_RE = /^<dynamic_context>[\s\S]*?<\/dynamic_context>\n\n/;
+// Greedy, not lazy: the block embeds raw MEMORY.md content, which Iris herself
+// writes and could plausibly contain the literal text "</dynamic_context>\n\n"
+// (e.g. a memory note about this very mechanism). A lazy match would latch onto
+// that embedded occurrence instead of the real closing tag. Greedy matches the
+// last occurrence in the string, which is always the true closing tag since the
+// block is anchored to the very start.
+const DYNAMIC_CONTEXT_PREFIX_RE = /^<dynamic_context>[\s\S]*<\/dynamic_context>\n\n/;
 
 /** Strip a leading `<dynamic_context>...</dynamic_context>` block, if present. */
 export function stripDynamicContext(text: string): string {

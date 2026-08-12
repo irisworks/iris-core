@@ -21,6 +21,10 @@
   dedup (it only stripped a leading timestamp) and left every past turn's
   stale memory/MCP snapshot baked into history. Both the dynamic_context
   stripping in dedup comparisons and in reloaded history are now handled.
+- `stripDynamicContext`'s block-closing match is now greedy so it can't be
+  fooled by MEMORY.md content that happens to quote the literal closing tag.
+  Post-run auto-compaction also strips the current turn's still-raw block
+  before summarizing, instead of feeding the summarizer a full memory dump.
 
 ## [1.2.0] - 2026-08-05
 

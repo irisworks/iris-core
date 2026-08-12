@@ -895,6 +895,12 @@ function createRunner(
 
 	async function doCompact(): Promise<{ tokensBefore: number } | null> {
 		try {
+			// The post-run compaction path (>=70% full, after this turn's reply) still has
+			// the current turn's raw <dynamic_context> block (full memory + MCP status) sitting
+			// unstripped in agent.state.messages === session.messages — strip it before handing
+			// the history to the summarizer so compaction doesn't burn tokens re-processing a
+			// memory dump that has nothing to do with the conversation being summarized.
+			stripDynamicContextFromMessages(session.messages);
 			const result = await session.compact();
 			const reloaded = sessionManager.buildSessionContext();
 			if (reloaded.messages.length > 0) {

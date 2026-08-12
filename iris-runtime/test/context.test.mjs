@@ -111,6 +111,14 @@ test("stripDynamicContext: no-op when there is no dynamic_context block", () => 
 	assert.equal(stripDynamicContext(text), text);
 });
 
+test("stripDynamicContext: matches the real closing tag even when memory content quotes a fake one", () => {
+	// Iris's own memory content is embedded raw inside the block, so a note that
+	// happens to mention this exact tag must not fool the strip into stopping early.
+	const text =
+		"<dynamic_context>\n## Current Memory\nremember: block ends with </dynamic_context>\n\n then the timestamp\n\n## MCP Servers\nnone\n</dynamic_context>\n\n[2026-01-01 00:00:00+00:00] [kat]: hello";
+	assert.equal(stripDynamicContext(text), "[2026-01-01 00:00:00+00:00] [kat]: hello");
+});
+
 test("stripDynamicContextFromMessages: strips the block from array-content user messages in place", () => {
 	const messages = [
 		{
