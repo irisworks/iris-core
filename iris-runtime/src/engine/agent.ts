@@ -18,7 +18,13 @@ import { homedir } from "os";
 import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./langfuse.js";
-import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
+import {
+	createIrisSettingsManager,
+	readResetWatermark,
+	stripDynamicContextFromMessages,
+	syncLogToSessionManager,
+	writeResetWatermark,
+} from "./context.js";
 import * as log from "./log.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
@@ -631,6 +637,7 @@ function createRunner(
 	// Load existing messages
 	const loadedSession = sessionManager.buildSessionContext();
 	if (loadedSession.messages.length > 0) {
+		stripDynamicContextFromMessages(loadedSession.messages);
 		agent.state.messages = loadedSession.messages;
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
 	}
@@ -891,6 +898,7 @@ function createRunner(
 			const result = await session.compact();
 			const reloaded = sessionManager.buildSessionContext();
 			if (reloaded.messages.length > 0) {
+				stripDynamicContextFromMessages(reloaded.messages);
 				agent.state.messages = reloaded.messages;
 			}
 			return result ? { tokensBefore: result.tokensBefore } : null;
@@ -999,6 +1007,7 @@ function createRunner(
 			// This picks up any messages synced above
 			const reloadedSession = sessionManager.buildSessionContext();
 			if (reloadedSession.messages.length > 0) {
+				stripDynamicContextFromMessages(reloadedSession.messages);
 				agent.state.messages = reloadedSession.messages;
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}

@@ -15,6 +15,13 @@
   their churn is free. `buildSystemPrompt()`'s `memory`/`mcpStatus`
   parameters are removed accordingly.
 
+### Fixed
+
+- The per-turn `<dynamic_context>` block broke `syncLogToSessionManager`'s
+  dedup (it only stripped a leading timestamp) and left every past turn's
+  stale memory/MCP snapshot baked into history. Both the dynamic_context
+  stripping in dedup comparisons and in reloaded history are now handled.
+
 ## [1.2.0] - 2026-08-05
 
 Streaming bridge replies, Langfuse observability, deterministic `@agentname`
