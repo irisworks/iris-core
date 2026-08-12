@@ -21,6 +21,12 @@ export interface UserInfo {
 	displayName: string;
 }
 
+/** Ordinal (not locale-aware) comparator for sorting directory entries by id, so
+ * output stays byte-identical regardless of the host's ICU/locale configuration. */
+export function byId(a: { id: string }, b: { id: string }): number {
+	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /** A normalized inbound message event, independent of the transport it came from. */
 export interface TransportEvent {
 	channel: string;

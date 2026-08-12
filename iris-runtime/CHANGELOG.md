@@ -29,6 +29,10 @@
 
 - `install.sh` suppresses git's detached-HEAD advice when cloning/checking
   out a release tag, since that's expected and not an error.
+- Slack's and Telegram's channel/user directory sections in the system prompt
+  are now sorted by ID (ordinal, not locale-aware) before rendering, so the
+  directory renders byte-identical turn to turn and doesn't invalidate the
+  prompt cache just because a new user/channel was discovered.
 
 ## [1.3.1] - 2026-08-12
 
