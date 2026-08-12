@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-12
+
 ### Added
 
 - `scripts/upgrade.sh` — upgrades an install to the latest (or a given)
