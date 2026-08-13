@@ -393,7 +393,7 @@ prompt_secrets() {
     case "$IRIS_PROVIDER" in
       anthropic)      default_model="claude-sonnet-4-5" ;;
       openai)         default_model="gpt-5.6-luna" ;;
-      azure-foundry)  default_model="gpt-5.6-luna" ;;
+      azure-foundry)  default_model="Kimi-K2.6" ;;
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       deepseek)       default_model="deepseek-chat" ;;
       mistral)        default_model="devstral-medium-latest" ;;

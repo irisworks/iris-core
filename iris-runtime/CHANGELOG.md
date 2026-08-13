@@ -7,7 +7,8 @@
 - `gpt-5.6-luna`, `gpt-5.4-mini`, and `gpt-5.6-terra` model entries in
   `data/models.json.template`'s `azure-foundry` block, and in bootstrap's
   generated `openai` provider block. `gpt-5.6-luna` is now the bootstrap
-  default model for both the `openai` and `azure-foundry` providers.
+  default model for the `openai` provider (`azure-foundry`'s default stays
+  `Kimi-K2.6`).
 
 ### Removed
 
