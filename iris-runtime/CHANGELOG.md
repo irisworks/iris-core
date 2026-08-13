@@ -4,9 +4,16 @@
 
 ### Added
 
-- `gpt-5.6-luna` model entry in `data/models.json.template`'s `azure-foundry`
-  block (also usable via the built-in `openai` provider with no template
-  entry needed).
+- `gpt-5.6-luna`, `gpt-5.4-mini`, and `gpt-5.6-terra` model entries in
+  `data/models.json.template`'s `azure-foundry` block, and in bootstrap's
+  generated `openai` provider block. `gpt-5.6-luna` is now the bootstrap
+  default model for both the `openai` and `azure-foundry` providers.
+
+### Removed
+
+- `gpt-4o` / `gpt-4o-mini` entries from `data/models.json.template`'s
+  `azure-foundry` block and bootstrap's generated `openai` provider block —
+  retired-generation models.
 
 ## [1.4.0] - 2026-08-12
 
