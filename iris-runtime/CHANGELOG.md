@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-13
+
 ### Changed
 
 - `github` skill now teaches plain `git`/`git push` with the token in the
