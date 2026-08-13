@@ -13,6 +13,30 @@
   sets `user.name`/`user.email` once via local (not global) git config in
   `/iris/repo`, so plain `git commit` picks it up automatically.
 
+### Added
+
+- `gpt-5.6-luna`, `gpt-5.4-mini`, and `gpt-5.6-terra` model entries in
+  `data/models.json.template`'s `azure-foundry` block, and in bootstrap's
+  generated `openai` provider block. `gpt-5.6-luna` is now the bootstrap
+  default model for the `openai` provider (`azure-foundry`'s default stays
+  `Kimi-K2.6`).
+
+### Removed
+
+- `gpt-4o` / `gpt-4o-mini` entries from `data/models.json.template`'s
+  `azure-foundry` block and bootstrap's generated `openai` provider block —
+  retired-generation models.
+
+### Fixed
+
+- Switch bootstrap's generated `openai` provider block from `openai-completions`
+  to `openai-responses`. Tool calls to `gpt-5.6-luna` and its siblings failed
+  with `400 Function tools with reasoning_effort are not supported ... use
+  /v1/responses or set reasoning_effort to 'none'` on `/v1/chat/completions` —
+  the API defaults `reasoning_effort` server-side whenever tools are present,
+  so omitting the param (`supportsReasoningEffort: false`) wasn't enough;
+  `/v1/responses` doesn't have this restriction.
+
 ## [1.4.0] - 2026-08-12
 
 ### Added

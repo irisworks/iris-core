@@ -72,6 +72,13 @@ file as unreadable rather than claiming success. If a model here does accept
 images but a Slack/Telegram photo isn't getting through, check `"input"` for
 that model id first.
 
+The `openai` provider defaults to `gpt-5.6-luna` (`gpt-5.4-mini` and
+`gpt-5.6-terra` are also available) and uses `pi-ai`'s `openai-responses`
+module, not `openai-completions` — these models 400 on `/v1/chat/completions`
+when tool calls are present unless `reasoning_effort` is explicitly `"none"`,
+which `openai-completions` has no way to force. Do not switch it back to
+`openai-completions`.
+
 DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
 API key — both go through `pi-ai`'s `openai-completions` provider module,
 since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
