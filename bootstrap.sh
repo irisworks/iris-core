@@ -212,18 +212,6 @@ if ! command -v jq &>/dev/null; then sudo apt-get install -y jq; fi
 # nginx + certbot are installed in step 5, and only when a public domain
 # (IRIS_BASE_DOMAIN) is configured — the default path serves nothing publicly.
 
-if ! command -v iris-git &>/dev/null; then
-  log "Installing iris-git wrapper..."
-  sudo tee /usr/local/bin/iris-git > /dev/null << 'SCRIPT'
-#!/usr/bin/env bash
-exec git \
-  -c user.name="Iris" \
-  -c user.email="${GIT_USER_EMAIL:-iris@example.com}" \
-  "$@"
-SCRIPT
-  sudo chmod +x /usr/local/bin/iris-git
-fi
-
 if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' 2>/dev/null; then
   log "Installing Node.js 22..."
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
@@ -1239,6 +1227,11 @@ else
   ln -sfn "$REPO_DIR" "$IRIS_DIR/repo"
 fi
 
+# Repo-local identity (not global) so Iris's commits are attributed correctly
+# without touching any other git config on the box.
+git -C "$REPO_DIR" config user.name "Iris"
+git -C "$REPO_DIR" config user.email "${GIT_USER_EMAIL:-iris@example.com}"
+
 mkdir -p "$IRIS_DIR/data"
 ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
@@ -1255,7 +1248,6 @@ ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
 # are named after the documented command, not the source file.
 sudo ln -sfn "$REPO_DIR/skills/get-secret/get-secret"     /usr/local/bin/get-secret
 sudo ln -sfn "$REPO_DIR/skills/set-secret/set-secret"     /usr/local/bin/set-secret
-sudo ln -sfn "$REPO_DIR/skills/github/github-commit"      /usr/local/bin/github-commit
 sudo ln -sfn "$REPO_DIR/skills/schedule/schedule"         /usr/local/bin/schedule
 sudo ln -sfn "$REPO_DIR/skills/self-heal/self-heal"       /usr/local/bin/self-heal
 sudo ln -sfn "$REPO_DIR/skills/send-email/send-email"     /usr/local/bin/send-email

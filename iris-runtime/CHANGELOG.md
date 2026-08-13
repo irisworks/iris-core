@@ -10,6 +10,17 @@
   default model for the `openai` provider (`azure-foundry`'s default stays
   `Kimi-K2.6`).
 
+### Changed
+
+- `github` skill now teaches plain `git`/`git push` with the token in the
+  push URL, instead of wrapping commits in a `github-commit` script — GitHub's
+  own permission model already blocks pushes to repos Iris doesn't own, so
+  the skill only needs to document the commands and the one org/repo check
+  that matters (never push to `irisworks/iris-core`, the public upstream).
+  `iris-git` (the git-identity wrapper) is also removed; `bootstrap.sh` now
+  sets `user.name`/`user.email` once via local (not global) git config in
+  `/iris/repo`, so plain `git commit` picks it up automatically.
+
 ### Removed
 
 - `gpt-4o` / `gpt-4o-mini` entries from `data/models.json.template`'s
