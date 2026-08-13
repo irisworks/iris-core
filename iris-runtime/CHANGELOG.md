@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `gpt-5.6-luna` model entry in `data/models.json.template`'s `azure-foundry`
+  block (also usable via the built-in `openai` provider with no template
+  entry needed).
+
 ## [1.4.0] - 2026-08-12
 
 ### Added
