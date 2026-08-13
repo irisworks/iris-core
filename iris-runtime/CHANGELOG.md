@@ -16,6 +16,16 @@
   `azure-foundry` block and bootstrap's generated `openai` provider block —
   retired-generation models.
 
+### Fixed
+
+- Switch bootstrap's generated `openai` provider block from `openai-completions`
+  to `openai-responses`. Tool calls to `gpt-5.6-luna` and its siblings failed
+  with `400 Function tools with reasoning_effort are not supported ... use
+  /v1/responses or set reasoning_effort to 'none'` on `/v1/chat/completions` —
+  the API defaults `reasoning_effort` server-side whenever tools are present,
+  so omitting the param (`supportsReasoningEffort: false`) wasn't enough;
+  `/v1/responses` doesn't have this restriction.
+
 ## [1.4.0] - 2026-08-12
 
 ### Added

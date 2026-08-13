@@ -935,7 +935,7 @@ MODELJSON
   "providers": {
     "openai": {
       "baseUrl": "https://api.openai.com/v1",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "apiKey": "OPENAI_API_KEY",
       "models": [
         { "id": "gpt-5.6-luna",  "name": "GPT-5.6 Luna",  "reasoning": true, "input": ["text","image"], "contextWindow": 272000, "maxTokens": 32768, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
