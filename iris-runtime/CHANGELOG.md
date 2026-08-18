@@ -11,6 +11,21 @@
 
 ### Fixed
 
+- Telegram bridge/agent replies containing `<`, `>`, or `&` (e.g. file content
+  like `<server-ip>`) could fail to display or break `editMessageText`, since
+  `toTelegramHtml()` sent them unescaped under `parse_mode: "HTML"`. It now
+  escapes the whole message before applying markdown-to-HTML formatting.
+
+- Telegram code blocks no longer pick up stray markup: the emphasis and link
+  passes ran over already-converted code, nesting a second `<code>` (rejected
+  by Telegram) and turning `char *_x_` into `char *<i>x</i>`. Code spans are
+  now parked behind placeholders until formatting is done.
+
+- Telegram messages over 4096 characters are now split on the source text
+  rather than the rendered HTML, so a cut can no longer land inside an entity
+  or between `<b>` and `</b>` and cost the whole chunk. Chunk length is
+  measured after escaping, and an oversized code block is re-fenced per chunk.
+
 - Image attachments were recognized (or missed) by filename extension, not
   content — `agent.ts`'s inbound-attachment path and the `read` tool both
   looked at `.jpg`/`.png`/etc. before deciding whether to treat a file as an
