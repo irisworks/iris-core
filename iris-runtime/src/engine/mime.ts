@@ -8,7 +8,7 @@
  * (same approach pi-coding-agent's own read tool uses upstream, via the
  * `file-type` package) is strictly more reliable and costs one small read.
  */
-import { fileTypeFromBuffer } from "file-type";
+import { fileTypeFromBuffer, fileTypeFromFile } from "file-type";
 
 /** MIME types pi-ai's ImageContent (and every provider module that consumes it) accepts. */
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
@@ -25,4 +25,21 @@ export async function detectImageMimeType(buffer: Buffer): Promise<string | unde
 	const fileType = await fileTypeFromBuffer(buffer);
 	if (!fileType || !SUPPORTED_IMAGE_MIME_TYPES.has(fileType.mime)) return undefined;
 	return fileType.mime;
+}
+
+/**
+ * Same detection as detectImageMimeType, but sniffs a file directly on the
+ * host filesystem via file-type's own fromFile() — which handles the
+ * open/read-header/close lifecycle internally. Only valid when `path` is
+ * reachable from the host (unlike the executor-based sniffing read.ts needs
+ * for sandboxed paths). Returns undefined on any read failure (e.g. ENOENT).
+ */
+export async function detectImageMimeTypeFromFile(path: string): Promise<string | undefined> {
+	try {
+		const fileType = await fileTypeFromFile(path);
+		if (!fileType || !SUPPORTED_IMAGE_MIME_TYPES.has(fileType.mime)) return undefined;
+		return fileType.mime;
+	} catch {
+		return undefined;
+	}
 }

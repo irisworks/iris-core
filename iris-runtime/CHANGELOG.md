@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `agent.ts`'s attachment sniffing now uses `file-type`'s own `fromFile()`
+  instead of a hand-rolled fd open/read/close, and sniffs all of a message's
+  attachments concurrently instead of one at a time. The `read` tool's image
+  sniff and full-image read now share one exec+base64-decode helper.
+
 ### Fixed
 
 - Image attachments were recognized (or missed) by filename extension, not

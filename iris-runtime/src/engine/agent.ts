@@ -12,7 +12,7 @@ import {
 	SessionManager,
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
-import { closeSync, existsSync, openSync, readFileSync, readSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
@@ -20,7 +20,7 @@ import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
 import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./langfuse.js";
 import { createIrisSettingsManager, readResetWatermark, syncLogToSessionManager, writeResetWatermark } from "./context.js";
 import * as log from "./log.js";
-import { detectImageMimeType, MIME_SNIFF_BYTES } from "./mime.js";
+import { detectImageMimeTypeFromFile } from "./mime.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
 import { getSecretProvider } from "./secrets.js";
@@ -67,34 +67,6 @@ async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
 		);
 	}
 	return key;
-}
-
-/**
- * Sniff whether a file is a supported image format from its magic bytes, not
- * its filename — a Telegram document with no name downloads as a bare "file",
- * and any transport can hand over a mislabeled or extensionless attachment.
- * Only reads the small header window sniffing needs, not the whole file.
- * Returns undefined (not a throw) on any read failure — the caller's existing
- * try/catch around the full readFileSync() a few lines later is what should
- * decide a truly unreadable file falls back to a plain path reference, not
- * this best-effort sniff.
- */
-async function sniffImageMimeType(fullPath: string): Promise<string | undefined> {
-	let fd: number;
-	try {
-		fd = openSync(fullPath, "r");
-	} catch {
-		return undefined;
-	}
-	try {
-		const head = Buffer.alloc(MIME_SNIFF_BYTES);
-		const bytesRead = readSync(fd, head, 0, MIME_SNIFF_BYTES, 0);
-		return await detectImageMimeType(head.subarray(0, bytesRead));
-	} catch {
-		return undefined;
-	} finally {
-		closeSync(fd);
-	}
 }
 
 /**
@@ -1155,6 +1127,7 @@ function createRunner(
 			const droppedImagePaths: string[] = [];
 			const unavailablePaths: string[] = [];
 
+			const availableAttachments: { fullPath: string }[] = [];
 			for (const a of ctx.message.attachments || []) {
 				const fullPath = `${workspacePath}/${a.local}`;
 
@@ -1171,7 +1144,18 @@ function createRunner(
 					continue;
 				}
 
-				const mimeType = await sniffImageMimeType(fullPath);
+				availableAttachments.push({ fullPath });
+			}
+
+			// Sniff all available attachments concurrently — each is an independent
+			// file read, so there's no reason to pay this latency once per attachment.
+			const mimeTypes = await Promise.all(
+				availableAttachments.map(({ fullPath }) => detectImageMimeTypeFromFile(fullPath)),
+			);
+
+			for (let i = 0; i < availableAttachments.length; i++) {
+				const { fullPath } = availableAttachments[i];
+				const mimeType = mimeTypes[i];
 				if (mimeType) {
 					if (!supportsImageInput) {
 						// Model can't accept image input — don't hand it an ImageContent
