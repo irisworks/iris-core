@@ -138,7 +138,7 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 | `IRIS_BRIDGE_PORT` / `IRIS_BRIDGE_HOST` | — / `127.0.0.1` | Sub-agent bridge server (sub-agents only) |
 | `IRIS_LLM_TIMEOUT_SECS` | `90` | Per-attempt LLM timeout |
 | `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_RETRY_BASE_MS` | `3` / `2000` | Retry with exponential backoff on 429/timeout/transient errors |
-| `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
+| `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.7` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
 | `IRIS_VERBOSE_TOOLS` | — (quiet) | Default verbose tool-call/thinking output on Slack/Telegram; overridable per channel with `verbose on/off/status` (Slack) or `/verbose on/off/status` (Telegram) |
@@ -254,6 +254,19 @@ iris-core/
 ├── docs/                 # rendered docs site — setup, configuration, channel modes, web UI, ...
 └── terraform/            # optional profile — dynamic Azure resources
 ```
+
+## Design Discussions
+
+Proposed features get a design doc under `docs/plans/` before any code lands —
+context, alternatives considered, and open questions, so the tradeoffs are
+visible before the implementation is. See
+[`docs/plans/2026-08-05-task-primitive-design.md`](docs/plans/2026-08-05-task-primitive-design.md)
+for an example.
+
+To weigh in on one, open a [GitHub Discussion](https://github.com/irisworks/iris-core/discussions)
+linking the doc rather than commenting on a PR — Discussions persist after a PR
+merges or closes, which is where the conversation actually needs to live for a
+proposal still being shaped.
 
 ## Releases
 

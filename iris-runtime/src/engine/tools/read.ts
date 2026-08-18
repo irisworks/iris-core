@@ -22,10 +22,19 @@ async function sniffImageMimeType(
 	path: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	const result = await executor.exec(`head -c ${MIME_SNIFF_BYTES} ${shellEscape(path)} | base64`, { signal });
-	if (result.code !== 0) return undefined;
-	const head = Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
-	return detectImageMimeType(head);
+	try {
+		const head = await execBase64(executor, `head -c ${MIME_SNIFF_BYTES} ${shellEscape(path)}`, signal);
+		return await detectImageMimeType(head);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Run a shell command whose stdout is base64, and decode it to a Buffer. Throws (with stderr) on failure. */
+async function execBase64(executor: Executor, cmd: string, signal?: AbortSignal): Promise<Buffer> {
+	const result = await executor.exec(`${cmd} | base64`, { signal });
+	if (result.code !== 0) throw new Error(result.stderr || `Command failed: ${cmd}`);
+	return Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
 }
 
 const readSchema = Type.Object({
@@ -75,16 +84,18 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				}
 
 				// Read as image (binary) - use base64
-				const result = await executor.exec(`base64 < ${shellEscape(path)}`, { signal });
-				if (result.code !== 0) {
-					throw new Error(result.stderr || `Failed to read file: ${path}`);
+				let imageData: Buffer;
+				try {
+					imageData = await execBase64(executor, `cat ${shellEscape(path)}`, signal);
+				} catch (error) {
+					throw new Error(error instanceof Error ? error.message : `Failed to read file: ${path}`);
 				}
-				const base64 = result.stdout.replace(/\s/g, ""); // Remove whitespace from base64
 
 				// Downscale oversized images before they reach the model — same reasoning
 				// as agent.ts's inbound-attachment path. Undefined means it couldn't be
 				// decoded/shrunk under the ceiling; send the original and let the provider
 				// decide rather than failing the read.
+				const base64 = imageData.toString("base64");
 				const resized = await resizeImageIfNeededAsync(base64, mimeType, signal);
 
 				return {
