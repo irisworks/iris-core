@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Telegram bridge/agent replies containing `<`, `>`, or `&` (e.g. file content
+  like `<server-ip>`) could fail to display or break `editMessageText`, since
+  `toTelegramHtml()` sent them unescaped under `parse_mode: "HTML"`. It now
+  escapes the whole message before applying markdown-to-HTML formatting.
+
 - Slack attachments raced their own message dispatch: `processAttachments()`
   queued a file download in the background and returned immediately, so a
   live message could reach `agent.ts`'s prompt-building before the download

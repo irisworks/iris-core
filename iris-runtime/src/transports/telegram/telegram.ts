@@ -198,25 +198,22 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// escapeHtml doesn't escape quotes (fine for text nodes); href="..." needs them
-// escaped too, or a URL containing a literal `"` could break out of the
-// attribute and inject arbitrary HTML.
-function escapeAttr(text: string): string {
-	return escapeHtml(text).replace(/"/g, "&quot;");
-}
-
-function toTelegramHtml(text: string): string {
+export function toTelegramHtml(text: string): string {
+	// Escape the whole message up front so any HTML-sensitive characters in
+	// arbitrary text (e.g. bridge/agent output like `<server-ip>`) can't be
+	// interpreted as markup by Telegram's parse_mode: "HTML". Everything below
+	// operates on already-escaped text and only wraps markup around it, so none
+	// of the extracted fragments need escaping again.
+	text = escapeHtml(text);
 	// Fenced code blocks: ```lang\ncode\n``` → <pre><code>code</code></pre>
-	text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code: string) =>
-		`<pre><code>${escapeHtml(code.trim())}</code></pre>`,
-	);
+	text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code: string) => `<pre><code>${code.trim()}</code></pre>`);
 	// Inline code: `code` → <code>code</code>
-	text = text.replace(/`([^`\n]+)`/g, (_, code: string) => `<code>${escapeHtml(code)}</code>`);
+	text = text.replace(/`([^`\n]+)`/g, (_, code: string) => `<code>${code}</code>`);
 	// Links: [text](url) → real anchor for http(s) URLs; otherwise the model is
 	// usually referencing a file sent separately via the attach tool, so drop the
 	// bracket syntax rather than leave it showing literally.
 	text = text.replace(/\[([^\]\n]+)\]\((\S+)\)/g, (_, label: string, url: string) =>
-		/^https?:\/\//i.test(url) ? `<a href="${escapeAttr(url)}">${escapeHtml(label)}</a>` : escapeHtml(label),
+		/^https?:\/\//i.test(url) ? `<a href="${url.replace(/"/g, "&quot;")}">${label}</a>` : label,
 	);
 	// Bold: **text**
 	text = text.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
