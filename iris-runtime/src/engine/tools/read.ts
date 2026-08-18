@@ -1,27 +1,39 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
-import { extname } from "path";
 import type { Executor } from "../sandbox.js";
+import { detectImageMimeType, MIME_SNIFF_BYTES } from "../mime.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
 /**
- * Map of file extensions to MIME types for common image formats
+ * Sniff whether a file is a supported image format from its magic bytes, not
+ * its filename — a mislabeled or extensionless attachment (e.g. a Telegram
+ * document with no name) would otherwise never be recognized. Reads only the
+ * small header window sniffing needs, via the same executor as everything
+ * else in this tool (the path may be inside a sandboxed container/VM, not
+ * the host filesystem, so this can't just open() the file directly).
+ * Returns undefined (not an error) if `path` doesn't exist — the caller's
+ * existing text-read path below will surface that as its normal "no such
+ * file" error instead.
  */
-const IMAGE_MIME_TYPES: Record<string, string> = {
-	".jpg": "image/jpeg",
-	".jpeg": "image/jpeg",
-	".png": "image/png",
-	".gif": "image/gif",
-	".webp": "image/webp",
-};
+async function sniffImageMimeType(
+	executor: Executor,
+	path: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	try {
+		const head = await execBase64(executor, `head -c ${MIME_SNIFF_BYTES} ${shellEscape(path)}`, signal);
+		return await detectImageMimeType(head);
+	} catch {
+		return undefined;
+	}
+}
 
-/**
- * Check if a file is an image based on its extension
- */
-function isImageFile(filePath: string): string | null {
-	const ext = extname(filePath).toLowerCase();
-	return IMAGE_MIME_TYPES[ext] || null;
+/** Run a shell command whose stdout is base64, and decode it to a Buffer. Throws (with stderr) on failure. */
+async function execBase64(executor: Executor, cmd: string, signal?: AbortSignal): Promise<Buffer> {
+	const result = await executor.exec(`${cmd} | base64`, { signal });
+	if (result.code !== 0) throw new Error(result.stderr || `Command failed: ${cmd}`);
+	return Buffer.from(result.stdout.replace(/\s/g, ""), "base64");
 }
 
 const readSchema = Type.Object({
@@ -51,7 +63,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 			{ path, offset, limit }: { label: string; path: string; offset?: number; limit?: number },
 			signal?: AbortSignal,
 		): Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }> => {
-			const mimeType = isImageFile(path);
+			const mimeType = await sniffImageMimeType(executor, path, signal);
 
 			if (mimeType) {
 				if (!options.supportsImageInput) {
@@ -71,16 +83,17 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				}
 
 				// Read as image (binary) - use base64
-				const result = await executor.exec(`base64 < ${shellEscape(path)}`, { signal });
-				if (result.code !== 0) {
-					throw new Error(result.stderr || `Failed to read file: ${path}`);
+				let imageData: Buffer;
+				try {
+					imageData = await execBase64(executor, `cat ${shellEscape(path)}`, signal);
+				} catch (error) {
+					throw new Error(error instanceof Error ? error.message : `Failed to read file: ${path}`);
 				}
-				const base64 = result.stdout.replace(/\s/g, ""); // Remove whitespace from base64
 
 				return {
 					content: [
 						{ type: "text", text: `Read image file [${mimeType}]` },
-						{ type: "image", data: base64, mimeType },
+						{ type: "image", data: imageData.toString("base64"), mimeType },
 					],
 					details: undefined,
 				};

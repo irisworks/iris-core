@@ -26,6 +26,7 @@ import {
 	writeResetWatermark,
 } from "./context.js";
 import * as log from "./log.js";
+import { detectImageMimeTypeFromFile } from "./mime.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
 import { getSecretProvider } from "./secrets.js";
@@ -72,18 +73,6 @@ async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
 		);
 	}
 	return key;
-}
-
-const IMAGE_MIME_TYPES: Record<string, string> = {
-	jpg: "image/jpeg",
-	jpeg: "image/jpeg",
-	png: "image/png",
-	gif: "image/gif",
-	webp: "image/webp",
-};
-
-function getImageMimeType(filename: string): string | undefined {
-	return IMAGE_MIME_TYPES[filename.toLowerCase().split(".").pop() || ""];
 }
 
 /**
@@ -1178,6 +1167,7 @@ function createRunner(
 			const droppedImagePaths: string[] = [];
 			const unavailablePaths: string[] = [];
 
+			const availableAttachments: { fullPath: string }[] = [];
 			for (const a of ctx.message.attachments || []) {
 				const fullPath = `${workspacePath}/${a.local}`;
 
@@ -1194,7 +1184,18 @@ function createRunner(
 					continue;
 				}
 
-				const mimeType = getImageMimeType(a.local);
+				availableAttachments.push({ fullPath });
+			}
+
+			// Sniff all available attachments concurrently — each is an independent
+			// file read, so there's no reason to pay this latency once per attachment.
+			const mimeTypes = await Promise.all(
+				availableAttachments.map(({ fullPath }) => detectImageMimeTypeFromFile(fullPath)),
+			);
+
+			for (let i = 0; i < availableAttachments.length; i++) {
+				const { fullPath } = availableAttachments[i];
+				const mimeType = mimeTypes[i];
 				if (mimeType) {
 					if (!supportsImageInput) {
 						// Model can't accept image input — don't hand it an ImageContent
