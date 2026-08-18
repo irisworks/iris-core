@@ -2,7 +2,30 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `agent.ts`'s attachment sniffing now uses `file-type`'s own `fromFile()`
+  instead of a hand-rolled fd open/read/close, and sniffs all of a message's
+  attachments concurrently instead of one at a time. The `read` tool's image
+  sniff and full-image read now share one exec+base64-decode helper.
+
 ### Fixed
+
+- Image attachments were recognized (or missed) by filename extension, not
+  content — `agent.ts`'s inbound-attachment path and the `read` tool both
+  looked at `.jpg`/`.png`/etc. before deciding whether to treat a file as an
+  image. A Telegram document with no filename downloads as a bare `file`
+  with no extension and was never recognized, regardless of what it
+  actually was; any transport could in principle hand over a mislabeled
+  attachment the same way. Both now sniff the file's actual magic bytes via
+  a new shared `engine/mime.ts` (`file-type` under the hood, matching the
+  approach `pi-coding-agent`'s own read tool uses upstream — not currently
+  exposed through its public API, so reimplemented directly rather than
+  deep-imported). `agent.ts` reads only the small header window sniffing
+  needs before deciding, not the whole file; the `read` tool does the same
+  through the executor (`head -c 4100 <path> | base64`, decoded and
+  sniffed) since the path may be inside a sandboxed container/VM, not the
+  host filesystem.
 
 - Slack attachments raced their own message dispatch: `processAttachments()`
   queued a file download in the background and returned immediately, so a

@@ -73,6 +73,13 @@ file as unreadable rather than claiming success. If a model here does accept
 images but a Slack/Telegram photo isn't getting through, check `"input"` for
 that model id first.
 
+Separately, "is this attachment an image" is decided from the file's actual
+content (magic-byte sniffing), not its filename or extension — a Telegram
+document with no filename, or any attachment with a missing/wrong extension,
+is still recognized correctly. If `"input"` includes `"image"` and an
+attachment still isn't picked up, it likely isn't a supported format (jpeg,
+png, gif, webp).
+
 The `openai` provider defaults to `gpt-5.6-luna` (`gpt-5.4-mini` and
 `gpt-5.6-terra` are also available) and uses `pi-ai`'s `openai-responses`
 module, not `openai-completions` — these models 400 on `/v1/chat/completions`
