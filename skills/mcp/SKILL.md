@@ -9,8 +9,8 @@ Connect external toolsets to yourself via the Model Context Protocol. Servers
 configured in `<workspace>/meta/mcp.json` are connected by the runtime and
 their tools become directly callable by you, named `mcp__<server>__<tool>`.
 The config hot-reloads before each message — no restart needed. Current
-per-server status is always visible in your system prompt under
-"## MCP Servers".
+per-server status is always visible in the `<dynamic_context>` block
+prepended to each message you receive, under "## MCP Servers".
 
 ## Config format
 

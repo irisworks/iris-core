@@ -20,6 +20,7 @@ import { loadSessions, registerSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, type Attachment, type ChannelStore } from "../../engine/store.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
+	byId,
 	registerPromptProfile,
 	type ChannelInfo,
 	type ChannelTransport,
@@ -150,10 +151,19 @@ export const slackPromptProfile: TransportPromptProfile = {
 Bold: *text*, Italic: _text_, Code: \`code\`, Block: \`\`\`code\`\`\`, Links: <url|text>
 Do NOT use **double asterisks** or [markdown](links).`,
 	directorySection: (channels: ChannelInfo[], users: UserInfo[]) => {
+		// Sort by id (stable across runs, unlike the Map insertion order these arrive
+		// in) so the directory renders byte-identical turn to turn and doesn't
+		// invalidate the prompt cache just because a new user/channel was discovered.
+		// Ordinal comparison, not localeCompare, so the order can't shift with the
+		// host's ICU/locale configuration.
+		const sortedChannels = [...channels].sort(byId);
+		const sortedUsers = [...users].sort(byId);
 		const channelMappings =
-			channels.length > 0 ? channels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
+			sortedChannels.length > 0 ? sortedChannels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
 		const userMappings =
-			users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
+			sortedUsers.length > 0
+				? sortedUsers.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n")
+				: "(no users loaded)";
 		return `## Slack IDs
 Channels: ${channelMappings}
 

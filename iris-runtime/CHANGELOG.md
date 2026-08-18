@@ -41,6 +41,156 @@
   message with attachments could dedupe incorrectly against its own live
   copy; it now uses the transport's actual tag name.
 
+## [1.5.0] - 2026-08-13
+
+### Changed
+
+- `github` skill now teaches plain `git`/`git push` with the token in the
+  push URL, instead of wrapping commits in a `github-commit` script — GitHub's
+  own permission model already blocks pushes to repos Iris doesn't own, so
+  the skill only needs to document the commands and the one org/repo check
+  that matters (never push to `irisworks/iris-core`, the public upstream).
+  `iris-git` (the git-identity wrapper) is also removed; `bootstrap.sh` now
+  sets `user.name`/`user.email` once via local (not global) git config in
+  `/iris/repo`, so plain `git commit` picks it up automatically.
+
+### Added
+
+- `gpt-5.6-luna`, `gpt-5.4-mini`, and `gpt-5.6-terra` model entries in
+  `data/models.json.template`'s `azure-foundry` block, and in bootstrap's
+  generated `openai` provider block. `gpt-5.6-luna` is now the bootstrap
+  default model for the `openai` provider (`azure-foundry`'s default stays
+  `Kimi-K2.6`).
+
+### Removed
+
+- `gpt-4o` / `gpt-4o-mini` entries from `data/models.json.template`'s
+  `azure-foundry` block and bootstrap's generated `openai` provider block —
+  retired-generation models.
+
+### Fixed
+
+- Switch bootstrap's generated `openai` provider block from `openai-completions`
+  to `openai-responses`. Tool calls to `gpt-5.6-luna` and its siblings failed
+  with `400 Function tools with reasoning_effort are not supported ... use
+  /v1/responses or set reasoning_effort to 'none'` on `/v1/chat/completions` —
+  the API defaults `reasoning_effort` server-side whenever tools are present,
+  so omitting the param (`supportsReasoningEffort: false`) wasn't enough;
+  `/v1/responses` doesn't have this restriction.
+
+## [1.4.0] - 2026-08-12
+
+### Added
+
+- `scripts/upgrade.sh` — upgrades an install to the latest (or a given)
+  release tag without re-prompting for secrets or manual steps. Auto-detects
+  the pinned-clone shape (bumps `$IRIS_DIR/repo`, detects Key Vault vs
+  `/iris/.env`, calls `bootstrap.sh` without `--setup`) vs. the overlay +
+  submodule shape (bumps the `core/` submodule, rebuilds, restarts `iris`).
+
+### Changed
+
+- `MEMORY.md` contents and live MCP server status no longer live in the
+  system prompt — both change turn to turn (memory whenever Iris writes to
+  it, MCP status when a server flaps), and the system prompt sits at
+  position 0 of the prefix Anthropic/Bedrock cache, so touching it
+  invalidated the entire cached prefix (tools + system + full message
+  history) on every turn regardless of how stable everything else was.
+  They're now prepended to each turn's user message instead
+  (`buildDynamicContext()` in `agent.ts`), after the cached history, where
+  their churn is free. `buildSystemPrompt()`'s `memory`/`mcpStatus`
+  parameters are removed accordingly.
+- `install.sh` suppresses git's detached-HEAD advice when cloning/checking
+  out a release tag, since that's expected and not an error.
+- The per-channel `Agent` is now constructed with `sessionId: channelId`.
+  `pi-ai` forwards `sessionId` to providers that key caching/routing off it —
+  `openai-responses`'s `prompt_cache_key` and Mistral's native `x-affinity`
+  header — neither of which Iris was previously setting, since nothing ever
+  populated `sessionId`. Anthropic and Bedrock are unaffected: they cache off
+  `cache_control` breakpoints, not a session id.
+- Slack's and Telegram's channel/user directory sections in the system prompt
+  are now sorted by ID (ordinal, not locale-aware) before rendering, so the
+  directory renders byte-identical turn to turn and doesn't invalidate the
+  prompt cache just because a new user/channel was discovered.
+- `IRIS_COMPACT_THRESHOLD`'s default rises from `0.6` to `0.7` (see
+  `docs/configuration.md`), now that pre-run auto-compaction is in place to
+  keep it from being needed sooner. Note this doesn't change how the pre-run
+  check handles an oversized image attachment in the *current* turn: that
+  check is a char-count estimate over the system prompt and existing message
+  history, computed before the new turn's message/images are appended, so a
+  single large attachment isn't visible to it at any threshold — only the
+  hardcoded ≥70% post-run check (real token counts from the provider) catches
+  that case.
+
+### Security
+
+- The `github` skill and bootstrap's org/repo prompt now refuse to push Iris's
+  commits to `irisworks/iris-core` itself or to any confirmed-public repo —
+  previously, a missing `GITHUB_TOKEN` silently left `origin` pointed at the
+  upstream clone and `git push origin main` pushed straight there. When
+  visibility can't be verified (no `gh`, PAT scope, network), it now warns
+  loudly instead of silently assuming "not public".
+
+### Fixed
+
+- `github-commit` was documented in `skills/github/SKILL.md` but never shipped
+  as a script, so bootstrap had nothing to put on `PATH`. Extracted it to
+  `skills/github/github-commit` and symlinked it in `bootstrap.sh`.
+- The per-turn `<dynamic_context>` block broke `syncLogToSessionManager`'s
+  dedup (it only stripped a leading timestamp) and left every past turn's
+  stale memory/MCP snapshot baked into history. Both the dynamic_context
+  stripping in dedup comparisons and in reloaded history are now handled.
+- `stripDynamicContext`'s block-closing match is now greedy so it can't be
+  fooled by MEMORY.md content that happens to quote the literal closing tag.
+  Post-run auto-compaction also strips the current turn's still-raw block
+  before summarizing, instead of feeding the summarizer a full memory dump.
+
+## [1.3.1] - 2026-08-12
+
+### Fixed
+
+- `IRIS_CORE_SIGNING_FINGERPRINT` pinning (`scripts/verify-tag-signature.sh`)
+  deleted the pinned key's own subkey while removing other keys from the
+  keyring, and `gpg --delete-keys` on a subkey fingerprint removes the whole
+  certificate — so pinning broke for any real key with an encryption subkey
+  (the GPG default). Fingerprint collection is now scoped to primary (`pub`)
+  keys only.
+
+## [1.3.0] - 2026-08-11
+
+### Security
+
+- Verification logic moved to `scripts/verify-tag-signature.sh`, shared by
+  `install.sh` and the manual submodule-upgrade steps in `docs/RELEASING.md`.
+  `IRIS_CORE_SIGNING_FINGERPRINT` now restricts trust to the pinned key
+  itself (previously it only checked the first key in the fetched keyring,
+  while `verify-tag` would accept a signature from any key alongside it) and
+  compares case-insensitively.
+
+### Fixed
+
+- Image attachments were silently dropped instead of read, on any model
+  declared `"input": ["text"]` in `models.json` — including `Kimi-K2.5` and
+  `Kimi-K2.6` in `data/models.json.template`, despite both being natively
+  multimodal. `pi-ai` filters image content out of the request in every
+  provider module (`openai-completions`, `anthropic`, `google-shared`,
+  `mistral`, `openai-responses-shared`) based on `model.input`, with no
+  signal back to the caller — so a user-sent photo vanished with no trace,
+  and the `read` tool's image branch claimed `"Read image file [...]"` while
+  the image itself never reached the model, leaving it to confabulate the
+  contents. `data/models.json.template`'s Kimi entries now declare
+  `["text", "image"]`. For any model still declared text-only (e.g. a
+  `custom`-provider endpoint from `bootstrap.sh`, which defaults new custom
+  models to `["text"]`), inbound image attachments are now diverted to a
+  `<dropped_image_attachments
+  reason="...">` block instead of being base64'd into a doomed `ImageContent`
+  block, and a warning is logged; the `read` tool does the same for an
+  in-conversation image read, returning an explicit "cannot be read this
+  way" text result instead of a fabricated success. `createIrisTools()` and
+  `createReadTool()` now take an `IrisToolsOptions`/`ReadToolOptions` with
+  `supportsImageInput`, derived from `model.input` at runner construction
+  (moved earlier in `agent.ts` so tools are built after the model is known).
+
 ## [1.2.0] - 2026-08-05
 
 Streaming bridge replies, Langfuse observability, deterministic `@agentname`
@@ -122,6 +272,15 @@ and MCP support as documented profiles.
 - `bootstrap.sh` now prompts for a Perplexity API key ("Set up web search (Perplexity)?", default No) alongside the existing optional Resend/GitHub prompts, seeding it as `PERPLEXITY-API-KEY` (Key Vault path) or writing `PERPLEXITY_API_KEY` to `/iris/.env` (zero-cloud path) — previously the `search-web` skill's key had to be added by hand after install, with no bootstrap step at all. Added to `secret-store.ts`'s `SENSITIVE_ENV_VARS` and `docs/secrets.md`'s migration list so `iris-secret import-env` and store/proxy mode pick it up like every other bootstrap-seeded credential.
 - `mistral-medium-latest` (Mistral Medium 3.5) added to the Mistral provider's model list in `data/models.json.template` and to the inline model generator in `bootstrap.sh`, alongside the existing `devstral-medium-latest`/`mistral-large-latest` entries (#113). Routed through the same `openai-completions` provider module and `compat: { supportsStore: false }` flag as the other Mistral models — config-only, no new SDK integration. Configured with a 256k context window and `["text", "image"]` input (Mistral Medium 3.5 is multimodal and has a larger context window than `mistral-large-latest`'s 128k). The bootstrap provider-menu description for option 6 is updated to `Mistral Large / Medium / Devstral` so the new model is discoverable. `docs/configuration.md` notes the new entry.
 
+### Security
+
+- `install.sh` now runs `git verify-tag` on release tags (#132), checking
+  against the maintainer's GPG key fetched from `https://github.com/<user>.gpg`
+  (`IRIS_CORE_SIGNING_GH_USER`, default `katrohit`). Branches and installs with
+  no key/gpg available skip with a notice; a bad or missing signature on a `v*`
+  tag aborts. Pin the key with `IRIS_CORE_SIGNING_FINGERPRINT`, or bypass with
+  `IRIS_SKIP_TAG_VERIFY=1`. See `docs/SETUP.md` and `docs/RELEASING.md`.
+
 ### Changed
 
 - `docs/overlay.md` keeps overlay+submodule as the default and now documents core code
@@ -136,28 +295,6 @@ and MCP support as documented profiles.
 - Removed a dead `if/else` in `formatToolArgs()` where both branches were identical (#74); the misleading comment above it was replaced with one pointing at `logToolStart`, which does the actual multi-line indenting.
 
 ### Fixed
-
-- Image attachments were silently dropped instead of read, on any model
-  declared `"input": ["text"]` in `models.json` — including `Kimi-K2.5` and
-  `Kimi-K2.6` in `data/models.json.template`, despite both being natively
-  multimodal. `pi-ai` filters image content out of the request in every
-  provider module (`openai-completions`, `anthropic`, `google-shared`,
-  `mistral`, `openai-responses-shared`) based on `model.input`, with no
-  signal back to the caller — so a user-sent photo vanished with no trace,
-  and the `read` tool's image branch claimed `"Read image file [...]"` while
-  the image itself never reached the model, leaving it to confabulate the
-  contents. `data/models.json.template`'s Kimi entries now declare
-  `["text", "image"]`. For any model still declared text-only (e.g. a
-  `custom`-provider endpoint from `bootstrap.sh`, which defaults new custom
-  models to `["text"]`), inbound image attachments are now diverted to a
-  `<dropped_image_attachments
-  reason="...">` block instead of being base64'd into a doomed `ImageContent`
-  block, and a warning is logged; the `read` tool does the same for an
-  in-conversation image read, returning an explicit "cannot be read this
-  way" text result instead of a fabricated success. `createIrisTools()` and
-  `createReadTool()` now take an `IrisToolsOptions`/`ReadToolOptions` with
-  `supportsImageInput`, derived from `model.input` at runner construction
-  (moved earlier in `agent.ts` so tools are built after the model is known).
 
 - Startup no longer re-dispatches stale interrupted runs. `resumeInterruptedRuns()`
   treated any last user message followed only by placeholders as an interrupted run,

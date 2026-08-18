@@ -212,18 +212,6 @@ if ! command -v jq &>/dev/null; then sudo apt-get install -y jq; fi
 # nginx + certbot are installed in step 5, and only when a public domain
 # (IRIS_BASE_DOMAIN) is configured — the default path serves nothing publicly.
 
-if ! command -v iris-git &>/dev/null; then
-  log "Installing iris-git wrapper..."
-  sudo tee /usr/local/bin/iris-git > /dev/null << 'SCRIPT'
-#!/usr/bin/env bash
-exec git \
-  -c user.name="Iris" \
-  -c user.email="${GIT_USER_EMAIL:-iris@example.com}" \
-  "$@"
-SCRIPT
-  sudo chmod +x /usr/local/bin/iris-git
-fi
-
 if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' 2>/dev/null; then
   log "Installing Node.js 22..."
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
@@ -369,7 +357,7 @@ prompt_secrets() {
   if [[ -z "$IRIS_PROVIDER" ]]; then
     echo "[iris-bootstrap] Choose LLM provider:"
     echo "  1) anthropic       — Claude Sonnet / Opus (recommended)"
-    echo "  2) openai          — GPT-4o / GPT-4"
+    echo "  2) openai          — GPT-5.6 Luna / GPT-5.6 Terra / GPT-5.4 mini"
     echo "  3) azure-foundry   — Azure AI Foundry (Azure OpenAI, Kimi)"
     echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)"
     echo "  5) deepseek        — DeepSeek V3 / R1"
@@ -392,13 +380,13 @@ prompt_secrets() {
   if [[ -z "$IRIS_MODEL" ]]; then
     case "$IRIS_PROVIDER" in
       anthropic)      default_model="claude-sonnet-4-5" ;;
-      openai)         default_model="gpt-4o" ;;
+      openai)         default_model="gpt-5.6-luna" ;;
       azure-foundry)  default_model="Kimi-K2.6" ;;
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       deepseek)       default_model="deepseek-chat" ;;
       mistral)        default_model="devstral-medium-latest" ;;
       custom)         default_model="" ;;
-      *)              default_model="gpt-4o" ;;
+      *)              default_model="gpt-5.6-luna" ;;
     esac
     if [[ "$IRIS_PROVIDER" == "custom" ]]; then
       IRIS_MODEL=$(prompt "Model id (exact string the endpoint expects, e.g. kimi-k2-0905-preview)" "")
@@ -632,14 +620,40 @@ prompt_secrets() {
     echo "  or a private mirror of iris-core — not this upstream checkout, and"
     echo "  not a public fork: what Iris commits here is yours, keep it private."
     echo ""
-    GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
-    if [[ -n "$GH_ORG_REPO" ]]; then
-      IRIS_GITHUB_ORG="${GH_ORG_REPO%%/*}"
-      IRIS_GITHUB_REPO="${GH_ORG_REPO#*/}"
-    else
-      log "Warning: no org/repo set — Iris can't push skill commits until"
-      log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
-    fi
+    while true; do
+      GH_ORG_REPO=$(prompt "GitHub org/repo Iris commits to (e.g. yourname/iris-core)" "")
+      if [[ -z "$GH_ORG_REPO" ]]; then
+        log "Warning: no org/repo set — Iris can't push skill commits until"
+        log "  IRIS_GITHUB_ORG / IRIS_GITHUB_REPO are set in /iris/.env."
+        break
+      fi
+      CANDIDATE_ORG="${GH_ORG_REPO%%/*}"
+      CANDIDATE_REPO="${GH_ORG_REPO#*/}"
+      IRIS_CORE_ORG_REPO=$(echo "$IRIS_CORE_URL" | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+      if [[ "${CANDIDATE_ORG,,}/${CANDIDATE_REPO,,}" == "$(echo "$IRIS_CORE_ORG_REPO" | tr '[:upper:]' '[:lower:]')" ]]; then
+        log "Refusing: ${GH_ORG_REPO} is the iris-core upstream you cloned from."
+        log "  This must be your own private overlay repo or a private mirror —"
+        log "  see docs/overlay.md."
+        continue
+      fi
+      if command -v gh &>/dev/null && [[ -n "$GITHUB_TOKEN" ]]; then
+        if ! GH_VISIBILITY=$(GH_TOKEN="$GITHUB_TOKEN" gh repo view "$GH_ORG_REPO" --json visibility -q .visibility 2>&1); then
+          log "Warning: could not verify ${GH_ORG_REPO}'s visibility (gh error:"
+          log "  ${GH_VISIBILITY}). Proceeding, but double check it's private —"
+          log "  run 'gh repo view ${GH_ORG_REPO}' manually if unsure."
+          GH_VISIBILITY=""
+        fi
+        if [[ "$GH_VISIBILITY" == "PUBLIC" ]]; then
+          log "Refusing: ${GH_ORG_REPO} is a public repo. Iris commits her own"
+          log "  memory (MEMORY.md), skills, and business context here — it must"
+          log "  be private. Never a public fork; see docs/overlay.md."
+          continue
+        fi
+      fi
+      IRIS_GITHUB_ORG="$CANDIDATE_ORG"
+      IRIS_GITHUB_REPO="$CANDIDATE_REPO"
+      break
+    done
   fi
 
   # ── Email (optional) ──
@@ -909,11 +923,12 @@ MODELJSON
   "providers": {
     "openai": {
       "baseUrl": "https://api.openai.com/v1",
-      "api": "openai-completions",
+      "api": "openai-responses",
       "apiKey": "OPENAI_API_KEY",
       "models": [
-        { "id": "gpt-4o",      "name": "GPT-4o",      "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
-        { "id": "gpt-4o-mini", "name": "GPT-4o mini", "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
+        { "id": "gpt-5.6-luna",  "name": "GPT-5.6 Luna",  "reasoning": true, "input": ["text","image"], "contextWindow": 272000, "maxTokens": 32768, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "gpt-5.4-mini",  "name": "GPT-5.4 mini",  "reasoning": true, "input": ["text","image"], "contextWindow": 400000, "maxTokens": 32768, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "reasoning": true, "input": ["text","image"], "contextWindow": 400000, "maxTokens": 32768, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
     }
   }
@@ -1211,6 +1226,11 @@ else
   log "Using local repo at $REPO_DIR"
   ln -sfn "$REPO_DIR" "$IRIS_DIR/repo"
 fi
+
+# Repo-local identity (not global) so Iris's commits are attributed correctly
+# without touching any other git config on the box.
+git -C "$REPO_DIR" config user.name "Iris"
+git -C "$REPO_DIR" config user.email "${GIT_USER_EMAIL:-iris@example.com}"
 
 mkdir -p "$IRIS_DIR/data"
 ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
