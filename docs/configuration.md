@@ -27,7 +27,7 @@ env vars.
 | `IRIS_BRIDGE_STATUS_THROTTLE_MS` | `3000` | Minimum gap between chat edits when forwarding sub-agent progress |
 | `IRIS_LLM_TIMEOUT_SECS` | `90` | Per-attempt LLM timeout |
 | `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_RETRY_BASE_MS` | `3` / `2000` | Retry with exponential backoff on 429/timeout/transient errors |
-| `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.6` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
+| `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.7` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
 | `IRIS_ATTACHMENT_DOWNLOAD_TIMEOUT_MS` | `10000` | How long a live Slack message bound-waits for its own file attachments to finish downloading before dispatching for processing anyway — see [Troubleshooting](troubleshooting.md) |
 | `IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS` | `4` | On startup, don't re-dispatch an interrupted run whose user message is older than this. Stale placeholders are still cleaned up; only the LLM run is skipped. Raise it if you want long outages resumed, set it very high to always resume |
@@ -80,6 +80,13 @@ is still recognized correctly. If `"input"` includes `"image"` and an
 attachment still isn't picked up, it likely isn't a supported format (jpeg,
 png, gif, webp).
 
+The `openai` provider defaults to `gpt-5.6-luna` (`gpt-5.4-mini` and
+`gpt-5.6-terra` are also available) and uses `pi-ai`'s `openai-responses`
+module, not `openai-completions` — these models 400 on `/v1/chat/completions`
+when tool calls are present unless `reasoning_effort` is explicitly `"none"`,
+which `openai-completions` has no way to force. Do not switch it back to
+`openai-completions`.
+
 DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
 API key — both go through `pi-ai`'s `openai-completions` provider module,
 since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
@@ -125,6 +132,35 @@ Two mechanisms keep long-running channels healthy:
   up to `IRIS_LLM_MAX_RETRIES` times with jittered exponential backoff, posting a
   visible `_Retrying (n/3)..._` notice.
 - **Auto-compaction** — before each prompt, if the estimated context exceeds
-  `IRIS_COMPACT_THRESHOLD` of the model window, Iris summarises older history down
-  toward `IRIS_COMPACT_TARGET` (up to 3 passes). A post-run check at ≥70% real
-  usage acts as a backstop.
+  `IRIS_COMPACT_THRESHOLD` (default 70%) of the model window, Iris summarises
+  older history down toward `IRIS_COMPACT_TARGET` (up to 3 passes). This is a
+  char-count estimate over the system prompt and message history computed
+  *before* the new turn's message (and any image attachments) is appended, so
+  it can't see an oversized attachment in the turn that introduces it — the
+  post-run check at ≥70% real usage (hardcoded, not env-configurable) is the
+  backstop that catches that case, using actual token counts from the
+  provider's response.
+
+## Prompt caching
+
+Anthropic and Bedrock cache the prompt on a strict byte-for-byte prefix match:
+any change anywhere in the system prompt invalidates the entire cached prefix
+(tools + system + full message history) for that turn. The system prompt is
+kept fully static across turns for a given channel and skill set — `MEMORY.md`
+contents and live MCP server connection status, both of which change turn to
+turn, are prepended to the current turn's user message instead (visible as a
+`<dynamic_context>` block in `last_prompt.jsonl`), after the cached history,
+where their churn doesn't invalidate anything. The Slack/Telegram channel/user
+directory embedded in the system prompt is also sorted by id before
+rendering, rather than left in `Map` insertion order — insertion order
+reorders every time a new user or channel is discovered, which would
+invalidate the cache even though nothing about the directory's actual content
+changed.
+
+Iris's per-channel `Agent` is constructed with `sessionId` set to the channel
+id. Anthropic and Bedrock ignore it — they cache off explicit `cache_control`
+breakpoints — but `pi-ai`'s `openai-responses` provider forwards it as
+`prompt_cache_key`, and Mistral's native provider uses it for the
+`x-affinity` header (KV-cache prefix affinity). Channel id is a stable,
+natural session boundary since each channel already gets its own long-lived
+runner and message history.

@@ -56,7 +56,8 @@ form of `MEMORY.md` instead of the one-paragraph default.
 
 ```bash
 if agents/lib/register-bridge.sh has-pat; then
-  github-commit "agents/<name>/" "feat: scaffold <name> agent"
+  cd /iris/repo && git add "agents/<name>/" && git commit -m "feat: scaffold <name> agent" && \
+    git push "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git" main
 else
   echo "No GitHub PAT configured — skipping commit, agent stays local-only for now."
 fi
@@ -164,7 +165,10 @@ module "<name>_agent" {
 }
 ```
 ```bash
-github-commit "terraform/agents.tf" "infra: provision <name> agent container"  # same PAT gate as step 2
+# same PAT gate as step 2 — see the github skill for the commit/push commands
+cd /iris/repo && git add "terraform/agents.tf" && \
+  git commit -m "infra: provision <name> agent container" && \
+  git push "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git" main
 terraform-apply
 ```
 The image build (`npm run build && docker build`) now runs at most once
