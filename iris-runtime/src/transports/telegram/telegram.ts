@@ -198,18 +198,30 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Sentinel for parked code spans. Stripped from the input first, so it can't be
+// forged by the message itself; carries no character the markup passes match on.
+const CODE_MARK = "@@ICODE";
+const CODE_RE = /@@ICODE(\d+)@@/g;
+
 export function toTelegramHtml(text: string): string {
 	// Escape the whole message up front so any HTML-sensitive characters in
 	// arbitrary text (e.g. bridge/agent output like `<server-ip>`) can't be
 	// interpreted as markup by Telegram's parse_mode: "HTML". Everything below
 	// operates on already-escaped text and only wraps markup around it, so none
 	// of the extracted fragments need escaping again.
-	text = escapeHtml(text);
-	// Fenced code blocks: ```lang\ncode\n``` → <pre><code>code</code></pre>
-	text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code: string) => `<pre><code>${code.trim()}</code></pre>`);
-	// Inline code: `code` → <code>code</code>
-	text = text.replace(/`([^`\n]+)`/g, (_, code: string) => `<code>${code}</code>`);
-	// Links: [text](url) → real anchor for http(s) URLs; otherwise the model is
+	text = escapeHtml(text.replace(CODE_RE, ""));
+	// Code spans convert first and are parked behind placeholders so the
+	// emphasis/link passes below can't reach inside them: an inline code span
+	// within a fenced block would otherwise nest a second <code> element (which
+	// Telegram rejects outright, leaving the reply stuck on its placeholder),
+	// and code like `char *_x_` would grow a stray <i>.
+	const spans: string[] = [];
+	const park = (html: string) => `${CODE_MARK}${spans.push(html) - 1}@@`;
+	// Fenced code blocks: ```lang\ncode\n``` -> <pre><code>code</code></pre>
+	text = text.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code: string) => park(`<pre><code>${code.trim()}</code></pre>`));
+	// Inline code: `code` -> <code>code</code>
+	text = text.replace(/`([^`\n]+)`/g, (_, code: string) => park(`<code>${code}</code>`));
+	// Links: [text](url) -> real anchor for http(s) URLs; otherwise the model is
 	// usually referencing a file sent separately via the attach tool, so drop the
 	// bracket syntax rather than leave it showing literally.
 	text = text.replace(/\[([^\]\n]+)\]\((\S+)\)/g, (_, label: string, url: string) =>
@@ -219,29 +231,102 @@ export function toTelegramHtml(text: string): string {
 	text = text.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
 	// Italic: _text_ (word boundaries to avoid matching underscores in identifiers)
 	text = text.replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, "<i>$1</i>");
-	return text;
+	return text.replace(CODE_RE, (_, i: string) => spans[Number(i)]);
 }
 
 // ============================================================================
-// Chunk splitting (mirrors main.ts splitIntoChunks)
+// Chunk splitting
 // ============================================================================
 
-function splitIntoChunks(text: string, maxChars: number): string[] {
-	if (text.length <= maxChars) return [text];
+// Splits the *source* text rather than the rendered HTML. Cutting HTML at a
+// fixed offset can land inside an entity (`&amp;`) or between <b> and </b>, and
+// Telegram answers that with "can't find end tag", losing the whole chunk.
+// Each unit below is converted on its own, so every chunk is self-contained,
+// balanced HTML measured after escaping rather than before it.
+export function toTelegramHtmlChunks(text: string, maxChars = TG_MAX_CHARS, maxChunks = Infinity): string[] {
+	const fits = (s: string) => toTelegramHtml(s).length <= maxChars;
+	if (fits(text)) return [toTelegramHtml(text)];
+
 	const chunks: string[] = [];
-	let remaining = text;
-	while (remaining.length > 0) {
-		if (remaining.length <= maxChars) {
-			chunks.push(remaining);
+	let cur = "";
+	const flush = () => {
+		const src = cur.trim();
+		if (src) chunks.push(toTelegramHtml(src));
+		cur = "";
+	};
+	for (const unit of splitUnits(text)) {
+		if (chunks.length >= maxChunks) return chunks;
+		if (fits(cur + unit)) {
+			cur += unit;
+			continue;
+		}
+		flush();
+		if (fits(unit)) {
+			cur = unit;
+			continue;
+		}
+		for (const piece of hardSplit(unit, fits)) chunks.push(toTelegramHtml(piece));
+	}
+	flush();
+	return chunks.length > 0 ? chunks : [toTelegramHtml(text)];
+}
+
+// One unit per fenced code block, otherwise one per line (newline retained), so
+// a chunk boundary never falls inside a fence or mid-line.
+function splitUnits(text: string): string[] {
+	const units: string[] = [];
+	const pushLines = (s: string) => {
+		for (const line of s.split(/(?<=\n)/)) if (line) units.push(line);
+	};
+	const fenceRe = /```[\w]*\n?[\s\S]*?```\n?/g;
+	let last = 0;
+	let m: RegExpExecArray | null;
+	while ((m = fenceRe.exec(text)) !== null) {
+		pushLines(text.slice(last, m.index));
+		units.push(m[0]);
+		last = m.index + m[0].length;
+	}
+	pushLines(text.slice(last));
+	return units;
+}
+
+// A single unit that doesn't fit on its own. A fenced block is re-fenced around
+// each piece so neither half degrades into literal backticks.
+function hardSplit(unit: string, fits: (s: string) => boolean): string[] {
+	const fence = /^```([\w]*)\n?([\s\S]*?)```\n?$/.exec(unit);
+	if (fence) {
+		const wrap = (body: string) => `\`\`\`${fence[1]}\n${body}\n\`\`\``;
+		return charSplit(fence[2], (s) => fits(wrap(s))).map(wrap);
+	}
+	return charSplit(unit, fits);
+}
+
+function charSplit(text: string, fits: (s: string) => boolean): string[] {
+	const pieces: string[] = [];
+	let rest = text;
+	while (rest.length > 0) {
+		if (fits(rest)) {
+			pieces.push(rest);
 			break;
 		}
-		const searchFrom = Math.floor(maxChars * 0.8);
-		const newlineIdx = remaining.lastIndexOf("\n", maxChars);
-		const cut = newlineIdx >= searchFrom ? newlineIdx + 1 : maxChars;
-		chunks.push(remaining.slice(0, cut).trimEnd());
-		remaining = remaining.slice(cut).trimStart();
+		// Longest prefix that still fits once converted.
+		let lo = 1;
+		let hi = rest.length;
+		while (lo < hi) {
+			const mid = Math.ceil((lo + hi) / 2);
+			if (fits(rest.slice(0, mid))) lo = mid;
+			else hi = mid - 1;
+		}
+		let cut = lo;
+		const nl = rest.lastIndexOf("\n", cut);
+		if (nl > cut / 2) cut = nl + 1;
+		// Markup wrapping means output length isn't strictly monotone in the
+		// prefix length, so confirm the cut rather than trust the search.
+		while (cut > 1 && !fits(rest.slice(0, cut))) cut--;
+		pieces.push(rest.slice(0, cut));
+		rest = rest.slice(cut);
 	}
-	return chunks;
+	return pieces;
 }
 
 // ============================================================================
@@ -321,8 +406,7 @@ export class TelegramBot implements ChannelTransport {
 
 	async postMessage(channelId: string, text: string): Promise<string> {
 		const { chatId, threadId } = this.decodeChannel(channelId);
-		const html = toTelegramHtml(text);
-		const chunks = splitIntoChunks(html, TG_MAX_CHARS);
+		const chunks = toTelegramHtmlChunks(text);
 		const result = (await this.call("sendMessage", {
 			chat_id: chatId,
 			text: chunks[0],
@@ -342,12 +426,12 @@ export class TelegramBot implements ChannelTransport {
 
 	async updateMessage(channelId: string, messageId: string, text: string): Promise<void> {
 		const { chatId } = this.decodeChannel(channelId);
-		const html = toTelegramHtml(text);
+		const html = toTelegramHtmlChunks(text, TG_MAX_CHARS, 1)[0];
 		try {
 			await this.call("editMessageText", {
 				chat_id: chatId,
 				message_id: parseInt(messageId, 10),
-				text: html.slice(0, TG_MAX_CHARS),
+				text: html,
 				parse_mode: "HTML",
 			});
 		} catch (err) {
@@ -362,8 +446,7 @@ export class TelegramBot implements ChannelTransport {
 	// send overflow as new messages below.
 	async finalizeMessage(channelId: string, messageId: string, text: string): Promise<void> {
 		const { chatId, threadId } = this.decodeChannel(channelId);
-		const html = toTelegramHtml(text);
-		const chunks = splitIntoChunks(html, TG_MAX_CHARS);
+		const chunks = toTelegramHtmlChunks(text);
 
 		try {
 			await this.call("editMessageText", {
