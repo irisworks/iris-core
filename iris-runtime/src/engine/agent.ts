@@ -988,7 +988,7 @@ function createRunner(
 	return {
 		async run(
 			ctx: MessageContext,
-			_store: ChannelStore,
+			store: ChannelStore,
 			_pendingMessages?: PendingMessage[],
 			verbose?: boolean,
 		): Promise<{ stopReason: string; errorMessage?: string }> {
@@ -1007,6 +1007,8 @@ function createRunner(
 			const syncedCount = syncLogToSessionManager(
 				sessionManager,
 				channelDir,
+				workspacePath,
+				profile.attachmentsTagName,
 				ctx.message.ts,
 				readResetWatermark(channelDir),
 			);
@@ -1174,12 +1176,26 @@ function createRunner(
 			const imageAttachments: ImageContent[] = [];
 			const nonImagePaths: string[] = [];
 			const droppedImagePaths: string[] = [];
+			const unavailablePaths: string[] = [];
 
 			for (const a of ctx.message.attachments || []) {
 				const fullPath = `${workspacePath}/${a.local}`;
-				const mimeType = getImageMimeType(a.local);
 
-				if (mimeType && existsSync(fullPath)) {
+				// Check availability before anything else — a Slack file that hasn't
+				// finished downloading (or failed) looks identical to a genuine text
+				// attachment if we only branch on mimeType, and silently handing over
+				// a path that isn't there is worse than saying so (the bound-await in
+				// ChannelStore.processAttachments()'s `ready` promise makes this the
+				// exception, not the common case, but it can still time out).
+				if (!existsSync(fullPath)) {
+					unavailablePaths.push(
+						`${fullPath} (${store.didDownloadFail(a.local) ? "download failed" : "still downloading — try again shortly"})`,
+					);
+					continue;
+				}
+
+				const mimeType = getImageMimeType(a.local);
+				if (mimeType) {
 					if (!supportsImageInput) {
 						// Model can't accept image input — don't hand it an ImageContent
 						// block pi-ai will silently drop downstream (see model.input
@@ -1199,6 +1215,10 @@ function createRunner(
 				} else {
 					nonImagePaths.push(fullPath);
 				}
+			}
+
+			if (unavailablePaths.length > 0) {
+				userMessage += `\n\n<unavailable_attachments>\n${unavailablePaths.join("\n")}\n</unavailable_attachments>`;
 			}
 
 			if (droppedImagePaths.length > 0) {

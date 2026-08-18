@@ -33,6 +33,14 @@ import {
 // Slack message text limit (safely under the actual 40K limit); IRIS_SLACK_MAX_CHARS overrides
 const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
 
+// How long a live message dispatch bound-waits for its own attachments to finish
+// downloading before proceeding anyway (see awaitAttachments()).
+const ATTACHMENT_DOWNLOAD_TIMEOUT_MS = Number(process.env.IRIS_ATTACHMENT_DOWNLOAD_TIMEOUT_MS) || 10000;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Passthrough/relay configuration (meta/channels.json, mode "passthrough"):
  *   url          — external endpoint messages are forwarded to (required)
@@ -110,7 +118,7 @@ export interface SlackEvent {
 	user: string;
 	text: string;
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
-	/** Processed attachments with local paths (populated after logUserMessage) */
+	/** Processed attachments with local paths (populated after logUserMessageSync) */
 	attachments?: Attachment[];
 }
 
@@ -262,6 +270,9 @@ export class SlackBot implements ChannelTransport {
 	private channels = new Map<string, SlackChannel>();
 	private queues = new Map<string, ChannelQueue>();
 	private allowedChannels = new Set<string>(); // If non-empty, only respond to these channel IDs
+	// channel:ts -> receivedAt, guards against Slack redelivering an event (e.g. the
+	// ack is delayed past Slack's retry window by the attachment bound-wait below).
+	private recentlyHandled = new Map<string, number>();
 
 	// Channel behaviour loaded from workingDir/meta/channels.json.
 	// Keyed by channel ID or prefix wildcard (e.g. "D*"); resolved via resolveChannelConfig().
@@ -892,6 +903,15 @@ export class SlackBot implements ChannelTransport {
 		return queue;
 	}
 
+	/** False the first time channel:ts is seen (and records it); true on any redelivery within the next 60s. */
+	private alreadyHandled(channel: string, ts: string): boolean {
+		const key = `${channel}:${ts}`;
+		if (this.recentlyHandled.has(key)) return true;
+		this.recentlyHandled.set(key, Date.now());
+		setTimeout(() => this.recentlyHandled.delete(key), 60000);
+		return false;
+	}
+
 	private setupEventHandlers(): void {
 		// Channel @mentions
 		this.socketClient.on("app_mention", async ({ event, ack }) => {
@@ -917,6 +937,13 @@ export class SlackBot implements ChannelTransport {
 				// Skip DMs (handled by message event)
 				if (e.channel.startsWith("D")) return;
 
+				// A Slack redelivery (e.g. our own ack landing late) must not be logged
+				// or dispatched a second time.
+				if (this.alreadyHandled(e.channel, e.ts)) {
+					ackOnce();
+					return;
+				}
+
 				const slackEvent: SlackEvent = {
 					type: "mention",
 					channel: e.channel,
@@ -928,7 +955,15 @@ export class SlackBot implements ChannelTransport {
 
 				// SYNC: Log to log.jsonl (ALWAYS, even for old messages)
 				// Also downloads attachments in background and stores local paths
-				slackEvent.attachments = this.logUserMessage(slackEvent);
+				const { attachments, ready } = this.logUserMessageSync(slackEvent);
+				slackEvent.attachments = attachments;
+
+				// Ack now — Slack only cares that we received the envelope, not that
+				// attachment downloads (awaited below) have finished. Acking here keeps
+				// our ack latency the same as before the attachment bound-wait existed,
+				// so we don't hand Slack a wider redelivery window than we used to.
+				ackOnce();
+				await this.awaitAttachments(attachments, ready);
 
 				// Only trigger processing for messages AFTER startup (not replayed old messages)
 				if (this.startupTs && e.ts < this.startupTs) {
@@ -1024,6 +1059,13 @@ export class SlackBot implements ChannelTransport {
 					blocks?: Array<{ type: string; text?: { type: string; text: string }; elements?: any[] }>;
 				};
 
+				// A Slack redelivery (e.g. our own ack landing late) must not be logged
+				// or dispatched a second time.
+				if (this.alreadyHandled(e.channel, e.ts)) {
+					ackOnce();
+					return;
+				}
+
 				// Skip bot messages, edits, etc.
 				// Exception: in leads mode, allow all bot/integration messages (n8n, insta, email, etc.)
 				// Only skip own bot messages to avoid loops.
@@ -1091,7 +1133,13 @@ export class SlackBot implements ChannelTransport {
 
 				// SYNC: Log to log.jsonl (ALL messages - channel chatter and DMs)
 				// Also downloads attachments in background and stores local paths
-				slackEvent.attachments = this.logUserMessage(slackEvent);
+				const { attachments, ready } = this.logUserMessageSync(slackEvent);
+				slackEvent.attachments = attachments;
+
+				// Ack now — see the app_mention handler above for why this happens
+				// before the attachment bound-wait rather than after it.
+				ackOnce();
+				await this.awaitAttachments(attachments, ready);
 
 				// Only trigger processing for messages AFTER startup (not replayed old messages),
 				// unless this channel's config replays missed messages (the leads recipe).
@@ -1171,13 +1219,17 @@ export class SlackBot implements ChannelTransport {
 	}
 
 	/**
-	 * Log a user message to log.jsonl (SYNC)
-	 * Downloads attachments in background via store
+	 * Log a user message to log.jsonl (SYNC). Kicks off attachment downloads via
+	 * the store but doesn't wait on them — callers must ack the Slack event right
+	 * after this returns, then separately await awaitAttachments() before building
+	 * a prompt from the result. Keeping the wait out of this method is what keeps
+	 * our ack latency independent of how long attachment downloads take.
 	 */
-	private logUserMessage(event: SlackEvent): Attachment[] {
+	private logUserMessageSync(event: SlackEvent): { attachments: Attachment[]; ready: Promise<void> } {
 		const user = this.users.get(event.user);
-		// Process attachments - queues downloads in background
-		const attachments = event.files ? this.store.processAttachments(event.channel, event.files, event.ts) : [];
+		const { attachments, ready } = event.files
+			? this.store.processAttachments(event.channel, event.files, event.ts)
+			: { attachments: [] as Attachment[], ready: Promise.resolve() };
 		this.logToFile(event.channel, {
 			date: new Date(parseFloat(event.ts) * 1000).toISOString(),
 			ts: event.ts,
@@ -1188,7 +1240,21 @@ export class SlackBot implements ChannelTransport {
 			attachments,
 			isBot: false,
 		});
-		return attachments;
+		return { attachments, ready };
+	}
+
+	/**
+	 * Bound-waits for attachments to finish downloading before the caller builds
+	 * a prompt from them, so agent.ts doesn't race a download still in flight —
+	 * see ChannelStore.processAttachments()'s `ready` promise. Bounded, not
+	 * awaited to completion: a slow/stalled Slack download shouldn't stall
+	 * dispatch indefinitely; after the timeout the file is just reported as
+	 * unavailable downstream instead of pretending it's there.
+	 */
+	private async awaitAttachments(attachments: Attachment[], ready: Promise<void>): Promise<void> {
+		if (attachments.length > 0) {
+			await Promise.race([ready, sleep(ATTACHMENT_DOWNLOAD_TIMEOUT_MS)]);
+		}
 	}
 
 	// ==========================================================================
@@ -1269,8 +1335,9 @@ export class SlackBot implements ChannelTransport {
 			const user = this.users.get(msg.user!);
 			// Strip @mentions from text (same as live messages)
 			const text = (msg.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim();
-			// Process attachments - queues downloads in background
-			const attachments = msg.files ? this.store.processAttachments(channelId, msg.files, msg.ts!) : [];
+			// Process attachments - queues downloads in background. This is historical
+			// backfill, not a live dispatch, so no need to bound-wait on `ready` here.
+			const attachments = msg.files ? this.store.processAttachments(channelId, msg.files, msg.ts!).attachments : [];
 
 			this.logToFile(channelId, {
 				date: new Date(parseFloat(msg.ts!) * 1000).toISOString(),

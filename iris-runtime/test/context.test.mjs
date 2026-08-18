@@ -56,10 +56,34 @@ test("syncLogToSessionManager: with no watermark, all log.jsonl messages replay 
 	]);
 	const sessionManager = makeFakeSessionManager();
 
-	const synced = syncLogToSessionManager(sessionManager, channelDir);
+	const synced = syncLogToSessionManager(sessionManager, channelDir, "/workspace", "slack_attachments");
 
 	assert.equal(synced, 2);
 	assert.equal(sessionManager.entries.length, 2);
+});
+
+test("syncLogToSessionManager: replays attachments from log.jsonl instead of dropping them (#147 follow-up)", () => {
+	const channelDir = mkdtempSync(join(tmpdir(), "iris-context-test-"));
+	writeLog(channelDir, [
+		{
+			ts: "1",
+			date: "2026-01-01T00:00:00.000Z",
+			user: "U1",
+			userName: "kat",
+			text: "check this out",
+			isBot: false,
+			attachments: [{ original: "photo.jpg", local: "slack/C1/attachments/1_photo.jpg" }],
+		},
+	]);
+	const sessionManager = makeFakeSessionManager();
+
+	const synced = syncLogToSessionManager(sessionManager, channelDir, "/workspace", "slack_attachments");
+
+	assert.equal(synced, 1);
+	const text = sessionManager.entries[0].message.content[0].text;
+	assert.match(text, /<slack_attachments>/);
+	// File doesn't actually exist on disk in this test — should be flagged, not silently omitted.
+	assert.match(text, /\/workspace\/slack\/C1\/attachments\/1_photo\.jpg \(not available\)/);
 });
 
 test("syncLogToSessionManager: a reset watermark stops pre-reset log.jsonl history from replaying into the cleared session (#109)", () => {
@@ -82,7 +106,7 @@ test("syncLogToSessionManager: a reset watermark stops pre-reset log.jsonl histo
 		log + JSON.stringify({ ts: "3", date: new Date(Date.now() + 1000).toISOString(), user: "U1", userName: "kat", text: "fresh start", isBot: false }) + "\n",
 	);
 
-	const synced = syncLogToSessionManager(sessionManager, channelDir, undefined, watermark);
+	const synced = syncLogToSessionManager(sessionManager, channelDir, "/workspace", "slack_attachments", undefined, watermark);
 
 	// Only the post-reset message should have replayed — not the two pre-reset ones.
 	assert.equal(synced, 1);

@@ -29,6 +29,7 @@ env vars.
 | `IRIS_LLM_MAX_RETRIES` / `IRIS_LLM_RETRY_BASE_MS` | `3` / `2000` | Retry with exponential backoff on 429/timeout/transient errors |
 | `IRIS_COMPACT_THRESHOLD` / `IRIS_COMPACT_TARGET` | `0.7` / `0.1` | Pre-run auto-compaction trigger/target (fraction of context window) |
 | `IRIS_SLACK_MAX_CHARS` | `30000` | Safe Slack message length before splitting |
+| `IRIS_ATTACHMENT_DOWNLOAD_TIMEOUT_MS` | `10000` | How long a live Slack message bound-waits for its own file attachments to finish downloading before dispatching for processing anyway — see [Troubleshooting](troubleshooting.md) |
 | `IRIS_INTERRUPTED_RUN_MAX_AGE_HOURS` | `4` | On startup, don't re-dispatch an interrupted run whose user message is older than this. Stale placeholders are still cleaned up; only the LLM run is skipped. Raise it if you want long outages resumed, set it very high to always resume |
 | `IRIS_TELEGRAM_FORCE_RECLAIM` | — | Set `true` + restart to transfer bot ownership |
 | `IRIS_VERBOSE_TOOLS` | — (quiet) | Default verbose tool-call/thinking output on Slack/Telegram. Quiet by default — a run shows a single status line that updates in place instead of a full per-tool-call/thinking dump. Overridable per channel at runtime with `verbose on` / `verbose off` / `verbose status` (Slack) or `/verbose on|off|status` (Telegram) — see [Channel Modes](channel-modes.md#verbose-tool-output) |
