@@ -45,7 +45,9 @@ request succeeds.
 browser-facing route, not the internal API, so nothing an unauthenticated
 sub-agent's own allow-list depends on is exposed to it.
 
-`POST /upload?channel=<channelId>` — body is the raw file bytes, header
+`POST /upload?channel=<channelId>` — `channelId` must be a `WEBUI-<id>` or
+`SESSION-<id>` channel (the two namespaces this transport owns; anything else,
+including other transports' channel dirs, is a 400). Body is the raw file bytes, header
 `X-Filename: <name>` (no path separators). Saves under that channel's
 `attachments/` directory (via `resolveChannelDir`/`resolveChannelPath` in
 `store.ts` — nothing hand-builds the path) and returns `{"local": "..."}`,
@@ -66,7 +68,10 @@ ever existed.
 `GET /ws?thread=<id>&agent=<name>` (upgraded to WebSocket) — `thread` opens or
 resumes a conversation, mapped to a `WEBUI-<id>` channel id (the existing
 virtual-channel convention shared with `SESSION-`/`BRIDGE-`/`ESCALATE-`, see
-`resolveChannelDir` in `store.ts`). `agent`, if given, must match a name in
+`resolveChannelDir` in `store.ts`). Passing a full `SESSION-<id>` as `thread`
+subscribes to that channel verbatim instead, so a consumer driving turns
+through the session REST API can watch the same live stream — see
+[API-driven sessions](#api-driven-sessions) below. `agent`, if given, must match a name in
 `agents.json` and routes every message in that thread to that sub-agent's
 bridge (see below) instead of Iris's own engine.
 
@@ -106,6 +111,22 @@ no "list my sessions" endpoint. One consequence: history doesn't hydrate on
 reconnect or page refresh. Iris's own memory is unaffected (`context.jsonl`
 still backs the conversation and is loaded on the next run), only the
 browser's visual replay of prior messages is skipped.
+
+## API-driven sessions
+
+Turns driven through the internal session API (`POST /sessions/:id/message`)
+run on a `SESSION-<id>` channel, minted by the runtime itself. Those channels
+are served here alongside `WEBUI-` ones: connect with
+`GET /ws?thread=SESSION-<id>` to receive that session's live
+`thinking`/`status`/`tool`/`final`/`update`/`file` frames, and use
+`POST /upload?channel=SESSION-<id>` / `GET /files/SESSION-<id>/<filename>` for
+its attachments. A consumer that uses the session API as its primary surface
+gets the streaming and file plumbing without also running the browser chat.
+
+The auth gate is unchanged — with `IRIS_WEBUI_PASSWORD` set, a `SESSION-`
+socket or upload needs the same session cookie any other request does. No
+other virtual namespace (`BRIDGE-`, `ESCALATE-`, `SELFHEAL-`) or transport
+channel dir is reachable through these routes.
 
 ## Sub-agent routing
 

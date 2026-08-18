@@ -11,6 +11,12 @@
 
 ### Fixed
 
+- `WebTransport` rejected the `SESSION-<id>` channels the runtime's own
+  `injectSessionMessage` mints, so sessions driven through the session API
+  could never open `/ws?thread=SESSION-<id>`, upload, or serve files. Both
+  namespaces are now served; the auth gate and the rejection of every other
+  channel namespace are unchanged. (#180)
+
 - Image attachments were recognized (or missed) by filename extension, not
   content — `agent.ts`'s inbound-attachment path and the `read` tool both
   looked at `.jpg`/`.png`/etc. before deciding whether to treat a file as an

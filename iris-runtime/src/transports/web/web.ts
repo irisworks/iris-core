@@ -5,6 +5,9 @@
 // dispatches into it with zero special-casing. Channel ids are `WEBUI-<id>`,
 // matching the existing virtual-channel convention already reserved for
 // "WEBUI" in store.ts/slack.ts (see resolveChannelDir's isVirtualChannel).
+// `SESSION-<id>` channels — minted by injectSessionMessage for turns driven
+// through the session REST API — are served here too, so an API-first
+// consumer gets the same live stream, uploads, and file serving.
 //
 // Realizes MessageContext over a WebSocket per browser connection: a thinking
 // placeholder while the run is in flight, structured tool-call events via the
@@ -85,14 +88,36 @@ function randomToken(): string {
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
+ * Channel namespaces this transport owns and will serve over WS/upload/files.
+ * `WEBUI-` is what the browser chat creates; `SESSION-` is what core's own
+ * `injectSessionMessage` creates for every turn driven through the session
+ * REST API, so an API-first consumer can subscribe to the same live
+ * thinking/tool/final stream the browser gets (IRIS-180).
+ */
+const WEB_CHANNEL_PREFIXES = ["WEBUI-", "SESSION-"] as const;
+
+/**
  * The `channel` param on /upload and /files must both stay within the
  * SAFE_ID charset (no traversal metacharacters) AND be scoped to a
- * WEBUI-owned channel — otherwise a browser client could read/write
- * attachments under an arbitrary Slack/Telegram channel dir by charset-valid
- * id alone (e.g. `channel=slack-general`), not just escape workingDir.
+ * channel namespace this transport owns — otherwise a browser client could
+ * read/write attachments under an arbitrary Slack/Telegram channel dir by
+ * charset-valid id alone (e.g. `channel=slack-general`), not just escape
+ * workingDir.
  */
 function isValidWebChannelId(channelId: string): boolean {
-	return channelId.startsWith("WEBUI-") && SAFE_ID.test(channelId.slice("WEBUI-".length));
+	return WEB_CHANNEL_PREFIXES.some(
+		(prefix) => channelId.startsWith(prefix) && SAFE_ID.test(channelId.slice(prefix.length)),
+	);
+}
+
+/**
+ * Maps a `?thread=` param onto the channel id the socket subscribes to. A
+ * bare id is the browser's own thread and gets the `WEBUI-` prefix; a value
+ * that already names an owned namespace (`SESSION-<id>`) is used verbatim so
+ * an API-driven session can be watched live.
+ */
+function resolveWebChannelId(threadId: string): string {
+	return isValidWebChannelId(threadId) ? threadId : `WEBUI-${threadId}`;
 }
 
 /**
@@ -121,7 +146,7 @@ export class WebTransport implements ChannelTransport {
 	private readonly port: number;
 	private readonly password: string | undefined;
 	private readonly sessionTokens = new Set<string>();
-	/** Connections currently subscribed to a given WEBUI-<id> channel. */
+	/** Connections currently subscribed to a given WEBUI-/SESSION- channel. */
 	private readonly connections = new Map<string, Set<WebSocket>>();
 	private server: Server | undefined;
 	private wss: WebSocketServer | undefined;
@@ -300,7 +325,7 @@ export class WebTransport implements ChannelTransport {
 		const url = new URL(req.url ?? "/ws", "http://localhost");
 		const threadId = url.searchParams.get("thread") || randomToken();
 		const targetAgent = url.searchParams.get("agent") || undefined;
-		const channelId = `WEBUI-${threadId}`;
+		const channelId = resolveWebChannelId(threadId);
 
 		let sockets = this.connections.get(channelId);
 		if (!sockets) {
@@ -432,7 +457,7 @@ export class WebTransport implements ChannelTransport {
 	}
 
 	/**
-	 * `channelId` must be a WEBUI-owned id (isValidWebChannelId) and every
+	 * `channelId` must be a web-owned id (isValidWebChannelId) and every
 	 * candidate read path is built through safeJoin, which verifies the
 	 * resolved path stays inside the channel dir — the authoritative guard,
 	 * not just the "/"/".." blacklist on `filename` (kept as an early
@@ -464,7 +489,7 @@ export class WebTransport implements ChannelTransport {
 		const filename = Array.isArray(filenameHeader) ? filenameHeader[0] : filenameHeader;
 		if (!channelId || !isValidWebChannelId(channelId) || !filename || filename.includes("/") || filename.includes("..")) {
 			res.writeHead(400, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ error: "channel query param (WEBUI-<safe-id>) and X-Filename header (no path separators) are required" }));
+			res.end(JSON.stringify({ error: "channel query param (WEBUI-<safe-id> or SESSION-<safe-id>) and X-Filename header (no path separators) are required" }));
 			return;
 		}
 		const chunks: Buffer[] = [];
