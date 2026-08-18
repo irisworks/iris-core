@@ -2,7 +2,7 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import type { Executor } from "../sandbox.js";
-import { resizeImageIfNeeded } from "../image-resize.js";
+import { resizeImageIfNeededAsync } from "../image-resize.js";
 import { detectImageMimeType, MIME_SNIFF_BYTES } from "../mime.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
@@ -85,7 +85,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				// as agent.ts's inbound-attachment path. Undefined means it couldn't be
 				// decoded/shrunk under the ceiling; send the original and let the provider
 				// decide rather than failing the read.
-				const resized = resizeImageIfNeeded(base64, mimeType);
+				const resized = await resizeImageIfNeededAsync(base64, mimeType, signal);
 
 				return {
 					content: [

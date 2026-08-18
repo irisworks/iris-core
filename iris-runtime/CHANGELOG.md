@@ -17,6 +17,12 @@
   both limits (the common case) are returned unchanged. A decode failure or
   an image that can't be shrunk under the ceiling falls back to sending the
   original as-is rather than dropping the attachment or failing the read.
+  The decode/resize/encode work now runs on a worker thread
+  (`resizeImageIfNeededAsync`) instead of inline, so a large image no longer
+  blocks the event loop for other channels while it resizes; the `read`
+  tool's call also honors its `AbortSignal`. An animated GIF/WebP over the
+  limit is left unresized rather than resized (Photon has no multi-frame
+  API, so resizing would silently flatten it to a single frame).
 
 - Image attachments were recognized (or missed) by filename extension, not
   content — `agent.ts`'s inbound-attachment path and the `read` tool both
