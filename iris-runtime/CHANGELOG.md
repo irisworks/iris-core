@@ -11,15 +11,21 @@
   simply still in flight, and it silently fell into the same bucket as a
   genuinely non-existent path. `processAttachments()` now also returns a
   `ready` promise that settles once every attachment in that call has been
-  downloaded or failed; `logUserMessage()` bound-waits on it (default 10s,
+  downloaded or failed; the message handlers bound-wait on it (default 10s,
   `IRIS_ATTACHMENT_DOWNLOAD_TIMEOUT_MS`) before the message is dispatched for
-  processing. Telegram already awaited its own downloads synchronously per
-  message and didn't have this race. `agent.ts` now also checks
-  `existsSync()` for every attachment *before* branching on mime type, and
-  anything still missing (download still running past the bound, or failed
-  outright — `ChannelStore.didDownloadFail()`) goes into a
+  processing, but ack Slack *before* that wait so the bound-wait doesn't widen
+  Slack's redelivery window. Telegram already awaited its own downloads
+  synchronously per message and didn't have this race. `agent.ts` now also
+  checks `existsSync()` for every attachment *before* branching on mime type,
+  and anything still missing (download still running past the bound, or
+  failed outright — `ChannelStore.didDownloadFail()`) goes into a
   `<unavailable_attachments>` note instead of being silently handed over
   as an apparently-normal path.
+
+- Slack event redelivery (e.g. a late ack, a socket reconnect) could double-log
+  and double-dispatch a message — `SlackBot`'s own `logToFile()` had no dedup
+  guard. Both message handlers now drop a redelivered `channel:ts` before
+  logging or dispatching it.
 
 - Attachments on messages logged while Iris was offline or mid-run vanished
   on replay. `log.jsonl` already records each message's `attachments` (`ChannelStore.logMessage()`
