@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-19
+
 ### Added
 
 - `upgrade-iris` skill — runs `scripts/upgrade.sh` from inside Iris. Blocks on
@@ -10,20 +12,18 @@
   `iris-upgrade` systemd unit so the `iris.service` restart can't kill the
   upgrade mid-flight. Output goes to `/iris/upgrade.log`.
 
+- `engine/channel-observers.ts` — a mirror that forwards a run's
+  thinking/status/tool/final/file events to a passive watcher of the same
+  channel. This is what lets a `SESSION-` WebSocket see a turn that runs on
+  Slack's, Telegram's, or Bridge's context. Off the hot path entirely when
+  nobody is watching. (#180)
+
 ### Changed
 
 - `agent.ts`'s attachment sniffing now uses `file-type`'s own `fromFile()`
   instead of a hand-rolled fd open/read/close, and sniffs all of a message's
   attachments concurrently instead of one at a time. The `read` tool's image
   sniff and full-image read now share one exec+base64-decode helper.
-
-### Added
-
-- `engine/channel-observers.ts` — a mirror that forwards a run's
-  thinking/status/tool/final/file events to a passive watcher of the same
-  channel. This is what lets a `SESSION-` WebSocket see a turn that runs on
-  Slack's, Telegram's, or Bridge's context. Off the hot path entirely when
-  nobody is watching. (#180)
 
 ### Fixed
 
@@ -53,7 +53,7 @@
   tool's call also honors its `AbortSignal`. An animated GIF/WebP over the
   limit is left unresized rather than resized (Photon has no multi-frame
   API, so resizing would silently flatten it to a single frame).
-  
+
 - Telegram bridge/agent replies containing `<`, `>`, or `&` (e.g. file content
   like `<server-ip>`) could fail to display or break `editMessageText`, since
   `toTelegramHtml()` sent them unescaped under `parse_mode: "HTML"`. It now
