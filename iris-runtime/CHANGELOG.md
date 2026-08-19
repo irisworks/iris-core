@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-19
+
 ### Added
 
 - `POST /sessions/:id/stop` — aborts a session's in-flight turn via the same
