@@ -66,6 +66,12 @@ setting — `formatToolArgs()` in `iris-runtime/src/engine/log.ts` formats
 the arguments and `logToolStart()` uniformly indents every line of the
 joined output.
 
+## Reply context (Telegram)
+
+Replying to an earlier message includes that message's text (or caption, or a
+content-type note like `[a photo]` for media) prepended to what Iris receives,
+so a follow-up like "this one?" resolves against the message it replied to.
+
 ## Passthrough configuration
 
 Passthrough channels forward every message — top-level channel messages,
