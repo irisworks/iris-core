@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Added
+
+- `POST /sessions/:id/stop` — aborts a session's in-flight turn via the same
+  `engine.handleStop` Telegram's `/stop`, Slack's `stop`, and the web UI's Stop
+  button use. A turn driven through `POST /sessions/:id/message` previously
+  could not be stopped by any means: `api.ts` had no stop route, and a
+  `SESSION-` WebSocket refuses command frames. (#185)
+
+- `attachments: [{local}]` on `POST /sessions/:id/message`, threaded through
+  `injectSessionMessage` into the dispatched event. Each `local` must resolve
+  inside that session's own directory. (#185)
+
+- `POST /sessions/:id/attachments` — raw body + `X-Filename`, writes into the
+  session's `attachments/` dir and returns the `local` handle. Mirrors
+  WebTransport's `/upload` on the API's own port and token, so a programmatic
+  consumer needs neither the web UI enabled nor its password. (#185)
+
+### Changed
+
+- `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
+  both HTTP surfaces that write into a channel dir.
+
+### Docs
+
+- `docs/web-ui.md` states what the web transport is not: the bundled page is a
+  reference implementation, its password is a door lock rather than RBAC, and
+  application developers should build against the session API instead. Adds the
+  `ChannelObserver` seam for in-process consumers watching a run.
+
 ## [1.6.0] - 2026-08-19
 
 ### Added

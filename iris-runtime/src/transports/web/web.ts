@@ -21,7 +21,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { randomBytes } from "crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "fs";
-import { join, resolve, sep } from "path";
+import { join } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as log from "../../engine/log.js";
 import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
@@ -33,7 +33,7 @@ import {
 	unregisterChannelObserver,
 	type ChannelObserver,
 } from "../../engine/channel-observers.js";
-import { resolveChannelDir, resolveChannelPath } from "../../engine/store.js";
+import { resolveChannelDir, resolveChannelPath, safeJoin } from "../../engine/store.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
@@ -125,21 +125,6 @@ function isValidWebChannelId(channelId: string): boolean {
 function resolveWebChannelId(threadId: string): string {
 	const isSession = threadId.startsWith("SESSION-") && SAFE_ID.test(threadId.slice("SESSION-".length));
 	return isSession ? threadId : `WEBUI-${threadId}`;
-}
-
-/**
- * Resolves `segments` onto `baseDir` and verifies the result stays inside
- * it, rather than trusting the caller's own blacklist of "/"/".." in each
- * segment — the authoritative guard for any path built from request data
- * (filenames, channel ids), since resolve() collapses traversal sequences
- * predictably regardless of what the untrusted segment looks like going in.
- * Returns undefined if the join would escape baseDir.
- */
-function safeJoin(baseDir: string, ...segments: string[]): string | undefined {
-	const base = resolve(baseDir);
-	const target = resolve(base, ...segments);
-	if (target !== base && !target.startsWith(base + sep)) return undefined;
-	return target;
 }
 
 export class WebTransport implements ChannelTransport {
@@ -345,12 +330,17 @@ export class WebTransport implements ChannelTransport {
 	// SessionInjector surface (required by api.ts) — same pattern as Bridge/Slack
 	// ==========================================================================
 
-	async injectSessionMessage(sessionId: string, user: string, text: string): Promise<string> {
+	async injectSessionMessage(
+		sessionId: string,
+		user: string,
+		text: string,
+		attachments: Array<{ local: string }> = [],
+	): Promise<string> {
 		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
 		const ts = (Date.now() / 1000).toFixed(6);
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
-		this.dispatch({ channel: channelId, user, text, ts, attachments: [] }, this);
+		this.dispatch({ channel: channelId, user, text, ts, attachments }, this);
 		return responsePromise;
 	}
 

@@ -121,12 +121,17 @@ export class BridgeTransport implements ChannelTransport {
 	// SessionInjector surface (required by api.ts)
 	// ==========================================================================
 
-	async injectSessionMessage(sessionId: string, user: string, text: string): Promise<string> {
+	async injectSessionMessage(
+		sessionId: string,
+		user: string,
+		text: string,
+		attachments: Array<{ local: string }> = [],
+	): Promise<string> {
 		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
 		const ts = (Date.now() / 1000).toFixed(6);
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
-		this.dispatch({ channel: channelId, user, text, ts, attachments: [] }, this);
+		this.dispatch({ channel: channelId, user, text, ts, attachments }, this);
 		return responsePromise;
 	}
 

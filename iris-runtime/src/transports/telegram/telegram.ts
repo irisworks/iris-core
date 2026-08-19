@@ -646,19 +646,27 @@ export class TelegramBot implements ChannelTransport {
 	// Session injection (required by api.ts SessionInjector interface)
 	// ==========================================================================
 
-	async injectSessionMessage(sessionId: string, user: string, text: string): Promise<string> {
+	async injectSessionMessage(
+		sessionId: string,
+		user: string,
+		text: string,
+		attachments: Array<{ local: string }> = [],
+	): Promise<string> {
 		const channelId = `SESSION-${sessionId}`;
 		const queue = this.getQueue(channelId);
 
 		if (queue.size() >= 5) throw new Error("Session message queue is full");
 
 		const ts = String(Date.now());
+		// `original` is the on-disk name: the API caller uploaded the file itself,
+		// so there is no separate uploader-supplied filename to preserve.
+		const logged = attachments.map((a) => ({ original: basename(a.local), local: a.local }));
 		this.logToFile(channelId, {
 			date: new Date().toISOString(),
 			ts,
 			user,
 			text,
-			attachments: [],
+			attachments: logged,
 			isBot: false,
 		});
 
@@ -670,7 +678,7 @@ export class TelegramBot implements ChannelTransport {
 			user,
 			text,
 			chatId: 0,
-			attachments: [],
+			attachments: logged,
 		};
 		queue.enqueue(() => this.handler.handleEvent(event, this));
 		return responsePromise;

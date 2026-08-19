@@ -210,7 +210,18 @@ log noise), the same "off by default" contract `IRIS_WEBUI_PORT` follows.
 second, smaller interface required only if the transport should be reachable
 via the internal session API (`api.ts`) — `BridgeTransport` implements it
 because sub-agent escalation depends on it; a chat-only transport that never
-backs a session can skip it.
+backs a session can skip it. `injectSessionMessage` takes an optional
+`attachments: [{local}]` — pass it straight through to the event you dispatch
+(that is all the engine reads), and log it with the user message the way the
+shipped transports do.
+
+If your transport wants to *watch* a run it doesn't own — because another
+transport is running the turn on a channel your clients are subscribed to —
+register a `ChannelObserver` with `engine/channel-observers.ts` rather than
+hooking a transport's internals. It is a passive, transport-agnostic mirror of
+run events (`thinking`/`status`/`tool`/`final`/`file`), skipped entirely when
+nothing is watching, and an observer that throws cannot fail the run. See
+[Web UI](web-ui.md) for a worked example.
 
 **Caveat:** the "register before Bridge" rule above is not consistently
 followed by the shipped transports today — `WebTransport` is pushed *after*
