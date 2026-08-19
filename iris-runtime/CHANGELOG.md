@@ -24,6 +24,13 @@
 - `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
   both HTTP surfaces that write into a channel dir.
 
+### Fixed
+
+- `BridgeTransport` now queues per-channel like Slack/Telegram, so two
+  requests sharing a `conversationKey` (same `requestId` ⇒ same
+  `BRIDGE-{id}`/`SESSION-{id}` channel) run one at a time instead of two
+  concurrent runs interleaving writes to one `context.jsonl`. (#138)
+
 ### Docs
 
 - `docs/web-ui.md` states what the web transport is not: the bundled page is a

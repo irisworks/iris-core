@@ -276,7 +276,9 @@ if (tgBot) transports.push(tgBot);
 // before profiles existed); a bridge-specific prompt is a decision for later.
 const bridge = new BridgeTransport({
 	promptProfile: { ...slackPromptProfile, transportId: "bridge" },
-	dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
+	// Not `void`-discarded, unlike the other transports below — BridgeTransport's
+	// per-channel queue awaits this to serialize runs against one context.jsonl.
+	dispatch: (event, transport, isEvent) => engine.handleEvent(event, transport, isEvent),
 });
 transports.push(bridge);
 

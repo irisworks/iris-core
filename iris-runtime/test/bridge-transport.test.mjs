@@ -78,3 +78,54 @@ test("BridgeTransport.replaceMessage on a non-BRIDGE channel is a no-op (SESSION
 	// Must not throw even though there's no pending bridge request for this channel.
 	await assert.doesNotReject(() => ctx.replaceMessage("some text"));
 });
+
+// Issue #138: two enqueueEvent() calls on the same channel used to dispatch
+// straight into the engine with no queue, so both runs executed concurrently
+// against one ChannelState/context.jsonl. The per-channel queue must instead
+// run them one at a time, in order.
+test("BridgeTransport.enqueueEvent serializes concurrent requests on the same channel", async () => {
+	const active = new Set();
+	let maxConcurrent = 0;
+	const order = [];
+	const transport = new BridgeTransport({
+		promptProfile: { fragments: [] },
+		dispatch: async (event) => {
+			active.add(event.text);
+			maxConcurrent = Math.max(maxConcurrent, active.size);
+			// Resolve out of enqueue order to prove the queue — not incidental
+			// ordering — is what serializes the runs.
+			await new Promise((r) => setTimeout(r, event.text === "first" ? 30 : 5));
+			active.delete(event.text);
+			order.push(event.text);
+		},
+	});
+
+	transport.enqueueEvent({ channel: "BRIDGE-same", user: "test", text: "first", ts: "1" });
+	transport.enqueueEvent({ channel: "BRIDGE-same", user: "test", text: "second", ts: "2" });
+
+	await new Promise((r) => setTimeout(r, 100));
+
+	assert.equal(maxConcurrent, 1, "two events on one channel must never run concurrently");
+	assert.deepEqual(order, ["first", "second"]);
+});
+
+test("BridgeTransport.enqueueEvent runs different channels concurrently", async () => {
+	const active = new Set();
+	let maxConcurrent = 0;
+	const transport = new BridgeTransport({
+		promptProfile: { fragments: [] },
+		dispatch: async (event) => {
+			active.add(event.channel);
+			maxConcurrent = Math.max(maxConcurrent, active.size);
+			await new Promise((r) => setTimeout(r, 20));
+			active.delete(event.channel);
+		},
+	});
+
+	transport.enqueueEvent({ channel: "BRIDGE-a", user: "test", text: "x", ts: "1" });
+	transport.enqueueEvent({ channel: "BRIDGE-b", user: "test", text: "y", ts: "2" });
+
+	await new Promise((r) => setTimeout(r, 60));
+
+	assert.equal(maxConcurrent, 2, "unrelated channels must not block each other");
+});

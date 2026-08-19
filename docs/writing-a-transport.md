@@ -60,8 +60,9 @@ interface ChannelTransport {
   when the channel's queue is full (the caller logs a warning and drops the
   event — see [Queueing and overflow](channel-modes.md#queueing-and-overflow)
   for the shared 5-message-per-channel convention every transport follows).
-  Own your queue: `BridgeTransport` has none (it dispatches synchronously),
-  Slack/Telegram each keep a per-channel `ChannelQueue`.
+  Own your queue: `BridgeTransport`, Slack, and Telegram each keep a
+  per-channel `ChannelQueue` so two events on the same channel never dispatch
+  concurrently.
 - **`createContext`** — build the `MessageContext` (below) for one inbound
   event. This is where transport-specific reply plumbing (message chunking,
   thread anchoring, typing indicators) gets wired up.
