@@ -15,6 +15,27 @@ reference frontend (thread sidebar, agent picker, file attachments) is a
 separate, richer UI built against the protocol below — the page served at `/`
 by this transport directly is a bare functional page, not that reference UI.
 
+## What this transport is, and is not
+
+Three limits to be explicit about before building on it:
+
+- **The bundled page at `/` is a reference implementation.** It exists to
+  exercise the protocol and to give a chat-only install something usable — not
+  to be a product frontend. It has no bundler, no framework, and no upgrade
+  path; treat it as a worked example you read, not a UI you ship to users.
+- **Its auth is a door lock, not RBAC.** `IRIS_WEBUI_PASSWORD` is one shared
+  secret with no accounts, roles, or per-user isolation. Anything user-facing
+  needs your own authentication in front of it; never hand end users the web
+  password directly.
+- **Application developers should not build against this transport.** The
+  internal session API (`api.ts`, see [Sub-agents](sub-agents.md)) is the
+  integration surface for a program driving Iris: it owns sessions, messages,
+  attachments, stop, and history. The `SESSION-` support documented below is a
+  stopgap that exists only because live streaming has no home on the API yet;
+  a `GET /sessions/:id/stream` endpoint is designed but not yet implemented, and
+  will replace it. Code that watches turns over this WebSocket should expect to
+  migrate.
+
 ## Enabling it
 
 ```bash
@@ -141,11 +162,48 @@ is skipped entirely when no socket is watching. A practical consequence: `tool`
 frames reach a watcher even though Slack/Telegram/Bridge implement no
 `onToolEvent` of their own.
 
-Attachments *inbound to* a session are a separate matter: `POST
-/sessions/:id/message` accepts only `{text, user}` today, so an uploaded file
-has no field to travel in. `/upload` on a `SESSION-` channel is useful for
-staging files into the session directory, not for attaching them to an API
-message.
+### Watching a run from inside the runtime
+
+If what you are writing runs *in-process* — another transport, or any consumer
+compiled into the runtime — do not reach into a transport's internals to see a
+run's progress. Register a `ChannelObserver` with
+`engine/channel-observers.ts` and receive the events as a passive watcher:
+
+```ts
+import { registerChannelObserver, unregisterChannelObserver } from "../../engine/channel-observers.js";
+
+registerChannelObserver({
+  // Keeps the mirror off the hot path entirely when nobody is watching.
+  watching: (channelId) => myWatchers.has(channelId),
+  emit: (channelId, event) => {
+    // event.kind: "thinking" | "status" | "tool" | "final" | "file"
+    myWatchers.get(channelId)?.send(event);
+  },
+});
+
+// On shutdown, so a stopped transport stops being consulted:
+// unregisterChannelObserver(observer);
+```
+
+Two properties make this the right seam rather than a convenience: the mirror
+wraps `onToolEvent` even for transports that don't implement it (which is how a
+watcher gets structured tool cards for a turn running on Slack), and an
+observer that throws cannot fail the run. It is transport-agnostic by design —
+it speaks run events, not wire frames — so `engine/` never imports a concrete
+transport. `WebTransport` is one consumer of it, not its owner.
+
+This is an **in-process** API. An out-of-process consumer (your own backend)
+cannot register an observer; it watches over the WebSocket above today, and
+over `GET /sessions/:id/stream` once that lands.
+
+Attachments *inbound to* a session travel on the message body: `POST
+/sessions/:id/message` accepts `attachments: [{local}]`, where each `local` is
+a handle returned by an upload. Two routes mint one:
+`POST /upload?channel=SESSION-<id>` here, and
+`POST /sessions/:id/attachments` on the internal API. Prefer the latter for
+anything programmatic — it needs neither this transport enabled nor its
+password. Either way a `local` path is accepted only if it resolves inside that
+session's own directory, so one session cannot attach another's files.
 
 The auth gate is unchanged — with `IRIS_WEBUI_PASSWORD` set, a `SESSION-`
 socket or upload needs the same session cookie any other request does. No

@@ -484,7 +484,12 @@ export class SlackBot implements ChannelTransport {
 	 * Inject a message into a session's agent queue and wait for the response.
 	 * Logs the user message to the session directory before enqueueing.
 	 */
-	async injectSessionMessage(sessionId: string, user: string, text: string): Promise<string> {
+	async injectSessionMessage(
+		sessionId: string,
+		user: string,
+		text: string,
+		attachments: Array<{ local: string }> = [],
+	): Promise<string> {
 		const channelId = `SESSION-${sessionId}`;
 		const queue = this.getQueue(channelId);
 
@@ -494,13 +499,15 @@ export class SlackBot implements ChannelTransport {
 
 		const ts = (Date.now() / 1000).toFixed(6);
 
-		// Log user message to session directory
+		// Log user message to session directory. `original` is the on-disk name:
+		// the API caller uploaded the file itself, so unlike a Slack share there
+		// is no separate uploader-supplied filename to preserve.
 		this.logToFile(channelId, {
 			date: new Date().toISOString(),
 			ts,
 			user,
 			text,
-			attachments: [],
+			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
 			isBot: false,
 		});
 
@@ -512,7 +519,7 @@ export class SlackBot implements ChannelTransport {
 			user,
 			text,
 			ts,
-			attachments: [],
+			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
 		};
 
 		queue.enqueue(() => this.handler.handleEvent(slackEvent, this));

@@ -317,7 +317,11 @@ await scrubProcessEnv({
 
 // Start internal API server (default port 3000, always-on for sub-agent escalation)
 const effectiveApiPort = apiPort > 0 ? apiPort : 3000;
-startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => transports);
+startApiServer(effectiveApiPort, workingDir, engine.channelStates, () => transports, {
+	// Same in-process handle WebTransport's Stop button gets — the API is a fourth
+	// adapter onto engine.handleStop, not a layer the transports call through.
+	stop: (channelId, transport) => engine.handleStop(channelId, transport),
+});
 
 // Route synthetic events to the transport that owns the channel
 // (tg-* → Telegram; Slack, then Bridge, is the fallback owner)

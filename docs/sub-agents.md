@@ -267,7 +267,9 @@ The runtime exposes an internal API (default `127.0.0.1:3000`, always on — see
 | `POST /secret-drops` | Mint a one-time out-of-band submission link (iris only) |
 | `POST /sessions` · `GET /sessions` · `GET/PATCH /sessions/:id` | Session CRUD |
 | `POST /sessions/open` | Post to a channel + create a session in one call |
-| `POST /sessions/:id/message` | Inject a message, wait for Iris's response |
+| `POST /sessions/:id/message` | Inject a message, wait for Iris's response — body `{text, user?, attachments?}` |
+| `POST /sessions/:id/attachments` | Upload a file into the session's `attachments/` dir (raw body + `X-Filename`), returns the `local` handle for the `attachments` field |
+| `POST /sessions/:id/stop` | Abort the session's in-flight turn |
 | `GET /sessions/:id/history` | Full message history |
 | `POST /sessions/:id/reset` | Wipe session context |
 | `POST /sessions/:id/inject-turn` | Append a human-agent turn without triggering the LLM |
@@ -276,6 +278,41 @@ The runtime exposes an internal API (default `127.0.0.1:3000`, always on — see
 Sessions are the backbone of `thread`/`interactive-thread`
 [channel modes](channel-modes.md) and of human-in-the-loop workflows (reset +
 inject-turn let a human take over a conversation seamlessly).
+
+### Driving a session from your own application
+
+This API — not the [web UI transport](web-ui.md) — is the integration surface
+for a program driving Iris. A typical turn is three calls on this one port,
+under one token:
+
+```bash
+# 1. Stage a file (optional). `local` is a handle, not a path you compose.
+curl -X POST "$IRIS/sessions/$ID/attachments" \
+  -H "Authorization: Bearer $IRIS_API_TOKEN" \
+  -H "X-Filename: report.pdf" --data-binary @report.pdf
+# → {"local": "SESSION-<id>/attachments/1755_report.pdf"}
+
+# 2. Send the message. Blocks until the turn finishes.
+curl -X POST "$IRIS/sessions/$ID/message" \
+  -H "Authorization: Bearer $IRIS_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"text": "review this", "attachments": [{"local": "SESSION-<id>/attachments/1755_report.pdf"}]}'
+
+# 3. Abort it from another request if it runs too long.
+curl -X POST "$IRIS/sessions/$ID/stop" -H "Authorization: Bearer $IRIS_API_TOKEN"
+```
+
+`stop` is the API's counterpart to Telegram's `/stop`, Slack's `stop`, and the
+web UI's Stop button — all four call the same `engine.handleStop`. The aborted
+run still resolves the pending `message` request with whatever text it had
+produced, so that caller gets a reply rather than waiting out its timeout.
+
+Two things this API does not do yet: stream a turn's progress (the reply
+arrives only when the turn ends — watch the [web UI](web-ui.md) socket
+meanwhile, or wait for `GET /sessions/:id/stream`), and accept attachments by
+URL (it never fetches; you send the bytes or place the file yourself).
+
+`IRIS_API_TOKEN` also authorizes secrets management and channel-addressed event
+injection, so it must stay server-side — never ship it to a browser.
 
 ## Scheduled events
 

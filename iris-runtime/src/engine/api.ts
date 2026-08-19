@@ -37,13 +37,17 @@
  *   GET    /sessions/:id                 — get session
  *   PATCH  /sessions/:id                 — update session (partial patch)
  *   POST   /sessions/:id/message         — inject message, wait for response ({ text, sessionId })
+ *                                          body: { text, user?, attachments?: [{ local }] }
+ *   POST   /sessions/:id/attachments     — upload a file into the session's attachments/ dir
+ *                                          raw body + `X-Filename: <name>`, returns { local }
+ *   POST   /sessions/:id/stop            — abort the session's in-flight turn
  *   GET    /sessions/:id/history         — full log.jsonl as JSON array
  *   POST   /sessions/email-inbound       — route inbound email to matching session
  *   POST   /sessions/open                — post to channel, create session, return sessionId + threadTs
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomBytes, timingSafeEqual } from "crypto";
 import * as log from "./log.js";
@@ -56,6 +60,10 @@ import {
 	type Session,
 } from "./sessions.js";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
+// Type-only (erased at build): engine/index.ts imports nothing from here, and
+// handleStop's transport argument must be the same shape the engine expects.
+import type { EngineTransport } from "./index.js";
+import { resolveChannelDir, resolveChannelPath, safeJoin } from "./store.js";
 import { getSecretMeta, getSecretProvider } from "./secrets.js";
 import { SECRET_NAME_RE, SecretStore, secretsMode, type SecretSource } from "./secret-store.js";
 import { createDrop } from "./secret-drops.js";
@@ -63,12 +71,17 @@ import { loadServices } from "../broker/services.js";
 
 // Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
 export interface SessionInjector {
-	injectSessionMessage(sessionId: string, user: string, text: string): Promise<string>;
+	injectSessionMessage(
+		sessionId: string,
+		user: string,
+		text: string,
+		attachments?: Array<{ local: string }>,
+	): Promise<string>;
 	postMessage(channel: string, text: string): Promise<string>;
 	resetSessionContext(sessionId: string): void;
 }
 
-interface ApiTransport extends SessionInjector {
+interface ApiTransport extends SessionInjector, EngineTransport {
 	ownsChannel(channelId: string): boolean;
 }
 
@@ -76,10 +89,23 @@ interface ChannelState {
 	running: boolean;
 }
 
+/**
+ * Engine actions the API can't reach on its own. Injected from main.ts exactly
+ * as WebTransport's `commands` are — api.ts must not import the engine (the
+ * engine already imports what api.ts exports), so the handle arrives as a
+ * callback instead. Optional so tests can start a bare server.
+ */
+export interface ApiCommands {
+	stop: (channelId: string, transport: ApiTransport) => Promise<void>;
+}
+
+/** Cap on a single session attachment upload. Larger than a JSON body: this route carries file bytes. */
+export const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
 /** Default cap on any single request body read via readBody() — a caller that authenticated but sends an oversized body gets a rejection instead of unbounded memory growth. */
 export const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
 
-export function readBody(req: IncomingMessage, maxBytes: number = DEFAULT_MAX_BODY_BYTES): Promise<string> {
+export function readRawBody(req: IncomingMessage, maxBytes: number = DEFAULT_MAX_BODY_BYTES): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
 		let total = 0;
@@ -92,9 +118,13 @@ export function readBody(req: IncomingMessage, maxBytes: number = DEFAULT_MAX_BO
 			}
 			chunks.push(chunk);
 		});
-		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+		req.on("end", () => resolve(Buffer.concat(chunks)));
 		req.on("error", reject);
 	});
+}
+
+export async function readBody(req: IncomingMessage, maxBytes: number = DEFAULT_MAX_BODY_BYTES): Promise<string> {
+	return (await readRawBody(req, maxBytes)).toString("utf-8");
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -216,6 +246,43 @@ function isGatewaySecret(name: string): boolean {
 	);
 }
 
+/**
+ * Validates the `attachments` array on a session message. A `local` path is a
+ * handle a previous upload handed out, not a path the caller composes: the only
+ * accepted values resolve inside *this* session's own channel dir, so one
+ * session can't attach another session's (or a Slack channel's) files, and
+ * traversal is caught by safeJoin rather than a metacharacter blacklist.
+ *
+ * A path that doesn't exist is rejected here rather than passed through —
+ * agent.ts would report it to the model as "still downloading", which is a
+ * fiction for the API path where nothing downloads in the background.
+ */
+export function validateSessionAttachments(
+	workingDir: string,
+	sessionId: string,
+	attachments: unknown,
+): { attachments: Array<{ local: string }> } | { error: string } {
+	if (attachments === undefined) return { attachments: [] };
+	if (!Array.isArray(attachments)) return { error: "attachments must be an array" };
+	const channelDir = resolveChannelDir(workingDir, `SESSION-${sessionId}`);
+	const validated: Array<{ local: string }> = [];
+	for (const entry of attachments) {
+		const local = (entry as { local?: unknown } | null)?.local;
+		if (typeof local !== "string" || !local) return { error: "each attachment needs a string `local` path" };
+		// `local` is workspace-relative (agent.ts joins it onto the workspace root),
+		// so strip this session's own prefix before resolving against its dir.
+		const prefix = `${resolveChannelPath(`SESSION-${sessionId}`)}/`;
+		if (!local.startsWith(prefix)) {
+			return { error: `attachment '${local}' is not inside SESSION-${sessionId}` };
+		}
+		const fullPath = safeJoin(channelDir, local.slice(prefix.length));
+		if (!fullPath) return { error: `attachment '${local}' escapes the session directory` };
+		if (!existsSync(fullPath)) return { error: `attachment '${local}' does not exist` };
+		validated.push({ local });
+	}
+	return { attachments: validated };
+}
+
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
 	const eventId = `api-${Date.now()}-${randomBytes(4).toString("hex")}`;
 	const eventFile = join(eventsDir, `${eventId}.json`);
@@ -233,6 +300,7 @@ export function startApiServer(
 	workingDir: string,
 	channelStates: Map<string, ChannelState>,
 	getTransports: () => ApiTransport[] = () => [],
+	commands?: ApiCommands,
 ): Server {
 	// Channel-addressed operations route to the transport that owns the channel.
 	// Session operations use the first transport — registry order is the
@@ -654,7 +722,7 @@ export function startApiServer(
 					json(res, 404, { error: "session not found" });
 					return;
 				}
-				let body: { text?: string; user?: string };
+				let body: { text?: string; user?: string; attachments?: unknown };
 				try {
 					body = JSON.parse(await readBody(req)) as typeof body;
 				} catch {
@@ -665,6 +733,11 @@ export function startApiServer(
 					json(res, 400, { error: "text is required" });
 					return;
 				}
+				const validated = validateSessionAttachments(workingDir, sessionId, body.attachments);
+				if ("error" in validated) {
+					json(res, 400, { error: validated.error });
+					return;
+				}
 				const bot = sessionTransport();
 				if (!bot) {
 					json(res, 503, { error: "session injection not available (bot not started)" });
@@ -672,7 +745,12 @@ export function startApiServer(
 				}
 				log.logInfo(`[api] POST /sessions/${sessionId}/message: ${body.text.substring(0, 60)}`);
 				try {
-					const responseText = await bot.injectSessionMessage(sessionId, body.user ?? "api", body.text);
+					const responseText = await bot.injectSessionMessage(
+						sessionId,
+						body.user ?? "api",
+						body.text,
+						validated.attachments,
+					);
 					// sessionId is echoed so callers correlating a turn with its Langfuse
 					// trace (Pupil, IRIS-97) can read it off the turn response alone.
 					json(res, 200, { text: responseText, sessionId });
@@ -681,6 +759,84 @@ export function startApiServer(
 					log.logWarning(`[api] Session message failed: ${msg}`);
 					json(res, 504, { error: "session message failed" });
 				}
+				return;
+			}
+
+			// ── POST /sessions/:id/attachments ─────────────────────────────────────────────
+			// Raw file bytes + `X-Filename`, written into the session's attachments/
+			// dir. Returns the `local` handle to pass on the message route. Mirrors
+			// WebTransport's /upload, but on this server's port and token so a
+			// programmatic consumer needs neither the web UI nor its password.
+			if (method === "POST" && urlParts[0] === "sessions" && urlParts[2] === "attachments") {
+				const sessionId = urlParts[1];
+				const sessions = loadSessions(workingDir);
+				if (!sessions.has(sessionId)) {
+					json(res, 404, { error: "session not found" });
+					return;
+				}
+				const header = req.headers["x-filename"];
+				const filename = Array.isArray(header) ? header[0] : header;
+				if (!filename || filename.includes("/") || filename.includes("..")) {
+					json(res, 400, { error: "X-Filename header is required (no path separators)" });
+					return;
+				}
+				const channelId = `SESSION-${sessionId}`;
+				const attachmentsDir = join(resolveChannelDir(workingDir, channelId), "attachments");
+				const safeName = `${Date.now()}_${filename}`;
+				const target = safeJoin(attachmentsDir, safeName);
+				if (!target) {
+					json(res, 400, { error: "invalid filename" });
+					return;
+				}
+				const bytes = await readRawBody(req, DEFAULT_MAX_UPLOAD_BYTES);
+				if (bytes.length === 0) {
+					json(res, 400, { error: "request body is empty" });
+					return;
+				}
+				mkdirSync(attachmentsDir, { recursive: true });
+				writeFileSync(target, bytes);
+				const local = join(resolveChannelPath(channelId), "attachments", safeName);
+				log.logInfo(`[api] POST /sessions/${sessionId}/attachments: ${safeName} (${bytes.length} bytes)`);
+				json(res, 200, { local });
+				return;
+			}
+
+			// ── POST /sessions/:id/stop ────────────────────────────────────────────────────
+			// The session API's counterpart to Telegram's /stop, Slack's `stop`, and
+			// the web UI's Stop button — all four call the same engine.handleStop.
+			// Without it a turn driven through this API could not be aborted at all:
+			// a SESSION- socket is read-only, so the web UI's command frame is refused.
+			if (method === "POST" && urlParts[0] === "sessions" && urlParts[2] === "stop") {
+				const sessionId = urlParts[1];
+				const sessions = loadSessions(workingDir);
+				if (!sessions.has(sessionId)) {
+					json(res, 404, { error: "session not found" });
+					return;
+				}
+				const bot = sessionTransport();
+				if (!commands || !bot) {
+					json(res, 503, { error: "stop not available (engine commands not wired)" });
+					return;
+				}
+				const channelId = `SESSION-${sessionId}`;
+				const wasRunning = channelStates.get(channelId)?.running === true;
+				// handleStop aborts the run first, then posts "_Stopping..._" through the
+				// transport. That post is a no-op for Bridge/Web and a thread post for a
+				// routed Slack session, but Telegram's postMessage doesn't special-case
+				// virtual channels and throws on a `SESSION-` id. The abort is the part
+				// the caller asked for, so a failed status post is logged, not a 500.
+				try {
+					await commands.stop(channelId, bot);
+				} catch (err) {
+					log.logWarning(
+						`[api] stop status message failed for ${channelId} (run was still aborted)`,
+						err instanceof Error ? err.message : String(err),
+					);
+				}
+				log.logInfo(`[api] POST /sessions/${sessionId}/stop: running=${wasRunning}`);
+				// The aborted run still resolves the pending POST /message with whatever
+				// text it produced (engine/index.ts), so the caller isn't left hanging.
+				json(res, 200, { status: "ok", wasRunning });
 				return;
 			}
 

@@ -1,10 +1,26 @@
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { appendFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import * as log from "./log.js";
 
 interface ChannelSettings {
 	verboseTools?: boolean;
+}
+
+/**
+ * Resolves `segments` onto `baseDir` and verifies the result stays inside
+ * it, rather than trusting the caller's own blacklist of "/"/".." in each
+ * segment — the authoritative guard for any path built from request data
+ * (filenames, channel ids), since resolve() collapses traversal sequences
+ * predictably regardless of what the untrusted segment looks like going in.
+ * Returns undefined if the join would escape baseDir. Shared by both HTTP
+ * surfaces that write into a channel dir (web /upload, api session uploads).
+ */
+export function safeJoin(baseDir: string, ...segments: string[]): string | undefined {
+	const base = resolve(baseDir);
+	const target = resolve(base, ...segments);
+	if (target !== base && !target.startsWith(base + sep)) return undefined;
+	return target;
 }
 
 export interface Attachment {
