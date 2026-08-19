@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# ============================================================
+# upgrade-iris — run scripts/upgrade.sh from inside Iris, safely.
+#
+# Two things this adds over calling upgrade.sh directly:
+#
+#   1. Preflight. upgrade.sh checks out a release tag. If the install's
+#      checkout has uncommitted work, or commits that exist nowhere but
+#      here, that checkout moves HEAD off them. This refuses to start
+#      until they're committed and pushed (--force overrides).
+#
+#   2. Detachment. The upgrade restarts iris.service, which is the very
+#      process calling this skill. Run in the foreground, Iris is killed
+#      mid-upgrade and never sees the result. This hands the work to a
+#      transient systemd unit that outlives the restart, and tees it to a
+#      stable log path Iris can read once she's back.
+#
+#   upgrade-iris                  # latest release tag
+#   upgrade-iris v1.4.1           # specific tag
+#   upgrade-iris --check          # preflight only, change nothing
+#   upgrade-iris --force          # upgrade despite pending work
+#
+# Env overrides: IRIS_DIR (default /iris), IRIS_OVERLAY_DIR (default cwd).
+# ============================================================
+set -uo pipefail
+
+IRIS_DIR="${IRIS_DIR:-/iris}"
+OVERLAY_DIR="${IRIS_OVERLAY_DIR:-$PWD}"
+UNIT="iris-upgrade"
+
+TARGET_REF=""
+CHECK_ONLY=false
+FORCE=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --check) CHECK_ONLY=true ;;
+    --force) FORCE=true ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "upgrade-iris: unknown option '$arg'" >&2; exit 2 ;;
+    *)  TARGET_REF="$arg" ;;
+  esac
+done
+
+log()  { echo "[upgrade-iris] $*"; }
+fail() { echo "[upgrade-iris] $*" >&2; exit 1; }
+
+# ── Which shape is this install? Mirrors upgrade.sh's own detection, so
+# ── the repos we guard are exactly the ones it will move. ───────────────
+PINNED_REPO="$IRIS_DIR/repo"
+GUARD_REPOS=()
+WORKDIR=""
+
+if [[ -d "$PINNED_REPO/.git" ]]; then
+  GUARD_REPOS=("$PINNED_REPO")
+  WORKDIR="$PINNED_REPO"
+  UPGRADE_SH="$PINNED_REPO/scripts/upgrade.sh"
+  log "pinned-clone install at $PINNED_REPO"
+elif [[ -n "$(git -C "$OVERLAY_DIR" submodule status -- core 2>/dev/null)" ]]; then
+  GUARD_REPOS=("$OVERLAY_DIR" "$OVERLAY_DIR/core")
+  WORKDIR="$OVERLAY_DIR"
+  UPGRADE_SH="$OVERLAY_DIR/core/scripts/upgrade.sh"
+  log "overlay install at $OVERLAY_DIR (core/ submodule)"
+else
+  fail "no pinned clone at $PINNED_REPO and no core/ submodule at $OVERLAY_DIR.
+      Set IRIS_DIR or IRIS_OVERLAY_DIR, or see docs/overlay.md."
+fi
+
+[[ -f "$UPGRADE_SH" ]] || fail "$UPGRADE_SH not found — this install predates upgrade.sh.
+      Upgrade once by hand (docs/overlay.md), then this skill works from there."
+
+# ── Preflight: never move HEAD off work that exists only here ───────────
+BLOCKED=false
+RESTORE_HINT=""
+
+for repo in "${GUARD_REPOS[@]}"; do
+  name="$(basename "$repo")"
+
+  if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    log "WARN  $name: not a git checkout — cannot check for pending work, continuing"
+    continue
+  fi
+
+  head_sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)"
+  branch="$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "detached at $head_sha")"
+  RESTORE_HINT+="      git -C $repo checkout $branch   # was $head_sha"$'\n'
+
+  if ! git -C "$repo" diff --quiet 2>/dev/null || ! git -C "$repo" diff --cached --quiet 2>/dev/null; then
+    log "BLOCK $name: uncommitted changes to tracked files"
+    git -C "$repo" status --short --untracked-files=no | sed 's/^/        /'
+    BLOCKED=true
+  fi
+
+  # Unpushed commits. Prefer the tracking branch; with none, fall back to
+  # "is HEAD on any remote branch at all". Only a confirmed-unpushed commit
+  # blocks — if neither question can be answered, warn and continue.
+  upstream="$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
+  if [[ -n "$upstream" ]]; then
+    ahead="$(git -C "$repo" rev-list --count "$upstream..HEAD" 2>/dev/null || echo 0)"
+    if [[ "$ahead" -gt 0 ]]; then
+      log "BLOCK $name: $ahead commit(s) not pushed to $upstream"
+      git -C "$repo" log --oneline "$upstream..HEAD" | sed 's/^/        /'
+      BLOCKED=true
+    fi
+  elif git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1; then
+    if [[ -z "$(git -C "$repo" branch -r --contains HEAD 2>/dev/null)" ]]; then
+      log "BLOCK $name: HEAD ($head_sha) is on no remote branch — nothing has it but this box"
+      BLOCKED=true
+    fi
+  else
+    log "WARN  $name: no HEAD to compare — cannot check for unpushed commits, continuing"
+  fi
+
+  untracked="$(git -C "$repo" ls-files --others --exclude-standard 2>/dev/null | head -5)"
+  if [[ -n "$untracked" ]]; then
+    # Untracked files survive a checkout; worth saying, not worth blocking.
+    log "WARN  $name: untracked files present (kept, not committed):"
+    echo "$untracked" | sed 's/^/        /'
+  fi
+done
+
+if [[ "$BLOCKED" == false ]]; then
+  log "preflight OK — no pending work would be lost"
+else
+  if [[ "$FORCE" == true ]]; then
+    log "--force given — continuing despite the pending work above."
+  else
+    echo
+    fail "refusing to upgrade: the checkout has work that exists only here.
+      Commit and push it, then re-run. To get back afterwards:
+$RESTORE_HINT      Re-run with --force to upgrade anyway (the tag checkout moves HEAD;
+      committed work stays on its branch, uncommitted work does not)."
+  fi
+fi
+
+if [[ "$CHECK_ONLY" == true ]]; then
+  log "--check given — stopping here, nothing changed."
+  exit 0
+fi
+
+# ── Launch detached, so the iris.service restart can't kill the upgrade ──
+LOGFILE="$IRIS_DIR/upgrade.log"
+if [[ ! -w "$(dirname "$LOGFILE")" ]]; then
+  LOGFILE="/tmp/iris-upgrade.log"
+fi
+
+if systemctl is-active --quiet "$UNIT.service" 2>/dev/null; then
+  fail "$UNIT.service is already running — an upgrade is in flight.
+      Watch it with: tail -f $LOGFILE"
+fi
+
+[[ -f "$LOGFILE" ]] && mv -f "$LOGFILE" "$LOGFILE.prev"
+
+CMD="bash $UPGRADE_SH${TARGET_REF:+ $TARGET_REF}"
+log "starting: $CMD"
+log "log:      $LOGFILE"
+
+if command -v systemd-run >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+  sudo systemd-run \
+    --unit="$UNIT" --collect \
+    --uid="$(id -u)" --gid="$(id -g)" \
+    --setenv=HOME="$HOME" \
+    --setenv=PATH="$PATH" \
+    --setenv=IRIS_DIR="$IRIS_DIR" \
+    --working-directory="$WORKDIR" \
+    bash -c "exec >>'$LOGFILE' 2>&1; $CMD" \
+    || fail "could not start $UNIT.service — see the output above"
+else
+  # No systemd (container, dev box): detach from this process group so a
+  # restart of the parent doesn't take the upgrade with it.
+  ( cd "$WORKDIR" && setsid nohup bash -c "exec >>'$LOGFILE' 2>&1; $CMD" </dev/null >/dev/null 2>&1 & )
+  log "no systemd — detached with setsid instead"
+fi
+
+cat <<EOF
+
+[upgrade-iris] Upgrade is running detached. It will restart iris.service,
+[upgrade-iris] which ends this process — that is expected, not a failure.
+[upgrade-iris] Once back up, check the result with:
+
+      tail -40 $LOGFILE
+      systemctl is-active iris
+      git -C ${GUARD_REPOS[0]} describe --tags
+EOF
