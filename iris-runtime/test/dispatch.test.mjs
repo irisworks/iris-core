@@ -14,7 +14,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createSession, loadSessions } from "../dist/engine/sessions.js";
 import { resolveChannelDir } from "../dist/engine/store.js";
-import { parseVerboseCommand } from "../dist/engine/dispatch.js";
+import { parseAdminCommand, parseVerboseCommand } from "../dist/engine/dispatch.js";
 import { fillQueue, makeBot, settle } from "./helpers.mjs";
 
 // ============================================================================
@@ -185,6 +185,109 @@ test("message: bare top-level 'verbose on' with no mention/DM is not intercepted
 	await settle();
 	assert.equal(calls.verbose.length, 0);
 	assert.equal(calls.events.length, 1); // falls through as ordinary chat text (leads dispatches all top-level)
+});
+
+// ============================================================================
+// Slash-command spellings (#156) — the parse-level `/` tolerance plus the
+// native Slack slash_commands envelope
+// ============================================================================
+
+test("parseAdminCommand: bare and slash-prefixed spellings, case-insensitive, trimmed", () => {
+	assert.equal(parseAdminCommand("stop"), "stop");
+	assert.equal(parseAdminCommand("/stop"), "stop");
+	assert.equal(parseAdminCommand("  /Stop  "), "stop");
+	assert.equal(parseAdminCommand("/compact"), "compact");
+	assert.equal(parseAdminCommand("/reset"), "reset");
+	assert.equal(parseAdminCommand("/clear"), "reset");
+	assert.equal(parseAdminCommand("//stop"), false);
+	assert.equal(parseAdminCommand("/stop it"), false);
+	assert.equal(parseAdminCommand("please stop"), false);
+	assert.equal(parseAdminCommand(""), false);
+});
+
+test("parseVerboseCommand: slash-prefixed spellings work too", () => {
+	assert.equal(parseVerboseCommand("/verbose on"), "on");
+	assert.equal(parseVerboseCommand("/verbose off"), "off");
+	assert.equal(parseVerboseCommand("/verbose"), "status");
+	assert.equal(parseVerboseCommand("/verbose maybe"), false);
+});
+
+test("mention: '@iris /stop' runs the admin command instead of becoming a prompt", async () => {
+	const { calls, mention } = makeBot({
+		channels: { CADM: { mode: "admin" } },
+		isRunning: () => true,
+	});
+	mention({ text: "<@UBOT> /stop", channel: "CADM", user: "U1", ts: "1000.0001" });
+	mention({ text: "<@UBOT> /clear", channel: "CADM", user: "U1", ts: "1000.0002" });
+	await settle();
+	assert.deepEqual(calls.stops, ["CADM"]);
+	assert.deepEqual(calls.resets, ["CADM"]);
+	assert.equal(calls.events.length, 0);
+});
+
+test("slash: /stop, /compact, /clear run admin commands in any non-relay channel mode", async () => {
+	const { calls, slash } = makeBot({
+		channels: { CDM: { mode: "dm" }, CTH: { mode: "thread" } },
+		isRunning: () => true,
+	});
+	const ack = slash({ command: "/stop", text: "", channel_id: "CDM" });
+	slash({ command: "/compact", text: "", channel_id: "CDM" });
+	slash({ command: "/clear", text: "", channel_id: "CTH" });
+	await settle();
+	assert.deepEqual(calls.stops, ["CDM"]);
+	assert.deepEqual(calls.compacts, ["CDM"]);
+	assert.deepEqual(calls.resets, ["CTH"]);
+	assert.equal(ack.count, 1);
+	assert.equal(ack.responses[0], undefined); // plain ack, no ephemeral reply
+});
+
+test("slash: trailing text is ignored, /verbose reads its argument", async () => {
+	const { calls, slash } = makeBot({ channels: { CDM: { mode: "dm" } }, isRunning: () => true });
+	slash({ command: "/stop", text: "now please", channel_id: "CDM" });
+	slash({ command: "/verbose", text: "on", channel_id: "CDM" });
+	slash({ command: "/verbose", text: "", channel_id: "CDM" });
+	await settle();
+	assert.deepEqual(calls.stops, ["CDM"]);
+	assert.deepEqual(calls.verbose, [
+		{ channelId: "CDM", action: "on" },
+		{ channelId: "CDM", action: "status" },
+	]);
+});
+
+test("slash: refused in a passthrough channel and outside the allowed-channel filter", async () => {
+	const { bot, calls, slash } = makeBot({
+		channels: { CREL: { mode: "passthrough", url: "https://relay.example/hook" }, CDM: { mode: "dm" } },
+		isRunning: () => true,
+	});
+	const relayAck = slash({ command: "/stop", text: "", channel_id: "CREL" });
+	await settle();
+	assert.equal(calls.stops.length, 0);
+	assert.equal(relayAck.count, 1);
+	assert.match(relayAck.responses[0].text, /external endpoint/);
+
+	bot.allowedChannels = new Set(["COTHER"]);
+	const filteredAck = slash({ command: "/stop", text: "", channel_id: "CDM" });
+	await settle();
+	assert.equal(calls.stops.length, 0);
+	assert.match(filteredAck.responses[0].text, /isn't enabled/);
+});
+
+test("slash: an unknown command acks with a hint and never dispatches", async () => {
+	const { calls, slash } = makeBot({ channels: { CDM: { mode: "dm" } }, isRunning: () => true });
+	const ack = slash({ command: "/deploy", text: "prod", channel_id: "CDM" });
+	await settle();
+	assert.equal(calls.events.length, 0);
+	assert.equal(calls.stops.length, 0);
+	assert.equal(ack.count, 1);
+	assert.match(ack.responses[0].text, /Unknown command/);
+});
+
+test("slash: a malformed envelope is acked exactly once and ignored", async () => {
+	const { calls, slash } = makeBot({ channels: { CDM: { mode: "dm" } } });
+	const ack = slash({ text: "", channel_id: "CDM" }); // no command
+	await settle();
+	assert.equal(calls.events.length, 0);
+	assert.equal(ack.count, 1);
 });
 
 test("mention: thread mode responds only inside registered session threads", async () => {

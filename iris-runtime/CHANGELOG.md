@@ -4,6 +4,11 @@
 
 ### Added
 
+- Slack slash commands `/stop`, `/compact`, `/clear`, `/reset`, `/verbose` —
+  handled from the `slash_commands` socket envelope, in every channel mode
+  except `passthrough`. Registering them in the Slack app is optional; installs
+  that don't keep using the bare-word spellings. (#156)
+
 - `POST /sessions/:id/stop` — aborts a session's in-flight turn via the same
   `engine.handleStop` Telegram's `/stop`, Slack's `stop`, and the web UI's Stop
   button use. A turn driven through `POST /sessions/:id/message` previously
@@ -24,7 +29,15 @@
 - `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
   both HTTP surfaces that write into a channel dir.
 
+- A leading `/` is now optional on the text-parsed control commands, so
+  `@iris /stop` runs the command instead of becoming a prompt. (#156)
+
 ### Docs
+
+- `docs/channel-modes.md` gains a Control commands section: what `stop` /
+  `compact` / `reset` do, and why the text spellings need `admin` mode while
+  slash commands don't. Slash-command registration added to the Slack app
+  reference in `docs/SETUP.md` and `bootstrap.sh`. (#156)
 
 - `docs/web-ui.md` states what the web transport is not: the bundled page is a
   reference implementation, its password is a door lock rather than RBAC, and

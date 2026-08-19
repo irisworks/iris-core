@@ -122,6 +122,15 @@ export interface SlackEvent {
 	attachments?: Attachment[];
 }
 
+/** The fields we use from a Slack slash-command envelope (`slash_commands`). */
+interface SlashCommandBody {
+	/** The invoked command, slash included (e.g. `/stop`). */
+	command?: string;
+	/** Everything typed after the command. */
+	text?: string;
+	channel_id?: string;
+}
+
 export interface SlackUser {
 	id: string;
 	userName: string;
@@ -1221,6 +1230,65 @@ export class SlackBot implements ChannelTransport {
 				log.logWarning("[message] handler error", err instanceof Error ? err.message : String(err));
 			} finally {
 				ackOnce();
+			}
+		});
+
+		// Native Slack slash commands (/stop, /compact, /clear, /reset, /verbose).
+		// Only fires for commands the workspace's Slack app actually declares — an
+		// install that never adds them keeps using the bare-word spellings and never
+		// sees this path (see docs/channel-modes.md).
+		//
+		// Unlike bare-word admin commands this is NOT gated behind `admin` mode: a
+		// slash command is unambiguous and can only be typed deliberately, so there's
+		// no ambient text to protect against. Relay (passthrough) channels are the one
+		// refusal — Iris's own LLM never runs there, so there is nothing to control.
+		this.socketClient.on("slash_commands", async ({ body, ack }: { body: SlashCommandBody; ack: (response?: unknown) => Promise<void> }) => {
+			// Exactly one ack per envelope, whichever branch (or a throw) gets there first.
+			let acked = false;
+			const ackOnce = async (response?: unknown) => {
+				if (acked) return;
+				acked = true;
+				await ack(response);
+			};
+			try {
+				const channelId = body.channel_id;
+				const command = (body.command ?? "").trim();
+				const args = (body.text ?? "").trim();
+				if (!channelId || !command) return;
+
+				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(channelId)) {
+					await ackOnce({ response_type: "ephemeral", text: "_Iris isn't enabled in this channel._" });
+					return;
+				}
+				if (this.getDispatchConfig(channelId).container === "relay") {
+					await ackOnce({
+						response_type: "ephemeral",
+						text: "_This channel forwards to an external endpoint — Iris keeps no context here to control._",
+					});
+					return;
+				}
+
+				const verboseCmd = parseVerboseCommand(args ? `${command} ${args}` : command);
+				if (verboseCmd) {
+					await ackOnce();
+					this.handler.handleVerboseCommand(channelId, this, verboseCmd);
+					return;
+				}
+				// Any trailing text is ignored: `/stop now` means `/stop`.
+				const adminCmd = parseAdminCommand(command);
+				if (adminCmd) {
+					await ackOnce();
+					this.runAdminCommand(channelId, adminCmd);
+					return;
+				}
+				await ackOnce({
+					response_type: "ephemeral",
+					text: `_Unknown command \`${command}\`. Iris knows \`/stop\`, \`/compact\`, \`/clear\`, and \`/verbose on|off\`._`,
+				});
+			} catch (err) {
+				log.logWarning("[slash_commands] handler error", err instanceof Error ? err.message : String(err));
+			} finally {
+				await ackOnce().catch(() => {});
 			}
 		});
 	}

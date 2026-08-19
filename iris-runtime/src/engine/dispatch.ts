@@ -58,13 +58,26 @@ export function admitsBotMessage(config: DispatchConfig, hasThreadTs: boolean): 
 }
 
 /**
+ * Strip a single leading `/` so the Telegram-style `/stop` spelling is accepted
+ * wherever a bare `stop` is. This is about *text*, not Slack's slash-command
+ * envelope (handled in slack.ts): a `/stop` typed at the start of a Slack
+ * composer never reaches us as text at all unless the app declares the command,
+ * but `@iris /stop` does arrive as the text `/stop` — and that shouldn't be
+ * handed to the LLM as a prompt just because the user reached for the spelling
+ * Telegram taught them (see #156).
+ */
+function stripCommandSlash(cmd: string): string {
+	return cmd.startsWith("/") ? cmd.slice(1).trim() : cmd;
+}
+
+/**
  * Whether (lowercased, trimmed) text is one of the admin control commands.
  * `clear` is accepted as an alias for `reset` — the conventional name in
  * other chat/CLI tools (Claude Code, ChatGPT) that users reach for instead
- * of `reset` (see #109).
+ * of `reset` (see #109). A leading `/` is optional (see #156).
  */
 export function parseAdminCommand(text: string): "stop" | "compact" | "reset" | false {
-	const cmd = text.toLowerCase().trim();
+	const cmd = stripCommandSlash(text.toLowerCase().trim());
 	if (cmd === "clear") return "reset";
 	return cmd === "stop" || cmd === "compact" || cmd === "reset" ? cmd : false;
 }
@@ -75,9 +88,10 @@ export function parseAdminCommand(text: string): "stop" | "compact" | "reset" | 
  * unlike `stop`/`compact`/`reset`, this isn't gated behind admin mode; it's a
  * UX preference, not a destructive action, so callers intercept it directly
  * from any DM or explicit mention regardless of the channel's configured mode.
+ * As with the admin commands, a leading `/` is optional.
  */
 export function parseVerboseCommand(text: string): "on" | "off" | "status" | false {
-	const cmd = text.toLowerCase().trim();
+	const cmd = stripCommandSlash(text.toLowerCase().trim());
 	if (cmd === "verbose on") return "on";
 	if (cmd === "verbose off") return "off";
 	if (cmd === "verbose" || cmd === "verbose status") return "status";

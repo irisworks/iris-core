@@ -13,7 +13,7 @@ wildcards match, the longest prefix wins (e.g. `DA*` beats `D*`).
 | Mode | Behavior |
 |---|---|
 | `dm` | Default. Responds in DMs; channels need an `@iris` mention |
-| `admin` | Like `dm`, plus `stop` / `compact` / `reset` control commands — these work as plain text, no `@iris` mention needed |
+| `admin` | Like `dm`, plus `stop` / `compact` / `reset` [control commands](#control-commands) as plain text, no `@iris` mention needed |
 | `thread` | Only responds inside registered session threads (sessions created via the API) |
 | `interactive-thread` | A top-level message opens a session; replies in that thread continue it without further mentions |
 | `leads` | Every top-level message triggers Iris — no mention needed |
@@ -44,6 +44,35 @@ named mode.
 }
 ```
 
+## Control commands
+
+Three commands control a channel's run and context rather than talking to Iris:
+
+| Command | Effect |
+|---|---|
+| `stop` | Abort the run in flight (`_Nothing running_` if idle) |
+| `compact` | Summarise the channel's context into a compaction entry |
+| `reset` (alias `clear`) | Clear the channel's conversation history |
+
+There are two ways to send them on Slack, with different gating:
+
+- **As message text** — `stop`, `/stop`, `@iris stop`, or `@iris /stop`. Only
+  `admin`-mode channels intercept these, because the bare word `stop` is also
+  ordinary English: in any other mode the text is swallowed (never answered,
+  never executed) when it's addressed to Iris, and ignored otherwise. A thread
+  reply that is neither a mention nor a DM is always exempt, so a mid-thread
+  "stop" can't wipe a channel out from under the people talking in it.
+- **As a native slash command** — `/stop`, `/compact`, `/clear`, `/reset`,
+  `/verbose on|off`. These work in **every** mode except `passthrough` (where
+  Iris keeps no context to control): a registered slash command is unambiguous
+  and can only be typed deliberately, so there's no ambient text to protect
+  against. They are **not** registered for you — add them to your Slack app
+  (see [Setup](SETUP.md#slack-app-creation-reference)); until you do, Slack
+  rejects a bare `/stop` client-side and Iris never sees it.
+
+On Telegram the slash spellings are the bot commands `/stop`, `/compact`,
+`/reset`, `/clear` and always work — Telegram has no channel-mode concept.
+
 ## Verbose tool output
 
 By default (`IRIS_VERBOSE_TOOLS` unset), a run shows one status line that
@@ -51,8 +80,9 @@ updates in place as Iris works (e.g. `_→ running bash..._`), then gets
 replaced by the final answer — no per-tool-call thread replies (Slack) or
 flat messages (Telegram), no chain-of-thought dump, no per-run cost summary.
 
-Toggle it with `verbose on` / `verbose off` / `verbose status` on Slack, or
-`/verbose on|off|status` on Telegram. Unlike `stop`/`compact`/`reset`, this
+Toggle it with `verbose on` / `verbose off` / `verbose status` on Slack (the
+`/verbose ...` spelling works too), or `/verbose on|off|status` on Telegram.
+Unlike `stop`/`compact`/`reset`, this
 is **not** gated behind `admin` mode — it's a UX preference, not a
 destructive action, so it works from any DM or explicit `@iris` mention in
 any channel mode. The setting persists per channel (in that channel's

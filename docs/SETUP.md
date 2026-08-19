@@ -75,6 +75,11 @@ When the bootstrap pauses for Slack tokens:
 4. **Event Subscriptions** → Enable → subscribe to bot events:
    `app_mention` `message.channels` `message.groups` `message.im` `message.mpim`.
 5. **App Home** → enable the Messages Tab.
+6. *(Optional)* **Slash Commands** → Create New Command for each of `/stop`,
+   `/compact`, `/clear`, `/reset`, `/verbose` — leave the Request URL blank
+   (Socket Mode delivers them). Without this step Slack rejects a typed `/stop`
+   before it reaches Iris; use the bare words `stop` / `compact` / `clear` in an
+   `admin`-mode channel instead. See [Channel Modes](channel-modes.md#control-commands).
 
 ---
 
