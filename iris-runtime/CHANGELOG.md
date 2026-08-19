@@ -19,6 +19,12 @@
   WebTransport's `/upload` on the API's own port and token, so a programmatic
   consumer needs neither the web UI enabled nor its password. (#185)
 
+### Fixed
+
+- Telegram: replying to an earlier message now prepends that message's content
+  (or a content-type note for media) to the text Iris receives, so reply-based
+  follow-ups resolve their context instead of arriving as standalone text. (#157)
+
 ### Changed
 
 - `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
