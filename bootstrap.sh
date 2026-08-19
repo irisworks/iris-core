@@ -209,6 +209,10 @@ fi
 
 if ! command -v jq &>/dev/null; then sudo apt-get install -y jq; fi
 
+# poppler-utils' pdftotext backs the read tool's PDF support (text layer
+# extraction) — scanned/image-only PDFs have no text layer and read back empty.
+if ! command -v pdftotext &>/dev/null; then sudo apt-get install -y poppler-utils; fi
+
 # nginx + certbot are installed in step 5, and only when a public domain
 # (IRIS_BASE_DOMAIN) is configured — the default path serves nothing publicly.
 

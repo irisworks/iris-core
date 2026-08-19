@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `read` tool support for PDFs: extracts the text layer via `pdftotext`
+  (`poppler-utils`, now installed by `bootstrap.sh`) instead of dumping raw
+  PDF binary at the model. Scanned/image-only PDFs have no text layer and
+  read back empty. (#141)
+
 ## [1.7.0] - 2026-08-19
 
 ### Added

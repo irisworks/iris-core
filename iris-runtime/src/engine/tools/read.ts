@@ -3,30 +3,30 @@ import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import type { Executor } from "../sandbox.js";
 import { resizeImageIfNeededAsync } from "../image-resize.js";
-import { detectImageMimeType, MIME_SNIFF_BYTES } from "../mime.js";
+import { detectImageMimeType, detectPdf, MIME_SNIFF_BYTES } from "../mime.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
 /**
- * Sniff whether a file is a supported image format from its magic bytes, not
- * its filename — a mislabeled or extensionless attachment (e.g. a Telegram
- * document with no name) would otherwise never be recognized. Reads only the
- * small header window sniffing needs, via the same executor as everything
- * else in this tool (the path may be inside a sandboxed container/VM, not
- * the host filesystem, so this can't just open() the file directly).
- * Returns undefined (not an error) if `path` doesn't exist — the caller's
- * existing text-read path below will surface that as its normal "no such
- * file" error instead.
+ * Sniff a file's type from its magic bytes, not its filename — a mislabeled
+ * or extensionless attachment (e.g. a Telegram document with no name) would
+ * otherwise never be recognized. Reads only the small header window sniffing
+ * needs, via the same executor as everything else in this tool (the path may
+ * be inside a sandboxed container/VM, not the host filesystem, so this can't
+ * just open() the file directly). Returns all-undefined/false (not an error)
+ * if `path` doesn't exist — the caller's existing text-read path below will
+ * surface that as its normal "no such file" error instead.
  */
-async function sniffImageMimeType(
+async function sniffFileType(
 	executor: Executor,
 	path: string,
 	signal?: AbortSignal,
-): Promise<string | undefined> {
+): Promise<{ imageMimeType: string | undefined; isPdf: boolean }> {
 	try {
 		const head = await execBase64(executor, `head -c ${MIME_SNIFF_BYTES} ${shellEscape(path)}`, signal);
-		return await detectImageMimeType(head);
+		const imageMimeType = await detectImageMimeType(head);
+		return { imageMimeType, isPdf: imageMimeType ? false : await detectPdf(head) };
 	} catch {
-		return undefined;
+		return { imageMimeType: undefined, isPdf: false };
 	}
 }
 
@@ -57,14 +57,30 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp)${options.supportsImageInput ? "" : " — NOTE: the active model does not accept image input, so images will be reported as unreadable"}. Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
+		description: `Read the contents of a file. Supports text files, images (jpg, png, gif, webp)${options.supportsImageInput ? "" : " — NOTE: the active model does not accept image input, so images will be reported as unreadable"}, and PDFs (text layer only — scanned/image-only PDFs read back empty). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
 		parameters: readSchema,
 		execute: async (
 			_toolCallId: string,
 			{ path, offset, limit }: { label: string; path: string; offset?: number; limit?: number },
 			signal?: AbortSignal,
 		): Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }> => {
-			const mimeType = await sniffImageMimeType(executor, path, signal);
+			const { imageMimeType: mimeType, isPdf } = await sniffFileType(executor, path, signal);
+
+			if (isPdf) {
+				// pdftotext (poppler-utils) extracts the text layer directly — no
+				// vision model round-trip needed for text-based PDFs (scans/photos
+				// of documents have no text layer and will read back empty).
+				const result = await executor.exec(`pdftotext -layout ${shellEscape(path)} -`, { signal });
+				if (result.code !== 0) {
+					throw new Error(
+						result.stderr || `Failed to extract text from PDF: ${path} (is poppler-utils installed?)`,
+					);
+				}
+				return {
+					content: [{ type: "text", text: result.stdout }],
+					details: undefined,
+				};
+			}
 
 			if (mimeType) {
 				if (!options.supportsImageInput) {

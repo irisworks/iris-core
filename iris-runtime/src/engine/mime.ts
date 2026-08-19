@@ -13,6 +13,8 @@ import { fileTypeFromBuffer, fileTypeFromFile } from "file-type";
 /** MIME types pi-ai's ImageContent (and every provider module that consumes it) accepts. */
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
+const PDF_MIME_TYPE = "application/pdf";
+
 /** Bytes needed for file-type's magic-byte sniffing; matches its own recommended sniff window. */
 export const MIME_SNIFF_BYTES = 4100;
 
@@ -42,4 +44,15 @@ export async function detectImageMimeTypeFromFile(path: string): Promise<string 
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Detect a PDF from its magic bytes (same sniff window as detectImageMimeType).
+ * A vision model can't read a PDF as an image, and the read tool's text path
+ * would otherwise dump raw PDF binary at it — this lets both branch on the
+ * true file type instead of trusting a possibly-absent or lying filename.
+ */
+export async function detectPdf(buffer: Buffer): Promise<boolean> {
+	const fileType = await fileTypeFromBuffer(buffer);
+	return fileType?.mime === PDF_MIME_TYPE;
 }
