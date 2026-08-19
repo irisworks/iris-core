@@ -1253,6 +1253,7 @@ sudo ln -sfn "$REPO_DIR/skills/self-heal/self-heal"       /usr/local/bin/self-he
 sudo ln -sfn "$REPO_DIR/skills/send-email/send-email"     /usr/local/bin/send-email
 sudo ln -sfn "$REPO_DIR/skills/serve-public/serve-public" /usr/local/bin/serve-public
 sudo ln -sfn "$REPO_DIR/skills/status/status"             /usr/local/bin/status
+sudo ln -sfn "$REPO_DIR/skills/upgrade-iris/upgrade-iris" /usr/local/bin/upgrade-iris
 sudo ln -sfn "$REPO_DIR/skills/search-web/search.sh"           /usr/local/bin/search-web
 sudo ln -sfn "$REPO_DIR/skills/transcribe-audio/transcribe-audio.sh" /usr/local/bin/transcribe-audio
 

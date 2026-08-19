@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `upgrade-iris` skill — runs `scripts/upgrade.sh` from inside Iris. Blocks on
+  uncommitted or unpushed work in the checkout the upgrade would move HEAD off
+  (`--force` overrides, `--check` reports only), and runs detached in an
+  `iris-upgrade` systemd unit so the `iris.service` restart can't kill the
+  upgrade mid-flight. Output goes to `/iris/upgrade.log`.
+
 ### Changed
 
 - `agent.ts`'s attachment sniffing now uses `file-type`'s own `fromFile()`

@@ -163,3 +163,20 @@ cd iris-runtime && npm ci && npm run build && cd ../..
 git add core && git commit -m "core: vX.Y.Z"
 sudo systemctl restart iris
 ```
+
+### Asking Iris to upgrade herself
+
+The `upgrade-iris` skill runs the same script from inside Iris:
+
+```bash
+upgrade-iris --check     # would an upgrade be safe right now?
+upgrade-iris             # latest release tag
+upgrade-iris vX.Y.Z      # specific tag
+```
+
+It adds the two things self-upgrade needs. It refuses to start when the
+checkout has uncommitted changes or commits on no remote, since checking out a
+tag moves HEAD off work this box may be the only copy of (`--force` overrides).
+And it runs the upgrade in a detached `iris-upgrade` systemd unit, because the
+restart would otherwise kill the process running the upgrade — output lands in
+`/iris/upgrade.log`, which survives the restart.

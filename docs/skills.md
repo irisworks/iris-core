@@ -52,7 +52,7 @@ to need none.
 Core ships **platform skills** only — things Iris needs to operate, extend, and
 heal herself: `spawn-agent`, `self-heal`, `self-extend`, `get-secret`, `github`,
 `send-email`, `search-web`, `serve-public`, `store-file`, `transcribe-audio`,
-`schedule`, `status`, plus the opt-in `azure`, `terraform`, and
+`schedule`, `status`, `upgrade-iris`, plus the opt-in `azure`, `terraform`, and
 `firecracker-agent` profile skills.
 
 Domain and business skills — cost dashboards, finance trackers, CRM integrations —
