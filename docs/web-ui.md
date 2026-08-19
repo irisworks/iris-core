@@ -45,7 +45,9 @@ request succeeds.
 browser-facing route, not the internal API, so nothing an unauthenticated
 sub-agent's own allow-list depends on is exposed to it.
 
-`POST /upload?channel=<channelId>` — body is the raw file bytes, header
+`POST /upload?channel=<channelId>` — `channelId` must be a `WEBUI-<id>` or
+`SESSION-<id>` channel (the two namespaces this transport owns; anything else,
+including other transports' channel dirs, is a 400). Body is the raw file bytes, header
 `X-Filename: <name>` (no path separators). Saves under that channel's
 `attachments/` directory (via `resolveChannelDir`/`resolveChannelPath` in
 `store.ts` — nothing hand-builds the path) and returns `{"local": "..."}`,
@@ -66,7 +68,12 @@ ever existed.
 `GET /ws?thread=<id>&agent=<name>` (upgraded to WebSocket) — `thread` opens or
 resumes a conversation, mapped to a `WEBUI-<id>` channel id (the existing
 virtual-channel convention shared with `SESSION-`/`BRIDGE-`/`ESCALATE-`, see
-`resolveChannelDir` in `store.ts`). `agent`, if given, must match a name in
+`resolveChannelDir` in `store.ts`). Passing a full `SESSION-<id>` as `thread`
+subscribes to that channel verbatim instead, read-only, so a consumer driving
+turns through the session REST API can watch them live — see
+[API-driven sessions](#api-driven-sessions) below. Only `SESSION-` is treated
+this way; any other value is prefixed, so a thread literally named
+`WEBUI-notes` still maps to `WEBUI-WEBUI-notes` as before. `agent`, if given, must match a name in
 `agents.json` and routes every message in that thread to that sub-agent's
 bridge (see below) instead of Iris's own engine.
 
@@ -106,6 +113,44 @@ no "list my sessions" endpoint. One consequence: history doesn't hydrate on
 reconnect or page refresh. Iris's own memory is unaffected (`context.jsonl`
 still backs the conversation and is loaded on the next run), only the
 browser's visual replay of prior messages is skipped.
+
+## API-driven sessions
+
+Turns driven through the internal session API (`POST /sessions/:id/message`)
+run on a `SESSION-<id>` channel, minted by the runtime itself. Connect with
+`GET /ws?thread=SESSION-<id>` to watch one live: the socket receives that
+session's `thinking`/`status`/`tool`/`final`/`file` frames as the turn runs,
+instead of only seeing the reply when the POST returns. `GET
+/files/SESSION-<id>/<filename>` serves files the agent attaches during the
+turn, and `POST /upload?channel=SESSION-<id>` writes into the same
+`attachments/` directory.
+
+**The socket is read-only.** The session API owns the turn; a `{"type":
+"message"}` or `{"type": "command"}` frame on a `SESSION-` socket is refused
+with an `error` frame. This is deliberate: a session has exactly one pending
+request slot, resolved by whichever run on that channel finishes first, so a
+second writer could hand the API caller a reply to a message it never sent —
+and `reset` would clear an API session's context mid-flight. Send messages
+through `POST /sessions/:id/message` and watch the socket for progress.
+
+Note that a `SESSION-` turn does not run on this transport — the session API
+picks the transport (`getTransports()[0]`: Slack, Telegram, or Bridge), and
+that transport's context posts wherever it normally posts. The web frames come
+from a mirror hooked once in the engine (`engine/channel-observers.ts`), which
+is skipped entirely when no socket is watching. A practical consequence: `tool`
+frames reach a watcher even though Slack/Telegram/Bridge implement no
+`onToolEvent` of their own.
+
+Attachments *inbound to* a session are a separate matter: `POST
+/sessions/:id/message` accepts only `{text, user}` today, so an uploaded file
+has no field to travel in. `/upload` on a `SESSION-` channel is useful for
+staging files into the session directory, not for attaching them to an API
+message.
+
+The auth gate is unchanged — with `IRIS_WEBUI_PASSWORD` set, a `SESSION-`
+socket or upload needs the same session cookie any other request does. No
+other virtual namespace (`BRIDGE-`, `ESCALATE-`, `SELFHEAL-`) or transport
+channel dir is reachable through these routes.
 
 ## Sub-agent routing
 

@@ -5,6 +5,9 @@
 // dispatches into it with zero special-casing. Channel ids are `WEBUI-<id>`,
 // matching the existing virtual-channel convention already reserved for
 // "WEBUI" in store.ts/slack.ts (see resolveChannelDir's isVirtualChannel).
+// `SESSION-<id>` channels — minted by injectSessionMessage for turns driven
+// through the session REST API — are served here too, so an API-first
+// consumer gets the same live stream, uploads, and file serving.
 //
 // Realizes MessageContext over a WebSocket per browser connection: a thinking
 // placeholder while the run is in flight, structured tool-call events via the
@@ -25,6 +28,11 @@ import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
 import { readBody, secretMatches, secretsBackendRequest } from "../../engine/api.js";
 import { consumeDrop, peekDrop, type SecretDrop } from "../../engine/secret-drops.js";
 import type { ChannelState, EngineTransport } from "../../engine/index.js";
+import {
+	registerChannelObserver,
+	unregisterChannelObserver,
+	type ChannelObserver,
+} from "../../engine/channel-observers.js";
 import { resolveChannelDir, resolveChannelPath } from "../../engine/store.js";
 import {
 	registerPromptProfile,
@@ -85,14 +93,38 @@ function randomToken(): string {
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
+ * Channel namespaces this transport owns and will serve over WS/upload/files.
+ * `WEBUI-` is what the browser chat creates; `SESSION-` is what core's own
+ * `injectSessionMessage` creates for every turn driven through the session
+ * REST API, so an API-first consumer can subscribe to the same live
+ * thinking/tool/final stream the browser gets (IRIS-180).
+ */
+const WEB_CHANNEL_PREFIXES = ["WEBUI-", "SESSION-"] as const;
+
+/**
  * The `channel` param on /upload and /files must both stay within the
  * SAFE_ID charset (no traversal metacharacters) AND be scoped to a
- * WEBUI-owned channel — otherwise a browser client could read/write
- * attachments under an arbitrary Slack/Telegram channel dir by charset-valid
- * id alone (e.g. `channel=slack-general`), not just escape workingDir.
+ * channel namespace this transport owns — otherwise a browser client could
+ * read/write attachments under an arbitrary Slack/Telegram channel dir by
+ * charset-valid id alone (e.g. `channel=slack-general`), not just escape
+ * workingDir.
  */
 function isValidWebChannelId(channelId: string): boolean {
-	return channelId.startsWith("WEBUI-") && SAFE_ID.test(channelId.slice("WEBUI-".length));
+	return WEB_CHANNEL_PREFIXES.some(
+		(prefix) => channelId.startsWith(prefix) && SAFE_ID.test(channelId.slice(prefix.length)),
+	);
+}
+
+/**
+ * Maps a `?thread=` param onto the channel id the socket subscribes to.
+ * Only `SESSION-<id>` is taken verbatim (to watch an API-driven session);
+ * everything else — including a browser thread the user happened to name
+ * `WEBUI-something` — keeps getting the `WEBUI-` prefix, so no existing
+ * thread's channel dir shifts underneath it.
+ */
+function resolveWebChannelId(threadId: string): string {
+	const isSession = threadId.startsWith("SESSION-") && SAFE_ID.test(threadId.slice("SESSION-".length));
+	return isSession ? threadId : `WEBUI-${threadId}`;
 }
 
 /**
@@ -121,8 +153,10 @@ export class WebTransport implements ChannelTransport {
 	private readonly port: number;
 	private readonly password: string | undefined;
 	private readonly sessionTokens = new Set<string>();
-	/** Connections currently subscribed to a given WEBUI-<id> channel. */
+	/** Connections currently subscribed to a given WEBUI-/SESSION- channel. */
 	private readonly connections = new Map<string, Set<WebSocket>>();
+	/** Placeholder message id for the in-flight *observed* run on a channel (see observedMessageId). */
+	private readonly observedMessageIds = new Map<string, string>();
 	private server: Server | undefined;
 	private wss: WebSocketServer | undefined;
 
@@ -166,11 +200,67 @@ export class WebTransport implements ChannelTransport {
 
 		this.server = server;
 		this.wss = wss;
+		registerChannelObserver(this.observer);
 	}
 
 	stop(): void {
+		unregisterChannelObserver(this.observer);
 		this.wss?.close();
 		this.server?.close();
+	}
+
+	/**
+	 * Lets a socket watching a `SESSION-<id>` channel see a turn that is
+	 * running on some *other* transport's context (the session API picks the
+	 * transport; see engine/channel-observers.ts). Scoped to channels this
+	 * transport doesn't own — a `WEBUI-` turn already broadcasts through
+	 * createContext, and mirroring it too would double every frame.
+	 */
+	private readonly observer: ChannelObserver = {
+		watching: (channelId) => !this.ownsChannel(channelId) && (this.connections.get(channelId)?.size ?? 0) > 0,
+		emit: (channelId, event) => {
+			switch (event.kind) {
+				case "thinking":
+					this.broadcast(channelId, { type: "thinking", id: this.observedMessageId(channelId) });
+					break;
+				case "status":
+					this.broadcast(channelId, { type: "status", id: this.observedMessageId(channelId), text: event.label });
+					break;
+				case "tool":
+					this.broadcast(channelId, { type: "tool", ...event.event });
+					break;
+				case "final": {
+					const id = this.observedMessageId(channelId);
+					// Retire the id with the frame that closes the bubble, so the
+					// next turn on this session opens a fresh one instead of
+					// overwriting this answer.
+					this.observedMessageIds.delete(channelId);
+					this.broadcast(channelId, { type: "final", id, text: event.text });
+					break;
+				}
+				case "file":
+					this.broadcast(channelId, {
+						type: "file",
+						url: `/files/${encodeURIComponent(channelId)}/${encodeURIComponent(event.filename)}`,
+						...(event.title !== undefined && { title: event.title }),
+					});
+					break;
+			}
+		},
+	};
+
+	/**
+	 * Stable per-channel placeholder id so an observed run's `thinking` frame
+	 * and its `final` frame refer to the same bubble, the way a WEBUI- run's
+	 * own createContext-issued id does.
+	 */
+	private observedMessageId(channelId: string): string {
+		let id = this.observedMessageIds.get(channelId);
+		if (!id) {
+			id = randomToken();
+			this.observedMessageIds.set(channelId, id);
+		}
+		return id;
 	}
 
 	ownsChannel(channelId: string): boolean {
@@ -300,7 +390,7 @@ export class WebTransport implements ChannelTransport {
 		const url = new URL(req.url ?? "/ws", "http://localhost");
 		const threadId = url.searchParams.get("thread") || randomToken();
 		const targetAgent = url.searchParams.get("agent") || undefined;
-		const channelId = `WEBUI-${threadId}`;
+		const channelId = resolveWebChannelId(threadId);
 
 		let sockets = this.connections.get(channelId);
 		if (!sockets) {
@@ -324,6 +414,20 @@ export class WebTransport implements ChannelTransport {
 		try {
 			body = JSON.parse(raw);
 		} catch {
+			return;
+		}
+
+		// A SESSION- socket is an observer of a turn the session API owns, not a
+		// second writer into it. Letting it dispatch would race the API caller:
+		// engine/index.ts resolves the session's single pending request from
+		// whichever run on that channel finishes first, so a browser-sent turn
+		// could hand the API client text it never asked for — and `reset` would
+		// wipe an API session's context out from under it.
+		if (!channelId.startsWith("WEBUI-")) {
+			this.broadcast(channelId, {
+				type: "error",
+				message: `Channel '${channelId}' is read-only over this socket — send messages via the session API`,
+			});
 			return;
 		}
 
@@ -432,7 +536,7 @@ export class WebTransport implements ChannelTransport {
 	}
 
 	/**
-	 * `channelId` must be a WEBUI-owned id (isValidWebChannelId) and every
+	 * `channelId` must be a web-owned id (isValidWebChannelId) and every
 	 * candidate read path is built through safeJoin, which verifies the
 	 * resolved path stays inside the channel dir — the authoritative guard,
 	 * not just the "/"/".." blacklist on `filename` (kept as an early
@@ -464,7 +568,7 @@ export class WebTransport implements ChannelTransport {
 		const filename = Array.isArray(filenameHeader) ? filenameHeader[0] : filenameHeader;
 		if (!channelId || !isValidWebChannelId(channelId) || !filename || filename.includes("/") || filename.includes("..")) {
 			res.writeHead(400, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ error: "channel query param (WEBUI-<safe-id>) and X-Filename header (no path separators) are required" }));
+			res.end(JSON.stringify({ error: "channel query param (WEBUI-<safe-id> or SESSION-<safe-id>) and X-Filename header (no path separators) are required" }));
 			return;
 		}
 		const chunks: Buffer[] = [];

@@ -9,7 +9,22 @@
   attachments concurrently instead of one at a time. The `read` tool's image
   sniff and full-image read now share one exec+base64-decode helper.
 
+### Added
+
+- `engine/channel-observers.ts` — a mirror that forwards a run's
+  thinking/status/tool/final/file events to a passive watcher of the same
+  channel. This is what lets a `SESSION-` WebSocket see a turn that runs on
+  Slack's, Telegram's, or Bridge's context. Off the hot path entirely when
+  nobody is watching. (#180)
+
 ### Fixed
+
+- `WebTransport` rejected the `SESSION-<id>` channels the runtime's own
+  `injectSessionMessage` mints, so sessions driven through the session API
+  could never open `/ws?thread=SESSION-<id>`, upload, or serve files. Both
+  namespaces are now served; the auth gate and the rejection of every other
+  channel namespace are unchanged. A `SESSION-` socket is read-only — the
+  session API owns the turn. (#180)
 
 - Image attachments and `read`-tool image reads were sent to the model at
   their original size, with no check against provider payload limits. Base64
