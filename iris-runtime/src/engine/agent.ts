@@ -25,6 +25,7 @@ import {
 	syncLogToSessionManager,
 	writeResetWatermark,
 } from "./context.js";
+import { resizeImageIfNeededAsync } from "./image-resize.js";
 import * as log from "./log.js";
 import { detectImageMimeTypeFromFile } from "./mime.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
@@ -1167,7 +1168,7 @@ function createRunner(
 			const droppedImagePaths: string[] = [];
 			const unavailablePaths: string[] = [];
 
-			const availableAttachments: { fullPath: string }[] = [];
+			const availableAttachments: { fullPath: string; local: string }[] = [];
 			for (const a of ctx.message.attachments || []) {
 				const fullPath = `${workspacePath}/${a.local}`;
 
@@ -1184,7 +1185,7 @@ function createRunner(
 					continue;
 				}
 
-				availableAttachments.push({ fullPath });
+				availableAttachments.push({ fullPath, local: a.local });
 			}
 
 			// Sniff all available attachments concurrently — each is an independent
@@ -1194,7 +1195,7 @@ function createRunner(
 			);
 
 			for (let i = 0; i < availableAttachments.length; i++) {
-				const { fullPath } = availableAttachments[i];
+				const { fullPath, local } = availableAttachments[i];
 				const mimeType = mimeTypes[i];
 				if (mimeType) {
 					if (!supportsImageInput) {
@@ -1205,10 +1206,23 @@ function createRunner(
 						continue;
 					}
 					try {
+						const rawData = readFileSync(fullPath).toString("base64");
+						// Downscale oversized images (e.g. an unresized phone photo) before
+						// they reach the model — base64 inflates the encoded size ~33%, and
+						// an unresized image can exceed a provider's per-image payload limit
+						// outright, failing the whole turn. Undefined means it couldn't be
+						// decoded/shrunk under the ceiling; send the original and let the
+						// provider decide rather than dropping the attachment entirely.
+						const resized = await resizeImageIfNeededAsync(rawData, mimeType);
+						if (resized?.wasResized) {
+							log.logInfo(
+								`[${channelId}] Resized image attachment ${local} to ${resized.width}x${resized.height}`,
+							);
+						}
 						imageAttachments.push({
 							type: "image",
-							mimeType,
-							data: readFileSync(fullPath).toString("base64"),
+							mimeType: resized?.mimeType ?? mimeType,
+							data: resized?.data ?? rawData,
 						});
 					} catch {
 						nonImagePaths.push(fullPath);

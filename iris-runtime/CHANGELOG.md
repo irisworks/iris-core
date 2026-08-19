@@ -9,6 +9,14 @@
   attachments concurrently instead of one at a time. The `read` tool's image
   sniff and full-image read now share one exec+base64-decode helper.
 
+### Added
+
+- `engine/channel-observers.ts` — a mirror that forwards a run's
+  thinking/status/tool/final/file events to a passive watcher of the same
+  channel. This is what lets a `SESSION-` WebSocket see a turn that runs on
+  Slack's, Telegram's, or Bridge's context. Off the hot path entirely when
+  nobody is watching. (#180)
+
 ### Fixed
 
 - `WebTransport` rejected the `SESSION-<id>` channels the runtime's own
@@ -18,13 +26,40 @@
   channel namespace are unchanged. A `SESSION-` socket is read-only — the
   session API owns the turn. (#180)
 
-### Added
+- Image attachments and `read`-tool image reads were sent to the model at
+  their original size, with no check against provider payload limits. Base64
+  inflates the encoded size by roughly a third, so an ordinary unresized
+  phone photo (often 3-5MB) can exceed a provider's per-image limit
+  (Anthropic's is ~5MB) outright and fail the whole turn on nothing more
+  than "the user sent a normal photo". Both paths now downscale through a
+  new `engine/image-resize.ts` (Photon, `@silvia-odwyer/photon-node` — the
+  same library `pi-coding-agent`'s own read tool uses upstream for this, not
+  exposed through its public API, so reimplemented directly) if the image
+  exceeds 2000px on its longest edge or 4.5MB encoded; images already within
+  both limits (the common case) are returned unchanged. A decode failure or
+  an image that can't be shrunk under the ceiling falls back to sending the
+  original as-is rather than dropping the attachment or failing the read.
+  The decode/resize/encode work now runs on a worker thread
+  (`resizeImageIfNeededAsync`) instead of inline, so a large image no longer
+  blocks the event loop for other channels while it resizes; the `read`
+  tool's call also honors its `AbortSignal`. An animated GIF/WebP over the
+  limit is left unresized rather than resized (Photon has no multi-frame
+  API, so resizing would silently flatten it to a single frame).
+  
+- Telegram bridge/agent replies containing `<`, `>`, or `&` (e.g. file content
+  like `<server-ip>`) could fail to display or break `editMessageText`, since
+  `toTelegramHtml()` sent them unescaped under `parse_mode: "HTML"`. It now
+  escapes the whole message before applying markdown-to-HTML formatting.
 
-- `engine/channel-observers.ts` — a mirror that forwards a run's
-  thinking/status/tool/final/file events to a passive watcher of the same
-  channel. This is what lets a `SESSION-` WebSocket see a turn that runs on
-  Slack's, Telegram's, or Bridge's context. Off the hot path entirely when
-  nobody is watching. (#180)
+- Telegram code blocks no longer pick up stray markup: the emphasis and link
+  passes ran over already-converted code, nesting a second `<code>` (rejected
+  by Telegram) and turning `char *_x_` into `char *<i>x</i>`. Code spans are
+  now parked behind placeholders until formatting is done.
+
+- Telegram messages over 4096 characters are now split on the source text
+  rather than the rendered HTML, so a cut can no longer land inside an entity
+  or between `<b>` and `</b>` and cost the whole chunk. Chunk length is
+  measured after escaping, and an oversized code block is re-fenced per chunk.
 
 - Image attachments were recognized (or missed) by filename extension, not
   content — `agent.ts`'s inbound-attachment path and the `read` tool both
