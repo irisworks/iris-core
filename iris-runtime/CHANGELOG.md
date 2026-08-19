@@ -15,7 +15,16 @@
   `injectSessionMessage` mints, so sessions driven through the session API
   could never open `/ws?thread=SESSION-<id>`, upload, or serve files. Both
   namespaces are now served; the auth gate and the rejection of every other
-  channel namespace are unchanged. (#180)
+  channel namespace are unchanged. A `SESSION-` socket is read-only — the
+  session API owns the turn. (#180)
+
+### Added
+
+- `engine/channel-observers.ts` — a mirror that forwards a run's
+  thinking/status/tool/final/file events to a passive watcher of the same
+  channel. This is what lets a `SESSION-` WebSocket see a turn that runs on
+  Slack's, Telegram's, or Bridge's context. Off the hot path entirely when
+  nobody is watching. (#180)
 
 - Image attachments were recognized (or missed) by filename extension, not
   content — `agent.ts`'s inbound-attachment path and the `read` tool both

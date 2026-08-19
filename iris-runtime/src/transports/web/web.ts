@@ -28,6 +28,11 @@ import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
 import { readBody, secretMatches, secretsBackendRequest } from "../../engine/api.js";
 import { consumeDrop, peekDrop, type SecretDrop } from "../../engine/secret-drops.js";
 import type { ChannelState, EngineTransport } from "../../engine/index.js";
+import {
+	registerChannelObserver,
+	unregisterChannelObserver,
+	type ChannelObserver,
+} from "../../engine/channel-observers.js";
 import { resolveChannelDir, resolveChannelPath } from "../../engine/store.js";
 import {
 	registerPromptProfile,
@@ -111,13 +116,15 @@ function isValidWebChannelId(channelId: string): boolean {
 }
 
 /**
- * Maps a `?thread=` param onto the channel id the socket subscribes to. A
- * bare id is the browser's own thread and gets the `WEBUI-` prefix; a value
- * that already names an owned namespace (`SESSION-<id>`) is used verbatim so
- * an API-driven session can be watched live.
+ * Maps a `?thread=` param onto the channel id the socket subscribes to.
+ * Only `SESSION-<id>` is taken verbatim (to watch an API-driven session);
+ * everything else — including a browser thread the user happened to name
+ * `WEBUI-something` — keeps getting the `WEBUI-` prefix, so no existing
+ * thread's channel dir shifts underneath it.
  */
 function resolveWebChannelId(threadId: string): string {
-	return isValidWebChannelId(threadId) ? threadId : `WEBUI-${threadId}`;
+	const isSession = threadId.startsWith("SESSION-") && SAFE_ID.test(threadId.slice("SESSION-".length));
+	return isSession ? threadId : `WEBUI-${threadId}`;
 }
 
 /**
@@ -148,6 +155,8 @@ export class WebTransport implements ChannelTransport {
 	private readonly sessionTokens = new Set<string>();
 	/** Connections currently subscribed to a given WEBUI-/SESSION- channel. */
 	private readonly connections = new Map<string, Set<WebSocket>>();
+	/** Placeholder message id for the in-flight *observed* run on a channel (see observedMessageId). */
+	private readonly observedMessageIds = new Map<string, string>();
 	private server: Server | undefined;
 	private wss: WebSocketServer | undefined;
 
@@ -191,11 +200,67 @@ export class WebTransport implements ChannelTransport {
 
 		this.server = server;
 		this.wss = wss;
+		registerChannelObserver(this.observer);
 	}
 
 	stop(): void {
+		unregisterChannelObserver(this.observer);
 		this.wss?.close();
 		this.server?.close();
+	}
+
+	/**
+	 * Lets a socket watching a `SESSION-<id>` channel see a turn that is
+	 * running on some *other* transport's context (the session API picks the
+	 * transport; see engine/channel-observers.ts). Scoped to channels this
+	 * transport doesn't own — a `WEBUI-` turn already broadcasts through
+	 * createContext, and mirroring it too would double every frame.
+	 */
+	private readonly observer: ChannelObserver = {
+		watching: (channelId) => !this.ownsChannel(channelId) && (this.connections.get(channelId)?.size ?? 0) > 0,
+		emit: (channelId, event) => {
+			switch (event.kind) {
+				case "thinking":
+					this.broadcast(channelId, { type: "thinking", id: this.observedMessageId(channelId) });
+					break;
+				case "status":
+					this.broadcast(channelId, { type: "status", id: this.observedMessageId(channelId), text: event.label });
+					break;
+				case "tool":
+					this.broadcast(channelId, { type: "tool", ...event.event });
+					break;
+				case "final": {
+					const id = this.observedMessageId(channelId);
+					// Retire the id with the frame that closes the bubble, so the
+					// next turn on this session opens a fresh one instead of
+					// overwriting this answer.
+					this.observedMessageIds.delete(channelId);
+					this.broadcast(channelId, { type: "final", id, text: event.text });
+					break;
+				}
+				case "file":
+					this.broadcast(channelId, {
+						type: "file",
+						url: `/files/${encodeURIComponent(channelId)}/${encodeURIComponent(event.filename)}`,
+						...(event.title !== undefined && { title: event.title }),
+					});
+					break;
+			}
+		},
+	};
+
+	/**
+	 * Stable per-channel placeholder id so an observed run's `thinking` frame
+	 * and its `final` frame refer to the same bubble, the way a WEBUI- run's
+	 * own createContext-issued id does.
+	 */
+	private observedMessageId(channelId: string): string {
+		let id = this.observedMessageIds.get(channelId);
+		if (!id) {
+			id = randomToken();
+			this.observedMessageIds.set(channelId, id);
+		}
+		return id;
 	}
 
 	ownsChannel(channelId: string): boolean {
@@ -349,6 +414,20 @@ export class WebTransport implements ChannelTransport {
 		try {
 			body = JSON.parse(raw);
 		} catch {
+			return;
+		}
+
+		// A SESSION- socket is an observer of a turn the session API owns, not a
+		// second writer into it. Letting it dispatch would race the API caller:
+		// engine/index.ts resolves the session's single pending request from
+		// whichever run on that channel finishes first, so a browser-sent turn
+		// could hand the API client text it never asked for — and `reset` would
+		// wipe an API session's context out from under it.
+		if (!channelId.startsWith("WEBUI-")) {
+			this.broadcast(channelId, {
+				type: "error",
+				message: `Channel '${channelId}' is read-only over this socket — send messages via the session API`,
+			});
 			return;
 		}
 

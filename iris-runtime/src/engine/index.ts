@@ -9,6 +9,7 @@
 // ============================================================================
 
 import { getOrCreateRunner, type AgentRunner } from "./agent.js";
+import { isChannelObserved, mirrorContextToObservers } from "./channel-observers.js";
 import * as log from "./log.js";
 import type { SandboxConfig } from "./sandbox.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
@@ -180,7 +181,7 @@ export function createEngine(config: EngineConfig): Engine {
 				// rather than in each transport because two of them serve BRIDGE-
 				// channels (BridgeTransport for a token-less sub-agent, SlackBot for
 				// one that has Slack tokens) and both discard setStatus.
-				const ctx: MessageContext = bridgeRequestId
+				const bridgeWrapped: MessageContext = bridgeRequestId
 					? {
 						...baseCtx,
 						setStatus: async (label: string) => {
@@ -190,6 +191,15 @@ export function createEngine(config: EngineConfig): Engine {
 						},
 					}
 					: baseCtx;
+				// Mirror the run to any passive watcher of this channel (a web
+				// socket on a SESSION- channel — see engine/channel-observers.ts).
+				// Same reasoning as the bridge hook above: the transport running a
+				// SESSION- turn is whichever one the session API picked, and none of
+				// them know about the watcher. Wrapping is skipped entirely when
+				// nobody is watching, so the normal path is untouched.
+				const ctx: MessageContext = isChannelObserved(event.channel)
+					? mirrorContextToObservers(event.channel, bridgeWrapped)
+					: bridgeWrapped;
 				bridgeCtx = ctx;
 
 				// Run the agent

@@ -149,20 +149,81 @@ test("web transport: a traversal-bearing SESSION- channel is still rejected", as
 	assert.equal(rejected, true);
 });
 
-test("web transport: commands on a SESSION- socket target the session channel", async () => {
+// A SESSION- socket observes a turn the session API owns. Letting it write
+// would race that API caller: engine/index.ts resolves the session's single
+// pending request from whichever run on the channel finishes first, so a
+// browser-sent turn could hand the API client text it never asked for, and
+// `reset` would wipe an API session's context mid-flight.
+test("web transport: a SESSION- socket is read-only — no dispatch, no commands", async () => {
 	const port = 19414;
 	const workingDir = makeWorkingDir();
 	const commands = makeCommands();
-	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands });
+	let dispatched = 0;
+	const transport = new WebTransport({ port, workingDir, dispatch: () => { dispatched++; }, commands });
 	transport.start();
 	closers.push(() => transport.stop());
 
 	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=SESSION-s9`);
+	const frames = collectFrames(ws);
+	await new Promise((resolve) => ws.on("open", resolve));
+
+	ws.send(JSON.stringify({ type: "command", action: "reset" }));
+	ws.send(JSON.stringify({ type: "message", text: "let me in" }));
+	await settle(80);
+
+	assert.deepEqual(commands.calls, [], "no command reached the engine");
+	assert.equal(dispatched, 0, "no turn was dispatched");
+	assert.equal(frames.length, 2);
+	for (const frame of frames) {
+		assert.equal(frame.type, "error");
+		assert.match(frame.message, /read-only/);
+	}
+	ws.close();
+});
+
+// A WEBUI- channel is still fully read-write — only the verbatim SESSION- path
+// is observe-only.
+test("web transport: a WEBUI- socket still dispatches and runs commands", async () => {
+	const port = 19419;
+	const workingDir = makeWorkingDir();
+	const commands = makeCommands();
+	let dispatched = 0;
+	const transport = new WebTransport({ port, workingDir, dispatch: () => { dispatched++; }, commands });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=w1`);
 	await new Promise((resolve) => ws.on("open", resolve));
 	ws.send(JSON.stringify({ type: "command", action: "stop" }));
-	await settle(50);
+	ws.send(JSON.stringify({ type: "message", text: "hi" }));
+	await settle(80);
 
-	assert.deepEqual(commands.calls, [["stop", "SESSION-s9"]]);
+	assert.deepEqual(commands.calls, [["stop", "WEBUI-w1"]]);
+	assert.equal(dispatched, 1);
+	ws.close();
+});
+
+// Only SESSION- is taken verbatim. A browser thread the user named
+// "WEBUI-something" must keep mapping to WEBUI-WEBUI-something, or its
+// existing channel dir (context.jsonl and all) shifts underneath it on upgrade
+// and it collides with the plain thread of the same name.
+test("web transport: a WEBUI--prefixed thread id is still double-prefixed", async () => {
+	const port = 19420;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=WEBUI-notes`);
+	const frames = collectFrames(ws);
+	await new Promise((resolve) => ws.on("open", resolve));
+
+	await transport.postMessage("WEBUI-WEBUI-notes", "to the nested channel");
+	// The plain "notes" thread is a different channel and must not leak in.
+	await transport.postMessage("WEBUI-notes", "to a different thread");
+	await settle(60);
+
+	assert.deepEqual(frames.map((f) => f.text), ["to the nested channel"]);
 	ws.close();
 });
 
