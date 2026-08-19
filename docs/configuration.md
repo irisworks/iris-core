@@ -80,6 +80,14 @@ is still recognized correctly. If `"input"` includes `"image"` and an
 attachment still isn't picked up, it likely isn't a supported format (jpeg,
 png, gif, webp).
 
+An image over 2000px on its longest edge or 4.5MB once base64-encoded is
+downscaled before it's sent — an unresized phone photo can otherwise exceed
+a provider's per-image payload limit and fail the whole turn. This is
+automatic and has no env var to tune; a decode failure just falls back to
+sending the original size as-is. An animated GIF or WebP over those limits
+is sent as-is rather than resized, to avoid silently collapsing it to a
+single still frame.
+
 The `openai` provider defaults to `gpt-5.6-luna` (`gpt-5.4-mini` and
 `gpt-5.6-terra` are also available) and uses `pi-ai`'s `openai-responses`
 module, not `openai-completions` — these models 400 on `/v1/chat/completions`

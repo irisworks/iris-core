@@ -11,6 +11,26 @@
 
 ### Fixed
 
+- Image attachments and `read`-tool image reads were sent to the model at
+  their original size, with no check against provider payload limits. Base64
+  inflates the encoded size by roughly a third, so an ordinary unresized
+  phone photo (often 3-5MB) can exceed a provider's per-image limit
+  (Anthropic's is ~5MB) outright and fail the whole turn on nothing more
+  than "the user sent a normal photo". Both paths now downscale through a
+  new `engine/image-resize.ts` (Photon, `@silvia-odwyer/photon-node` — the
+  same library `pi-coding-agent`'s own read tool uses upstream for this, not
+  exposed through its public API, so reimplemented directly) if the image
+  exceeds 2000px on its longest edge or 4.5MB encoded; images already within
+  both limits (the common case) are returned unchanged. A decode failure or
+  an image that can't be shrunk under the ceiling falls back to sending the
+  original as-is rather than dropping the attachment or failing the read.
+  The decode/resize/encode work now runs on a worker thread
+  (`resizeImageIfNeededAsync`) instead of inline, so a large image no longer
+  blocks the event loop for other channels while it resizes; the `read`
+  tool's call also honors its `AbortSignal`. An animated GIF/WebP over the
+  limit is left unresized rather than resized (Photon has no multi-frame
+  API, so resizing would silently flatten it to a single frame).
+  
 - Telegram bridge/agent replies containing `<`, `>`, or `&` (e.g. file content
   like `<server-ip>`) could fail to display or break `editMessageText`, since
   `toTelegramHtml()` sent them unescaped under `parse_mode: "HTML"`. It now
