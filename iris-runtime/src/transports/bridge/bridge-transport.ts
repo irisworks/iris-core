@@ -8,6 +8,7 @@
 // requests (POST /sessions/:id/message) instead.
 // ============================================================================
 
+import * as log from "../../engine/log.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
 	registerPromptProfile,
@@ -22,8 +23,48 @@ import {
 export interface BridgeTransportOptions {
 	/** Prompt fragments for bridge runs (currently the Slack fragments, status quo) */
 	promptProfile: TransportPromptProfile;
-	/** Dispatch an event into the engine (wired in main.ts to engine.handleEvent) */
-	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void;
+	/**
+	 * Dispatch an event into the engine (wired in main.ts to engine.handleEvent).
+	 * Returns the run's promise so enqueueEvent's per-channel queue (below) can
+	 * wait for one run to finish before starting the next on the same channel.
+	 */
+	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void | Promise<void>;
+}
+
+// ============================================================================
+// Per-channel queue for sequential processing — mirrors slack.ts/telegram.ts.
+// Without this, two requests that reuse the same conversationKey (same
+// requestId ⇒ same BRIDGE-{id} channel) dispatch two concurrent runs against
+// the same ChannelState, and both append to the same context.jsonl.
+// ============================================================================
+
+type QueuedWork = () => Promise<void>;
+
+class ChannelQueue {
+	private queue: QueuedWork[] = [];
+	private processing = false;
+
+	enqueue(work: QueuedWork): void {
+		this.queue.push(work);
+		this.processNext();
+	}
+
+	size(): number {
+		return this.queue.length;
+	}
+
+	private async processNext(): Promise<void> {
+		if (this.processing || this.queue.length === 0) return;
+		this.processing = true;
+		const work = this.queue.shift()!;
+		try {
+			await work();
+		} catch (err) {
+			log.logWarning("Queue error", err instanceof Error ? err.message : String(err));
+		}
+		this.processing = false;
+		this.processNext();
+	}
 }
 
 /**
@@ -48,6 +89,7 @@ export class BridgeTransport implements ChannelTransport {
 	readonly promptProfile: TransportPromptProfile;
 	readonly stopCommandHint = "say `stop` first";
 	private readonly dispatch: BridgeTransportOptions["dispatch"];
+	private readonly queues = new Map<string, ChannelQueue>();
 
 	constructor(options: BridgeTransportOptions) {
 		this.promptProfile = options.promptProfile;
@@ -79,8 +121,24 @@ export class BridgeTransport implements ChannelTransport {
 	async updateMessage(_channelId: string, _messageId: string, _text: string): Promise<void> {}
 
 	enqueueEvent(event: TransportEvent): boolean {
-		this.dispatch(event, this);
+		const queue = this.getQueue(event.channel);
+		if (queue.size() >= 5) {
+			log.logWarning(`[bridge] Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
+			return false;
+		}
+		queue.enqueue(async () => {
+			await this.dispatch(event, this);
+		});
 		return true;
+	}
+
+	private getQueue(channelId: string): ChannelQueue {
+		let queue = this.queues.get(channelId);
+		if (!queue) {
+			queue = new ChannelQueue();
+			this.queues.set(channelId, queue);
+		}
+		return queue;
 	}
 
 	createContext(event: TransportEvent, _state: ChannelState): MessageContext {
@@ -131,7 +189,10 @@ export class BridgeTransport implements ChannelTransport {
 		const channelId = `SESSION-${sessionId}`;
 		const ts = (Date.now() / 1000).toFixed(6);
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
-		this.dispatch({ channel: channelId, user, text, ts, attachments }, this);
+		const event = { channel: channelId, user, text, ts, attachments };
+		this.getQueue(channelId).enqueue(async () => {
+			await this.dispatch(event, this);
+		});
 		return responsePromise;
 	}
 
