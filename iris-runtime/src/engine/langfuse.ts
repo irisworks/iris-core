@@ -305,7 +305,7 @@ export class LangfuseTrace {
 	recordTool(record: ToolRecord): void {
 		try {
 			const attrs: OtelAttr[] = [
-				strAttr("langfuse.observation.type", "span"),
+				strAttr("langfuse.observation.type", "tool"),
 				strAttr("langfuse.observation.level", record.isError ? "ERROR" : "DEFAULT"),
 			];
 			const ioInput = jsonStrAttr("langfuse.observation.input", this.io(record.input));
