@@ -6,6 +6,18 @@
 
 ### Added
 
+- Slack slash commands `/stop`, `/compact`, `/clear`, `/reset`, `/verbose` —
+  handled from the `slash_commands` socket envelope, in `dm`/`admin`/`leads`
+  channels. Registering them in the Slack app is optional; installs that don't
+  keep using the bare-word spellings. Refused in `thread`/`interactive-thread`
+  channels (a slash command carries no thread, so no session can be resolved)
+  and in `passthrough` channels. (#156)
+
+- `stop`/`compact`/`reset` sent inside a session thread now act on that
+  session's run (`SESSION-<id>`) instead of the channel's, which has none. The
+  session's Slack reply route is registered on the spot, so the status message
+  lands in the thread even after a restart. (#156)
+
 - `POST /sessions/:id/stop` — aborts a session's in-flight turn via the same
   `engine.handleStop` Telegram's `/stop`, Slack's `stop`, and the web UI's Stop
   button use. A turn driven through `POST /sessions/:id/message` previously
@@ -32,7 +44,22 @@
 - `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
   both HTTP surfaces that write into a channel dir.
 
+- A leading `/` is now optional on the text-parsed control commands, so
+  `@iris /stop` runs the command instead of becoming a prompt. (#156)
+
+- **Behavior change:** `stop`/`compact`/`reset` in a DM or an explicit `@iris`
+  mention now work in every channel mode, not only `admin`. Previously they were
+  swallowed in other modes — neither executed nor answered. The `adminCommands`
+  flag now governs only bare top-level channel text, which stays off for `leads`
+  (an email bot's "STOP" is an unsubscribe keyword, not a command) and is on for
+  `dm`, making `admin` mode identical to `dm` and a permanent alias. (#156)
+
 ### Docs
+
+- `docs/channel-modes.md` gains a Control commands section: what `stop` /
+  `compact` / `reset` do and which message shapes are read as commands, plus the
+  `admin`-is-now-`dm` note. Slash-command registration added to the Slack app
+  reference in `docs/SETUP.md` and `bootstrap.sh`. (#156)
 
 - `docs/web-ui.md` states what the web transport is not: the bundled page is a
   reference implementation, its password is a door lock rather than RBAC, and

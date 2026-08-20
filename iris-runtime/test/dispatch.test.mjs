@@ -14,7 +14,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createSession, loadSessions } from "../dist/engine/sessions.js";
 import { resolveChannelDir } from "../dist/engine/store.js";
-import { parseVerboseCommand } from "../dist/engine/dispatch.js";
+import { parseAdminCommand, parseVerboseCommand } from "../dist/engine/dispatch.js";
 import { fillQueue, makeBot, settle } from "./helpers.mjs";
 
 // ============================================================================
@@ -95,18 +95,19 @@ test("mention: DM channel ids are skipped (message event handles DMs)", async ()
 	assert.equal(ack.count, 1); // still acked exactly once
 });
 
-test("mention: admin commands run only in admin mode, swallowed elsewhere", async () => {
+test("mention: an explicit mention runs admin commands in every chat mode, not just admin", async () => {
 	const { calls, mention } = makeBot({
-		channels: { CADM: { mode: "admin" } },
+		channels: { CADM: { mode: "admin" }, CLEADS: { mode: "leads" } },
 		isRunning: () => true,
 	});
 	mention({ text: "<@UBOT> stop", channel: "CADM", user: "U1", ts: "1000.0001" });
 	mention({ text: "<@UBOT> compact", channel: "CADM", user: "U1", ts: "1000.0002" });
 	mention({ text: "<@UBOT> reset", channel: "CADM", user: "U1", ts: "1000.0003" });
-	// dm-mode channel: swallowed, no dispatch, no admin action
+	// dm mode (the default) and leads: addressed to Iris, so still commands
 	mention({ text: "<@UBOT> stop", channel: "CPLAIN", user: "U1", ts: "1000.0004" });
+	mention({ text: "<@UBOT> stop", channel: "CLEADS", user: "U1", ts: "1000.0005" });
 	await settle();
-	assert.deepEqual(calls.stops, ["CADM"]);
+	assert.deepEqual(calls.stops, ["CADM", "CPLAIN", "CLEADS"]);
 	assert.deepEqual(calls.compacts, ["CADM"]);
 	assert.deepEqual(calls.resets, ["CADM"]);
 	assert.equal(calls.events.length, 0);
@@ -185,6 +186,157 @@ test("message: bare top-level 'verbose on' with no mention/DM is not intercepted
 	await settle();
 	assert.equal(calls.verbose.length, 0);
 	assert.equal(calls.events.length, 1); // falls through as ordinary chat text (leads dispatches all top-level)
+});
+
+// ============================================================================
+// Slash-command spellings (#156) — the parse-level `/` tolerance plus the
+// native Slack slash_commands envelope
+// ============================================================================
+
+test("parseAdminCommand: bare and slash-prefixed spellings, case-insensitive, trimmed", () => {
+	assert.equal(parseAdminCommand("stop"), "stop");
+	assert.equal(parseAdminCommand("/stop"), "stop");
+	assert.equal(parseAdminCommand("  /Stop  "), "stop");
+	assert.equal(parseAdminCommand("/compact"), "compact");
+	assert.equal(parseAdminCommand("/reset"), "reset");
+	assert.equal(parseAdminCommand("/clear"), "reset");
+	assert.equal(parseAdminCommand("//stop"), false);
+	assert.equal(parseAdminCommand("/stop it"), false);
+	assert.equal(parseAdminCommand("please stop"), false);
+	assert.equal(parseAdminCommand(""), false);
+});
+
+test("parseVerboseCommand: slash-prefixed spellings work too", () => {
+	assert.equal(parseVerboseCommand("/verbose on"), "on");
+	assert.equal(parseVerboseCommand("/verbose off"), "off");
+	assert.equal(parseVerboseCommand("/verbose"), "status");
+	assert.equal(parseVerboseCommand("/verbose maybe"), false);
+});
+
+test("mention: '@iris /stop' runs the admin command instead of becoming a prompt", async () => {
+	const { calls, mention } = makeBot({
+		channels: { CADM: { mode: "admin" } },
+		isRunning: () => true,
+	});
+	mention({ text: "<@UBOT> /stop", channel: "CADM", user: "U1", ts: "1000.0001" });
+	mention({ text: "<@UBOT> /clear", channel: "CADM", user: "U1", ts: "1000.0002" });
+	await settle();
+	assert.deepEqual(calls.stops, ["CADM"]);
+	assert.deepEqual(calls.resets, ["CADM"]);
+	assert.equal(calls.events.length, 0);
+});
+
+test("slash: /stop, /compact, /clear run admin commands in a chat channel", async () => {
+	const { calls, slash } = makeBot({
+		channels: { CADM: { mode: "admin" }, CLEADS: { mode: "leads" } },
+		isRunning: () => true,
+	});
+	const ack = slash({ command: "/stop", text: "", channel_id: "CDM" }); // unconfigured: dm mode
+	slash({ command: "/compact", text: "", channel_id: "CADM" });
+	slash({ command: "/clear", text: "", channel_id: "CLEADS" });
+	await settle();
+	assert.deepEqual(calls.stops, ["CDM"]);
+	assert.deepEqual(calls.compacts, ["CADM"]);
+	assert.deepEqual(calls.resets, ["CLEADS"]);
+	assert.equal(ack.count, 1);
+	assert.equal(ack.responses[0], undefined); // plain ack, no ephemeral reply
+});
+
+test("slash: refused in a sessions channel — a slash command carries no thread to act on", async () => {
+	const { calls, slash } = makeBot({
+		channels: { CTH: { mode: "thread" }, CIT: { mode: "interactive-thread" } },
+		isRunning: () => true,
+	});
+	const threadAck = slash({ command: "/clear", text: "", channel_id: "CTH" });
+	const itAck = slash({ command: "/stop", text: "", channel_id: "CIT" });
+	await settle();
+	assert.equal(calls.resets.length, 0); // must NOT clear the (unused) channel context
+	assert.equal(calls.stops.length, 0);
+	assert.match(threadAck.responses[0].text, /one session per thread/);
+	assert.match(itAck.responses[0].text, /one session per thread/);
+});
+
+test("message: a control command in a session thread targets that session's run, not the channel", async () => {
+	const { bot, calls, message, mention, workingDir } = makeBot({
+		channels: { CIT: { mode: "interactive-thread" } },
+		isRunning: () => true,
+	});
+	const session = createSession(workingDir, { originChannel: "CIT", originThreadTs: "999.0001" });
+	// Every reply in a session thread is addressed to Iris, so no mention is needed
+	message({ text: "stop", channel: "CIT", user: "U1", ts: "1000.0001", thread_ts: "999.0001" });
+	await settle();
+	assert.deepEqual(calls.stops, [`SESSION-${session.sessionId}`]);
+	assert.equal(calls.events.length, 0); // never reaches the LLM as a prompt
+	// The status message is routed back into the originating thread even though no
+	// message had registered the session's route in this process yet.
+	assert.deepEqual(bot.sessionRoutes.get(`SESSION-${session.sessionId}`), { channel: "CIT", threadTs: "999.0001" });
+
+	mention({ text: "<@UBOT> /clear", channel: "CIT", user: "U1", ts: "1000.0002", thread_ts: "999.0001" });
+	await settle();
+	assert.deepEqual(calls.resets, [`SESSION-${session.sessionId}`]);
+});
+
+test("message: a top-level control command in a sessions channel is not intercepted", async () => {
+	const { calls, message, mention } = makeBot({
+		channels: { CTH: { mode: "thread" }, CIT: { mode: "interactive-thread" } },
+		isRunning: () => true,
+	});
+	// No session exists yet, so there is nothing for the command to act on — acting
+	// on the channel would report success while aborting and clearing nothing.
+	mention({ text: "<@UBOT> stop", channel: "CTH", user: "U1", ts: "1000.0001" });
+	message({ text: "stop", channel: "CIT", user: "U1", ts: "1000.0002" });
+	await settle();
+	assert.equal(calls.stops.length, 0);
+	assert.equal(calls.resets.length, 0);
+});
+
+test("slash: trailing text is ignored, /verbose reads its argument", async () => {
+	const { calls, slash } = makeBot({ channels: { CDM: { mode: "dm" } }, isRunning: () => true });
+	slash({ command: "/stop", text: "now please", channel_id: "CDM" });
+	slash({ command: "/verbose", text: "on", channel_id: "CDM" });
+	slash({ command: "/verbose", text: "", channel_id: "CDM" });
+	await settle();
+	assert.deepEqual(calls.stops, ["CDM"]);
+	assert.deepEqual(calls.verbose, [
+		{ channelId: "CDM", action: "on" },
+		{ channelId: "CDM", action: "status" },
+	]);
+});
+
+test("slash: refused in a passthrough channel and outside the allowed-channel filter", async () => {
+	const { bot, calls, slash } = makeBot({
+		channels: { CREL: { mode: "passthrough", url: "https://relay.example/hook" }, CDM: { mode: "dm" } },
+		isRunning: () => true,
+	});
+	const relayAck = slash({ command: "/stop", text: "", channel_id: "CREL" });
+	await settle();
+	assert.equal(calls.stops.length, 0);
+	assert.equal(relayAck.count, 1);
+	assert.match(relayAck.responses[0].text, /external endpoint/);
+
+	bot.allowedChannels = new Set(["COTHER"]);
+	const filteredAck = slash({ command: "/stop", text: "", channel_id: "CDM" });
+	await settle();
+	assert.equal(calls.stops.length, 0);
+	assert.match(filteredAck.responses[0].text, /isn't enabled/);
+});
+
+test("slash: an unknown command acks with a hint and never dispatches", async () => {
+	const { calls, slash } = makeBot({ channels: { CDM: { mode: "dm" } }, isRunning: () => true });
+	const ack = slash({ command: "/deploy", text: "prod", channel_id: "CDM" });
+	await settle();
+	assert.equal(calls.events.length, 0);
+	assert.equal(calls.stops.length, 0);
+	assert.equal(ack.count, 1);
+	assert.match(ack.responses[0].text, /Unknown command/);
+});
+
+test("slash: a malformed envelope is acked exactly once and ignored", async () => {
+	const { calls, slash } = makeBot({ channels: { CDM: { mode: "dm" } } });
+	const ack = slash({ text: "", channel_id: "CDM" }); // no command
+	await settle();
+	assert.equal(calls.events.length, 0);
+	assert.equal(ack.count, 1);
 });
 
 test("mention: thread mode responds only inside registered session threads", async () => {
@@ -389,7 +541,7 @@ test("message: channel message containing the bot mention is skipped (app_mentio
 	assert.equal(calls.events.length, 0);
 });
 
-test("message: DM admin commands run in admin mode, swallowed in dm mode", async () => {
+test("message: DM admin commands run in dm mode too, not just admin mode", async () => {
 	const { calls, message } = makeBot({
 		channels: { DADM: { mode: "admin" } },
 		isRunning: () => true,
@@ -397,20 +549,24 @@ test("message: DM admin commands run in admin mode, swallowed in dm mode", async
 	message({ text: "stop", channel: "DADM", user: "U1", ts: "1000.0004", channel_type: "im" });
 	message({ text: "stop", channel: "DPLAIN", user: "U1", ts: "1000.0005", channel_type: "im" });
 	await settle();
-	assert.deepEqual(calls.stops, ["DADM"]);
-	assert.equal(calls.events.length, 0); // swallowed everywhere, dispatched nowhere
+	assert.deepEqual(calls.stops, ["DADM", "DPLAIN"]);
+	assert.equal(calls.events.length, 0); // intercepted, dispatched nowhere
 });
 
-test("message: bare top-level admin commands run in admin mode without a mention, swallowed in dm mode", async () => {
+test("message: bare top-level admin commands run in dm/admin channels, but not in leads", async () => {
 	const { calls, message } = makeBot({
-		channels: { CADM: { mode: "admin" } },
+		channels: { CADM: { mode: "admin" }, CLEADS: { mode: "leads" } },
 		isRunning: () => true,
 	});
 	message({ text: "compact", channel: "CADM", user: "U1", ts: "1000.0004a" });
-	message({ text: "compact", channel: "CPLAIN", user: "U1", ts: "1000.0004b" });
+	message({ text: "compact", channel: "CPLAIN", user: "U1", ts: "1000.0004b" }); // dm mode, the default
+	// leads: top-level traffic is third-party feeds (an email bot's "STOP" is an
+	// unsubscribe keyword) — the word stays ordinary text and dispatches as chat.
+	message({ text: "compact", channel: "CLEADS", user: "U1", ts: "1000.0004c" });
 	await settle();
-	assert.deepEqual(calls.compacts, ["CADM"]);
-	assert.equal(calls.events.length, 0); // swallowed everywhere, dispatched nowhere
+	assert.deepEqual(calls.compacts, ["CADM", "CPLAIN"]);
+	assert.equal(calls.events.length, 1);
+	assert.equal(calls.events[0].event.channel, "CLEADS");
 });
 
 test("message: a buried thread reply that isn't a mention or DM does not trigger admin commands", async () => {

@@ -13,7 +13,7 @@ wildcards match, the longest prefix wins (e.g. `DA*` beats `D*`).
 | Mode | Behavior |
 |---|---|
 | `dm` | Default. Responds in DMs; channels need an `@iris` mention |
-| `admin` | Like `dm`, plus `stop` / `compact` / `reset` control commands — these work as plain text, no `@iris` mention needed |
+| `admin` | Identical to `dm` — kept as a permanent alias. [Control commands](#control-commands) used to be what set it apart; they now work in `dm` channels too |
 | `thread` | Only responds inside registered session threads (sessions created via the API) |
 | `interactive-thread` | A top-level message opens a session; replies in that thread continue it without further mentions |
 | `leads` | Every top-level message triggers Iris — no mention needed |
@@ -40,9 +40,52 @@ named mode.
     "payload": { "sender_id": "{{sender_id}}", "message_text": "{{text}}" },
     "replyPrefix": "*Bot:* "
   },
-  "D*": { "mode": "admin" }
+  "D*": { "mode": "dm" }
 }
 ```
+
+## Control commands
+
+Three commands control a run and its context rather than talking to Iris. Each
+works with or without a leading slash — `stop` and `/stop` are the same command.
+
+| Command | Effect |
+|---|---|
+| `stop` | Abort the run in flight (`_Nothing running_` if idle) |
+| `compact` | Summarise the context into a compaction entry |
+| `reset` (alias `clear`) | Clear the conversation history |
+
+They are read as commands wherever the message is unmistakably meant for Iris:
+
+- **A DM, or an explicit `@iris stop`** — every mode. This is not a permission
+  boundary and never was: anyone who can mention Iris can have her run arbitrary
+  bash, which strictly dominates stop/compact/reset.
+- **A reply inside a session thread** (`thread` / `interactive-thread`) — every
+  reply there is addressed to Iris by construction, so no mention is needed. The
+  command acts on **that session's** run, not the channel's.
+- **Bare top-level channel text** (no mention, no thread) — `dm` and `admin`
+  channels only. `leads` is excluded because its top-level traffic is
+  third-party feeds, where an email bot's "STOP" is an unsubscribe keyword
+  rather than a command.
+- **A native Slack slash command** — `/stop`, `/compact`, `/clear`, `/reset`,
+  `/verbose on|off`, in any `dm` / `admin` / `leads` channel. They are **not**
+  registered for you: add them to your Slack app (see
+  [Setup](SETUP.md#slack-app-creation-reference)), or Slack rejects a typed
+  `/stop` client-side and Iris never sees it. Slash commands carry no thread, so
+  in a `thread` / `interactive-thread` channel they're refused with a note to
+  reply in the session's thread instead.
+
+Never a command: a thread reply in a `chat`-container channel that is neither a
+mention nor a DM (a mid-conversation "stop" between two people can't wipe the
+channel out from under them), and anything in a `passthrough` channel, where
+every message is forwarded verbatim and Iris keeps no context to control.
+
+`admin` mode is now identical to `dm` — control commands were the only thing
+that distinguished them. It remains a permanent alias, so existing
+`channels.json` files keep working unchanged.
+
+On Telegram these are the bot commands `/stop`, `/compact`, `/reset`, `/clear`
+and always work — Telegram has no channel-mode concept.
 
 ## Verbose tool output
 
@@ -51,11 +94,11 @@ updates in place as Iris works (e.g. `_→ running bash..._`), then gets
 replaced by the final answer — no per-tool-call thread replies (Slack) or
 flat messages (Telegram), no chain-of-thought dump, no per-run cost summary.
 
-Toggle it with `verbose on` / `verbose off` / `verbose status` on Slack, or
-`/verbose on|off|status` on Telegram. Unlike `stop`/`compact`/`reset`, this
-is **not** gated behind `admin` mode — it's a UX preference, not a
-destructive action, so it works from any DM or explicit `@iris` mention in
-any channel mode. The setting persists per channel (in that channel's
+Toggle it with `verbose on` / `verbose off` / `verbose status` on Slack (the
+`/verbose ...` spelling works too), or `/verbose on|off|status` on Telegram.
+It's a UX preference rather than a destructive action, so it has never been
+gated by channel mode at all: it works from any DM or explicit `@iris` mention
+in any mode. The setting persists per channel (in that channel's
 `settings.json`) until toggled again; `IRIS_VERBOSE_TOOLS=true` in `/iris/.env`
 changes the default for channels that haven't set their own override.
 
@@ -77,8 +120,8 @@ so a follow-up like "this one?" resolves against the message it replied to.
 Passthrough channels forward every message — top-level channel messages,
 thread replies, `@iris` mentions, and DMs — to `url` as a JSON POST and post the
 endpoint's reply back into the thread. Nothing is interpreted by Iris herself:
-even `stop` / `compact` / `reset` are forwarded verbatim, and scheduled events
-cannot target a passthrough channel.
+even `stop` / `compact` / `reset` are forwarded verbatim (and a slash command is
+refused outright), and scheduled events cannot target a passthrough channel.
 
 - **`payload`** — a JSON template for the request body. String values may use
   placeholders, substituted recursively: `{{text}}`, `{{user_id}}`, `{{user_name}}`,
@@ -127,7 +170,7 @@ wiring.
 | Flag | Values | Meaning |
 |---|---|---|
 | `trigger` | `mention` \| `all-top-level` \| `api-only` | What opens/continues a container organically: an explicit `@iris` mention only, any top-level message, or nothing (only a pre-existing, API-created session continues) |
-| `adminCommands` | boolean | `stop` / `compact` / `reset` text is intercepted and executed (`chat` only) — via a mention, a DM, or bare ambient top-level text alike |
+| `adminCommands` | boolean | Bare top-level channel text (no mention, no thread) is read as a `stop` / `compact` / `reset` [command](#control-commands). Only governs that ambiguous shape — a DM or an explicit `@iris` mention is a command in any `chat` container regardless of the flag |
 | `acceptBotMessages` | boolean | Bot/integration messages are admitted as triggers, not filtered out |
 | `replayMissed` | boolean | Pre-startup top-level messages are replayed instead of skipped |
 
@@ -138,7 +181,7 @@ existing config ever needs to change.
 
 | Mode | container | trigger | adminCommands | acceptBotMessages | replayMissed |
 |---|---|---|---|---|---|
-| `dm` | chat | mention | — | — | — |
+| `dm` | chat | mention | ✓ | — | — |
 | `admin` | chat | mention | ✓ | — | — |
 | `leads` | chat | all-top-level | — | ✓ | ✓ |
 | `thread` | sessions | api-only | — | — | — |
