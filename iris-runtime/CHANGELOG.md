@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-08-20
+
 ### Fixed
 
 - Langfuse tool observations now reach the dashboard. The legacy REST batch
