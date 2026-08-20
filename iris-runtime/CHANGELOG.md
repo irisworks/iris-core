@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Langfuse tool observations now reach the dashboard. The legacy REST batch
+  endpoint (`/api/public/ingestion`) silently rejected `TOOL`-typed events
+  with HTTP 207 while reporting success; the client has been migrated to the
+  OTel ingestion path (`POST /api/public/otel/v1/traces`) that the official
+  Langfuse SDK uses, which accepts the full observation type set. Generation
+  observations are migrated to the same transport. (#IRIS-171)
+
 ## [1.7.0] - 2026-08-19
 
 ### Added
