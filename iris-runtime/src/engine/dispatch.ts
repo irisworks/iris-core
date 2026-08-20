@@ -36,7 +36,12 @@ export interface InboundMessage {
 
 export type DispatchDecision =
 	| { kind: "ignore" }
-	| { kind: "admin"; cmd: "stop" | "compact" | "reset" }
+	/**
+	 * `channel` is the channel the command acts on, which is NOT always the one the
+	 * message arrived in: runs are keyed per channel, and a session's run lives under
+	 * `SESSION-<id>`, so a command sent inside a session thread must target that.
+	 */
+	| { kind: "admin"; cmd: "stop" | "compact" | "reset"; channel: string }
 	| { kind: "chat" }
 	| { kind: "session"; sessionId: string; threadTs: string }
 	| { kind: "relay"; relay: RelayConfig; threadTs: string; errorNotice: boolean }
@@ -126,20 +131,24 @@ export function resolveDispatch(
 	}
 
 	if (config.container === "chat") {
-		// Admin-command-shaped text in a channel with adminCommands enabled is always
-		// intercepted — mention, DM, or bare top-level ambient text — so `stop`/`compact`/
-		// `reset` work the same whether or not the message explicitly @mentions the bot
-		// (matching Telegram's unprefixed /commands, which need no such targeting either).
-		// A buried thread reply that's neither a mention nor a DM stays exempt: a reply
-		// that happens to be the literal word "stop" mid-conversation, not addressed to
-		// the bot, shouldn't abort/wipe/compact the whole channel out from under it.
-		if (adminCommand && config.adminCommands && (input.isMention || input.isDM || !input.threadTs)) {
-			return { kind: "admin", cmd: adminCommand };
-		}
-		// adminCommands disabled: admin-command-shaped text addressed to the bot (a mention
-		// or a DM) is still swallowed rather than dispatched through as ordinary chat text.
+		// A DM or an explicit @mention is addressed to Iris, so a control command
+		// means what it says in every mode — the same deal Telegram gets by
+		// construction, where /stop works in every chat. This is not a permission
+		// boundary and never was: anyone who can mention Iris can have her run
+		// arbitrary bash, which strictly dominates stop/compact/reset.
 		if (adminCommand && (input.isMention || input.isDM)) {
-			return { kind: "ignore" };
+			return { kind: "admin", cmd: adminCommand, channel: input.channel };
+		}
+		// Bare top-level channel text is the one ambiguous shape, and the only one
+		// `adminCommands` governs: "stop" is also ordinary English. It's on for
+		// dm/admin channels (where ambient text is otherwise ignored entirely, so
+		// reading a lone "stop" as a command costs nothing) and off for `leads`,
+		// whose top-level traffic is third-party feeds. A thread reply that is
+		// neither a mention nor a DM is never a command — a reply that happens to be
+		// the literal word "stop" mid-conversation shouldn't abort/wipe/compact the
+		// channel out from under the people talking in it.
+		if (adminCommand && config.adminCommands && !input.threadTs) {
+			return { kind: "admin", cmd: adminCommand, channel: input.channel };
 		}
 		if (input.isDM || input.isMention) return { kind: "chat" };
 		// Non-mention channel message: only a top-level, all-top-level-triggered
@@ -156,7 +165,9 @@ export function resolveDispatch(
 	if (input.isDM) {
 		// A DM has no thread concept of its own to key a session on — it
 		// dispatches straight into chat-style (channel-context) handling, like
-		// every container except relay.
+		// every container except relay. Control commands are channel-keyed for the
+		// same reason.
+		if (adminCommand) return { kind: "admin", cmd: adminCommand, channel: input.channel };
 		return { kind: "chat" };
 	}
 
@@ -164,7 +175,16 @@ export function resolveDispatch(
 
 	if (input.threadTs) {
 		const existing = findByThread(sessions, input.channel, input.threadTs);
-		if (existing) return { kind: "session", sessionId: existing.sessionId, threadTs: input.threadTs };
+		if (existing) {
+			// Every reply in a registered session thread is addressed to Iris by
+			// construction — that's what these modes are for — so a control command
+			// here is unambiguous. It must target the session's own run (`SESSION-<id>`,
+			// where the runner and context actually live), not the channel, which has
+			// neither. Top-level messages in a sessions container are deliberately not
+			// intercepted: there is no session to act on yet.
+			if (adminCommand) return { kind: "admin", cmd: adminCommand, channel: `SESSION-${existing.sessionId}` };
+			return { kind: "session", sessionId: existing.sessionId, threadTs: input.threadTs };
+		}
 		if (config.trigger === "api-only") return { kind: "ignore" }; // unregistered thread, api-only: log only
 		if (input.isBotMessage) return { kind: "ignore" }; // bot thread replies never open a session
 		const session = createSession(workingDir, { originChannel: input.channel, originThreadTs: input.threadTs });

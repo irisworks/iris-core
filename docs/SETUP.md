@@ -78,8 +78,8 @@ When the bootstrap pauses for Slack tokens:
 6. *(Optional)* **Slash Commands** → Create New Command for each of `/stop`,
    `/compact`, `/clear`, `/reset`, `/verbose` — leave the Request URL blank
    (Socket Mode delivers them). Without this step Slack rejects a typed `/stop`
-   before it reaches Iris; use the bare words `stop` / `compact` / `clear` in an
-   `admin`-mode channel instead. See [Channel Modes](channel-modes.md#control-commands).
+   before it reaches Iris; the bare words `stop` / `compact` / `clear` work
+   either way. See [Channel Modes](channel-modes.md#control-commands).
 
 ---
 

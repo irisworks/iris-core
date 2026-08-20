@@ -457,6 +457,20 @@ export class SlackBot implements ChannelTransport {
 	}
 
 	/**
+	 * Execute an "admin" dispatch decision. `decision.channel` is the channel whose
+	 * run the command acts on — for a command sent inside a session thread that's
+	 * `SESSION-<id>`, not the Slack channel it arrived in. Register that session's
+	 * reply route first: after a restart nothing has re-registered it yet, and
+	 * postMessage silently drops status messages for an unrouted `SESSION-` id.
+	 */
+	private runAdminDecision(target: string, cmd: "stop" | "compact" | "reset", origin: string, threadTs?: string): void {
+		if (target.startsWith("SESSION-") && threadTs && !this.sessionRoutes.has(target)) {
+			this.sessionRoutes.set(target, { channel: origin, threadTs });
+		}
+		this.runAdminCommand(target, cmd);
+	}
+
+	/**
 	 * Route a message into a session: rekey the event to SESSION-<id>, register the
 	 * Slack route so replies post back into the originating thread, mirror the user
 	 * message into the session directory, and enqueue the run (bounded queue).
@@ -1021,7 +1035,7 @@ export class SlackBot implements ChannelTransport {
 					case "ignore":
 						return;
 					case "admin":
-						this.runAdminCommand(e.channel, decision.cmd);
+						this.runAdminDecision(decision.channel, decision.cmd, e.channel, e.thread_ts);
 						return;
 					case "relay-refused":
 						log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
@@ -1194,7 +1208,7 @@ export class SlackBot implements ChannelTransport {
 					case "ignore":
 						return;
 					case "admin":
-						this.runAdminCommand(e.channel, decision.cmd);
+						this.runAdminDecision(decision.channel, decision.cmd, e.channel, e.thread_ts);
 						return;
 					case "relay-refused":
 						log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
@@ -1238,10 +1252,11 @@ export class SlackBot implements ChannelTransport {
 		// install that never adds them keeps using the bare-word spellings and never
 		// sees this path (see docs/channel-modes.md).
 		//
-		// Unlike bare-word admin commands this is NOT gated behind `admin` mode: a
-		// slash command is unambiguous and can only be typed deliberately, so there's
-		// no ambient text to protect against. Relay (passthrough) channels are the one
-		// refusal — Iris's own LLM never runs there, so there is nothing to control.
+		// A slash command is unambiguous and can only be typed deliberately, so it
+		// needs none of the addressed-to-Iris disambiguation the text spellings do.
+		// The refusals are the two containers where the channel id isn't the thing
+		// running: relay (Iris's LLM never runs there) and sessions (runs live per
+		// thread, and a slash command carries no thread).
 		this.socketClient.on("slash_commands", async ({ body, ack }: { body: SlashCommandBody; ack: (response?: unknown) => Promise<void> }) => {
 			// Exactly one ack per envelope, whichever branch (or a throw) gets there first.
 			let acked = false;
@@ -1260,10 +1275,22 @@ export class SlackBot implements ChannelTransport {
 					await ackOnce({ response_type: "ephemeral", text: "_Iris isn't enabled in this channel._" });
 					return;
 				}
-				if (this.getDispatchConfig(channelId).container === "relay") {
+				const container = this.getDispatchConfig(channelId).container;
+				if (container === "relay") {
 					await ackOnce({
 						response_type: "ephemeral",
 						text: "_This channel forwards to an external endpoint — Iris keeps no context here to control._",
+					});
+					return;
+				}
+				// A sessions channel keeps its runs and context per thread, under
+				// `SESSION-<id>`. Slack sends no thread with a slash command, so there is
+				// no way to tell which session was meant — acting on the channel instead
+				// would abort nothing and clear nothing while reporting success.
+				if (container === "sessions") {
+					await ackOnce({
+						response_type: "ephemeral",
+						text: "_This channel runs one session per thread, and a slash command carries no thread. Reply `stop`, `compact`, or `clear` inside the session's thread instead._",
 					});
 					return;
 				}
