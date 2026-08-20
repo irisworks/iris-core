@@ -193,7 +193,7 @@ test("a flushed run trace carries sessionId, usage/cost, and tool observations v
 	const tool = childSpanNamed(spans, "bash");
 	assert.ok(tool, "tool child span must exist");
 	assert.equal(tool.parentSpanId, root.spanId);
-	assert.equal(getAttr(tool, "langfuse.observation.type"), "span");
+	assert.equal(getAttr(tool, "langfuse.observation.type"), "tool");
 	assert.equal(getAttr(tool, "langfuse.observation.level"), "DEFAULT");
 	assert.equal(tool.startTimeUnixNano, String(BigInt(start.getTime()) * 1_000_000n));
 });
