@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
 	readResetWatermark,
 	stripDynamicContext,

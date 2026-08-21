@@ -212,7 +212,7 @@ if ! command -v jq &>/dev/null; then sudo apt-get install -y jq; fi
 # nginx + certbot are installed in step 5, and only when a public domain
 # (IRIS_BASE_DOMAIN) is configured — the default path serves nothing publicly.
 
-if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' 2>/dev/null; then
+if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
   log "Installing Node.js 22..."
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
