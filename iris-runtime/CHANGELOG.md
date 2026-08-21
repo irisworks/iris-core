@@ -7,6 +7,11 @@
 - Bumped transitive dependency `shell-quote` (via `@anthropic-ai/sandbox-runtime`)
   to 1.10.0, fixing a critical command-injection advisory in `quote()`
   (GHSA-w7jw-789q-3m8p, Dependabot alert #29).
+- Bumped transitive `axios` (1.15.0 → 1.19.0) and `form-data` (4.0.5 → 4.0.6)
+  via `overrides` to pick up fixes for several high-severity advisories
+  (prototype pollution / NO_PROXY bypass in axios, CRLF injection in
+  form-data). `extract-zip` (pulled in by `@mariozechner/pi-coding-agent`)
+  has no upstream fix yet — tracked, not resolved.
 
 ### Fixed
 
