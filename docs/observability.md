@@ -32,8 +32,10 @@ Set these in `/iris/.env` (or the service environment):
 | `LANGFUSE_ENABLED` | no | Set to `false` or `0` to disable tracing even when keys are present. |
 | `LANGFUSE_CAPTURE_IO` | no | Set to `false` or `0` to omit all prompt, reply, and tool payloads while still recording names, timings, tokens, and cost. See [What leaves the host](#what-leaves-the-host). |
 
-Iris talks to the public ingestion API (`POST /api/public/ingestion`) over
-plain HTTP with basic auth — no Langfuse SDK is installed.
+Iris talks to Langfuse's OTel ingestion API (`POST /api/public/otel/v1/traces`,
+OTLP/HTTP JSON) over plain HTTP with basic auth — no Langfuse SDK is installed.
+This is the same transport the official Langfuse SDK uses internally, and the
+only path that accepts the full observation type set including `TOOL`.
 
 ## What a trace contains
 

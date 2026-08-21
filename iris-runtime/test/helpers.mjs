@@ -86,12 +86,30 @@ export function makeBot({ channels = {}, isRunning = () => false, botUserId = "U
 		return ack;
 	};
 
+	/**
+	 * Fire a slash-command envelope (`{ body, ack }`, not `{ event, ack }`) and
+	 * record what the handler acked with — Slack relays that payload back to the
+	 * invoking user as the command's reply.
+	 */
+	const slash = (body) => {
+		const ack = { count: 0, responses: [] };
+		handlers.get("slash_commands")({
+			body,
+			ack: async (response) => {
+				ack.count++;
+				ack.responses.push(response);
+			},
+		});
+		return ack;
+	};
+
 	return {
 		bot,
 		calls,
 		workingDir,
 		mention: (event) => fire("app_mention", event),
 		message: (event) => fire("message", event),
+		slash,
 	};
 }
 

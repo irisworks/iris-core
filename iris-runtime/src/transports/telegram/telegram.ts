@@ -87,6 +87,9 @@ interface TgMessage {
 	audio?: TgAudio;
 	voice?: TgVoice;
 	video?: TgVideo;
+	// Telegram nests at most one level deep — a reply's own reply_to_message is omitted
+	// from the payload — so this doesn't need to be recursive.
+	reply_to_message?: Omit<TgMessage, "reply_to_message">;
 }
 
 interface TgUpdate {
@@ -327,6 +330,30 @@ function charSplit(text: string, fits: (s: string) => boolean): string[] {
 		rest = rest.slice(cut);
 	}
 	return pieces;
+}
+
+// Describes what kind of content a reply-to message carried, for when it has no
+// text/caption of its own (e.g. a bare photo) so Iris still knows a reply pointed
+// at *something* rather than seeing the reply text with no context at all.
+export function describeReplyTarget(msg: TgMessage["reply_to_message"]): string | null {
+	if (!msg) return null;
+	const content = (msg.text ?? msg.caption ?? "").trim();
+	if (content) return content;
+	if (msg.photo) return "[a photo]";
+	if (msg.document) return `[a file: ${msg.document.file_name ?? "document"}]`;
+	if (msg.audio) return "[an audio file]";
+	if (msg.voice) return "[a voice message]";
+	if (msg.video) return "[a video]";
+	return null;
+}
+
+// Prepends the referenced message's content so Iris sees the full exchange
+// rather than just the reply text on its own (#157).
+export function withReplyContext(text: string, replyTo: TgMessage["reply_to_message"]): string {
+	const quoted = describeReplyTarget(replyTo);
+	if (!quoted) return text;
+	const who = replyTo?.from?.username ? `@${replyTo.from.username}` : replyTo?.from?.first_name || "the earlier message";
+	return `[Replying to ${who}: "${quoted}"]\n${text}`;
 }
 
 // ============================================================================
@@ -926,7 +953,7 @@ export class TelegramBot implements ChannelTransport {
 			channel: channelId,
 			ts: String(msg.message_id),
 			user: userId,
-			text,
+			text: withReplyContext(text, msg.reply_to_message),
 			chatId,
 			threadId,
 			files,

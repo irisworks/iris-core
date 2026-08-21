@@ -15,9 +15,13 @@
 //              "api-only"      — nothing organic opens a new container; only
 //                                 a pre-existing (API-created) session
 //                                 continues
-//   adminCommands     — stop/compact/reset text commands are intercepted
-//                        (chat container only; mentions/DMs/bare top-level
-//                        text all count — no @mention required)
+//   adminCommands     — bare top-level channel text (no @mention, no thread)
+//                        is read as a stop/compact/reset command. Only governs
+//                        that ambiguous shape: a DM or an explicit @mention is
+//                        addressed to Iris, so it's read as a command in every
+//                        chat container regardless of this flag. Off for `leads`,
+//                        whose top-level traffic is third-party feeds (an email
+//                        bot's "STOP" is an unsubscribe keyword, not a command).
 //   acceptBotMessages — bot/integration messages are admitted as triggers
 //                        (chat container, all-top-level trigger only)
 //   replayMissed      — pre-startup top-level messages are replayed instead
@@ -85,8 +89,10 @@ export interface ResolvedChannelConfig {
 export function expandLegacyMode(entry: RawChannelEntry): DispatchConfig {
 	const mentionGated = entry.requireMentionForTopLevel === true;
 	switch (entry.mode as LegacyChannelMode) {
+		// `admin` now expands to exactly the same shape as `dm` — control commands
+		// are no longer what distinguishes them (see the adminCommands note above).
+		// Kept as a permanent alias so existing channels.json files keep working.
 		case "dm":
-			return { container: "chat", trigger: "mention", adminCommands: false, acceptBotMessages: false, replayMissed: false };
 		case "admin":
 			return { container: "chat", trigger: "mention", adminCommands: true, acceptBotMessages: false, replayMissed: false };
 		case "leads":
@@ -150,5 +156,5 @@ export function resolveWildcard<T>(configs: Map<string, T>, channelId: string): 
 export const DEFAULT_CHANNEL_CONFIG: ResolvedChannelConfig = {
 	legacyMode: "dm",
 	requireMentionForTopLevel: false,
-	dispatch: { container: "chat", trigger: "mention", adminCommands: false, acceptBotMessages: false, replayMissed: false },
+	dispatch: { container: "chat", trigger: "mention", adminCommands: true, acceptBotMessages: false, replayMissed: false },
 };
