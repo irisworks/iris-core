@@ -4,6 +4,11 @@
 
 ### Security
 
+- Migrated `pi-agent-core`, `pi-ai`, and `pi-coding-agent` from the deprecated
+  `@mariozechner` npm scope to `@earendil-works` at 0.79.0, fixing three
+  high/moderate advisories with no fix released under the old scope
+  (GHSA-jfgx-wxx8-mp94, GHSA-7v5m-pr3q-6453, GHSA-r95r-rj6r-c39x;
+  Dependabot alerts #34, #35, #36).
 - Bumped transitive dependency `shell-quote` (via `@anthropic-ai/sandbox-runtime`)
   to 1.10.0, fixing a critical command-injection advisory in `quote()`
   (GHSA-w7jw-789q-3m8p, Dependabot alert #29).
