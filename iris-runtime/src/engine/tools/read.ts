@@ -82,9 +82,19 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				if (result.code !== 0) {
 					throw new Error(result.stderr || `read-handler "${handler.name}" failed on: ${path}`);
 				}
+				// Handler output is model context just like ordinary text reads. Keep
+				// the same limits here: a text-heavy PDF must not bypass the 50KB /
+				// 2,000-line guard merely because it was extracted by pdftotext.
+				const truncation = truncateHead(result.stdout);
+				let outputText = truncation.content;
+				if (truncation.firstLineExceedsLimit) {
+					outputText = `[Read-handler "${handler.name}" output starts with a ${formatSize(Buffer.byteLength(result.stdout.split("\n")[0], "utf-8"))} line, exceeding the ${formatSize(DEFAULT_MAX_BYTES)} limit.]`;
+				} else if (truncation.truncated) {
+					outputText += `\n\n[Read-handler "${handler.name}" output truncated after ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(DEFAULT_MAX_BYTES)} limit).]`;
+				}
 				return {
-					content: [{ type: "text", text: result.stdout }],
-					details: undefined,
+					content: [{ type: "text", text: outputText }],
+					details: truncation.truncated ? { truncation } : undefined,
 				};
 			}
 

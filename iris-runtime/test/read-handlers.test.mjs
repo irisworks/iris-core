@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { join } from "node:path";
 import { loadReadHandlerRegistry, renderHandlerCommand } from "../dist/engine/read-handlers.js";
+import { createReadTool } from "../dist/engine/tools/read.js";
 
 function writeHandler(workspaceDir, dirName, manifest) {
 	const dir = join(workspaceDir, "read-handlers", dirName);
@@ -100,4 +101,29 @@ test("renderHandlerCommand: substitutes {path}, shell-escaping it", () => {
 		renderHandlerCommand(handler, "/tmp/a file's name.pdf"),
 		"pdftotext -layout '/tmp/a file'\\''s name.pdf' -",
 	);
+});
+
+test("read: handler output observes the ordinary read output limits", async () => {
+	const workspaceDir = tempWorkspace();
+	writeHandler(workspaceDir, "pdf-text", {
+		mimeTypes: ["application/pdf"],
+		command: "pdftotext {path} -",
+	});
+
+	const pdfHeader = Buffer.from("%PDF-1.4", "utf-8").toString("base64");
+	const extractedText = Array.from({ length: 2_100 }, (_, index) => "line " + (index + 1)).join(String.fromCharCode(10));
+	const executor = {
+		async exec(command) {
+			if (command.includes("head -c")) return { stdout: pdfHeader, stderr: "", code: 0 };
+			if (command.startsWith("pdftotext")) return { stdout: extractedText, stderr: "", code: 0 };
+			throw new Error(`Unexpected command: ${command}`);
+		},
+	};
+	const tool = createReadTool(executor, { supportsImageInput: true, workspaceDir });
+	const result = await tool.execute("call-id", { label: "read PDF", path: "/workspace/test.pdf" });
+
+	assert.equal(result.details.truncation.truncated, true);
+	assert.match(result.content[0].text, /line 2000/);
+	assert.doesNotMatch(result.content[0].text, /line 2001/);
+	assert.match(result.content[0].text, /output truncated after 2000 of 2100 lines/);
 });
