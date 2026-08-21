@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { detectImageMimeType, detectPdf } from "../dist/engine/mime.js";
+import { detectImageMimeType, detectMimeType } from "../dist/engine/mime.js";
 
 // A real 1x1 transparent PNG (not a hand-rolled magic-byte fixture — file-type
 // validates more than just the leading signature for some formats).
@@ -27,16 +27,21 @@ test("detectImageMimeType: empty buffer is not an image", async () => {
 	assert.equal(await detectImageMimeType(Buffer.alloc(0)), undefined);
 });
 
-test("detectPdf: recognizes a PDF by its %PDF magic bytes", async () => {
+test("detectMimeType: recognizes a PDF by its %PDF magic bytes", async () => {
 	const buffer = Buffer.from("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n", "binary");
-	assert.equal(await detectPdf(buffer), true);
+	assert.equal(await detectMimeType(buffer), "application/pdf");
 });
 
-test("detectPdf: plain text is not a PDF", async () => {
+test("detectMimeType: recognizes a PNG too, not just images the read tool allowlists", async () => {
+	const buffer = Buffer.from(ONE_PIXEL_PNG_BASE64, "base64");
+	assert.equal(await detectMimeType(buffer), "image/png");
+});
+
+test("detectMimeType: plain text has no detectable magic bytes", async () => {
 	const buffer = Buffer.from("just some ordinary text content, not a PDF", "utf-8");
-	assert.equal(await detectPdf(buffer), false);
+	assert.equal(await detectMimeType(buffer), undefined);
 });
 
-test("detectPdf: empty buffer is not a PDF", async () => {
-	assert.equal(await detectPdf(Buffer.alloc(0)), false);
+test("detectMimeType: empty buffer is undefined", async () => {
+	assert.equal(await detectMimeType(Buffer.alloc(0)), undefined);
 });

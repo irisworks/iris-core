@@ -14,6 +14,8 @@ export interface IrisToolsOptions {
 	 * on a file whose image content pi-ai will silently strip before the request
 	 * goes out (every provider module filters on model.input). */
 	supportsImageInput: boolean;
+	/** Host workspace root — the read tool discovers read-handlers from `<workspaceDir>/read-handlers/`. */
+	workspaceDir: string;
 }
 
 export function createIrisTools(executor: Executor, options: IrisToolsOptions): AgentTool<any>[] {

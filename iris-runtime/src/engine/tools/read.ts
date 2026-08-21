@@ -3,7 +3,8 @@ import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import type { Executor } from "../sandbox.js";
 import { resizeImageIfNeededAsync } from "../image-resize.js";
-import { detectImageMimeType, detectPdf, MIME_SNIFF_BYTES } from "../mime.js";
+import { detectImageMimeType, detectMimeType, MIME_SNIFF_BYTES } from "../mime.js";
+import { loadReadHandlerRegistry, renderHandlerCommand } from "../read-handlers.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
 /**
@@ -12,21 +13,22 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
  * otherwise never be recognized. Reads only the small header window sniffing
  * needs, via the same executor as everything else in this tool (the path may
  * be inside a sandboxed container/VM, not the host filesystem, so this can't
- * just open() the file directly). Returns all-undefined/false (not an error)
- * if `path` doesn't exist — the caller's existing text-read path below will
+ * just open() the file directly). Returns all-undefined (not an error) if
+ * `path` doesn't exist — the caller's existing text-read path below will
  * surface that as its normal "no such file" error instead.
  */
 async function sniffFileType(
 	executor: Executor,
 	path: string,
 	signal?: AbortSignal,
-): Promise<{ imageMimeType: string | undefined; isPdf: boolean }> {
+): Promise<{ imageMimeType: string | undefined; mimeType: string | undefined }> {
 	try {
 		const head = await execBase64(executor, `head -c ${MIME_SNIFF_BYTES} ${shellEscape(path)}`, signal);
 		const imageMimeType = await detectImageMimeType(head);
-		return { imageMimeType, isPdf: imageMimeType ? false : await detectPdf(head) };
+		const mimeType = imageMimeType ?? (await detectMimeType(head));
+		return { imageMimeType, mimeType };
 	} catch {
-		return { imageMimeType: undefined, isPdf: false };
+		return { imageMimeType: undefined, mimeType: undefined };
 	}
 }
 
@@ -51,30 +53,34 @@ interface ReadToolDetails {
 export interface ReadToolOptions {
 	/** Whether the active model's provider accepts image input. */
 	supportsImageInput: boolean;
+	/** Host workspace root — read-handlers are discovered from `<workspaceDir>/read-handlers/`. */
+	workspaceDir: string;
 }
 
 export function createReadTool(executor: Executor, options: ReadToolOptions): AgentTool<typeof readSchema> {
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files, images (jpg, png, gif, webp)${options.supportsImageInput ? "" : " — NOTE: the active model does not accept image input, so images will be reported as unreadable"}, and PDFs (text layer only — scanned/image-only PDFs read back empty). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
+		description: `Read the contents of a file. Supports text files, images (jpg, png, gif, webp)${options.supportsImageInput ? "" : " — NOTE: the active model does not accept image input, so images will be reported as unreadable"}, and any format with an installed read-handler (PDF text layer out of the box — scanned/image-only PDFs read back empty). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
 		parameters: readSchema,
 		execute: async (
 			_toolCallId: string,
 			{ path, offset, limit }: { label: string; path: string; offset?: number; limit?: number },
 			signal?: AbortSignal,
 		): Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }> => {
-			const { imageMimeType: mimeType, isPdf } = await sniffFileType(executor, path, signal);
+			const { imageMimeType, mimeType } = await sniffFileType(executor, path, signal);
 
-			if (isPdf) {
-				// pdftotext (poppler-utils) extracts the text layer directly — no
-				// vision model round-trip needed for text-based PDFs (scans/photos
-				// of documents have no text layer and will read back empty).
-				const result = await executor.exec(`pdftotext -layout ${shellEscape(path)} -`, { signal });
+			// Re-scanned per read, not cached at tool construction, so a handler
+			// dropped into read-handlers/ (core-shipped or overlay) hot-reloads
+			// the same way skills do — no restart needed.
+			const handler = mimeType ? loadReadHandlerRegistry(options.workspaceDir).get(mimeType) : undefined;
+			if (handler) {
+				const result = await executor.exec(renderHandlerCommand(handler, path), {
+					signal,
+					timeout: handler.timeoutSeconds,
+				});
 				if (result.code !== 0) {
-					throw new Error(
-						result.stderr || `Failed to extract text from PDF: ${path} (is poppler-utils installed?)`,
-					);
+					throw new Error(result.stderr || `read-handler "${handler.name}" failed on: ${path}`);
 				}
 				return {
 					content: [{ type: "text", text: result.stdout }],
@@ -82,7 +88,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				};
 			}
 
-			if (mimeType) {
+			if (imageMimeType) {
 				if (!options.supportsImageInput) {
 					// Don't return an ImageContent block — pi-ai's provider layer filters
 					// it out based on model.input before the request goes out, and the
@@ -92,7 +98,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 						content: [
 							{
 								type: "text",
-								text: `[${path}] is a ${mimeType} image, but the active model does not accept image input. Its contents cannot be read this way.`,
+								text: `[${path}] is a ${imageMimeType} image, but the active model does not accept image input. Its contents cannot be read this way.`,
 							},
 						],
 						details: undefined,
@@ -112,12 +118,12 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				// decoded/shrunk under the ceiling; send the original and let the provider
 				// decide rather than failing the read.
 				const base64 = imageData.toString("base64");
-				const resized = await resizeImageIfNeededAsync(base64, mimeType, signal);
+				const resized = await resizeImageIfNeededAsync(base64, imageMimeType, signal);
 
 				return {
 					content: [
-						{ type: "text", text: `Read image file [${resized?.mimeType ?? mimeType}]` },
-						{ type: "image", data: resized?.data ?? base64, mimeType: resized?.mimeType ?? mimeType },
+						{ type: "text", text: `Read image file [${resized?.mimeType ?? imageMimeType}]` },
+						{ type: "image", data: resized?.data ?? base64, mimeType: resized?.mimeType ?? imageMimeType },
 					],
 					details: undefined,
 				};
