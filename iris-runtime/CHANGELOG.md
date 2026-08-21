@@ -21,6 +21,10 @@
   (prototype pollution / NO_PROXY bypass in axios, CRLF injection in
   form-data). `extract-zip` (pulled in by `@mariozechner/pi-coding-agent`)
   has no upstream fix yet — tracked, not resolved.
+- Bumped `ws` (8.20.0 → 8.21.3) and transitive `hono`, `fast-uri`, `ip-address`
+  to their latest patch releases. Split out of the `pi-coding-agent` 0.84.2
+  group bump, which requires `agent.ts` changes for that release's breaking
+  API changes and is tracked separately.
 
 ### Fixed
 
