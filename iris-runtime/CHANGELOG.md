@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Security
+
+- Bumped transitive dependency `shell-quote` (via `@anthropic-ai/sandbox-runtime`)
+  to 1.10.0, fixing a critical command-injection advisory in `quote()`
+  (GHSA-w7jw-789q-3m8p, Dependabot alert #29).
+
 ### Fixed
 
 - Langfuse tool observations now reach the dashboard. The legacy REST batch
