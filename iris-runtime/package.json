@@ -23,7 +23,7 @@
 		"@anthropic-ai/sandbox-runtime": "^0.0.16",
 		"@mariozechner/pi-agent-core": "0.66.1",
 		"@mariozechner/pi-ai": "0.66.1",
-		"@mariozechner/pi-coding-agent": "0.66.1",
+		"@mariozechner/pi-coding-agent": "0.73.1",
 		"@modelcontextprotocol/sdk": "^1.29.0",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"@sinclair/typebox": "^0.34.0",
