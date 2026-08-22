@@ -17,9 +17,10 @@
  * first one scanned wins — name your override to match, don't rely on
  * scan order.
  */
-import { existsSync, readdirSync, readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import * as log from "./log.js";
+import { SUPPORTED_IMAGE_MIME_TYPES } from "./mime.js";
 
 export interface ReadHandler {
 	name: string;
@@ -28,6 +29,13 @@ export interface ReadHandler {
 	command: string;
 	/** Seconds before the handler's command is killed. */
 	timeoutSeconds: number;
+	/**
+	 * Must be set to claim a built-in image mimeType (image/jpeg, /png, /gif, /webp).
+	 * Without it, a handler listing an image mimeType has that mimeType dropped at load
+	 * time — the built-in vision path (resize + attach as ImageContent) always wins by
+	 * default, so a handler can't silently take over image reads by accident.
+	 */
+	overridesBuiltinImageHandling: boolean;
 }
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
@@ -38,6 +46,7 @@ interface RawHandlerManifest {
 	mimeTypes?: unknown;
 	command?: unknown;
 	timeoutSeconds?: unknown;
+	overridesBuiltinImageHandling?: unknown;
 }
 
 function parseManifest(manifestPath: string, dirName: string): ReadHandler | undefined {
@@ -65,6 +74,7 @@ function parseManifest(manifestPath: string, dirName: string): ReadHandler | und
 		command: raw.command,
 		timeoutSeconds:
 			typeof raw.timeoutSeconds === "number" && raw.timeoutSeconds > 0 ? raw.timeoutSeconds : DEFAULT_TIMEOUT_SECONDS,
+		overridesBuiltinImageHandling: raw.overridesBuiltinImageHandling === true,
 	};
 }
 
@@ -80,7 +90,10 @@ export function loadReadHandlerRegistry(workspaceDir: string): Map<string, ReadH
 	if (!existsSync(dir)) return registry;
 
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
-		if (!entry.isDirectory()) continue;
+		// entry.isDirectory() is false for a symlinked directory (readdirSync doesn't follow
+		// symlinks for its dirent type), so stat the resolved path — overlays install handlers
+		// by symlinking read-handlers/<name> into the workspace, same as skills.
+		if (!entry.isDirectory() && !(entry.isSymbolicLink() && statSync(join(dir, entry.name)).isDirectory())) continue;
 		const manifestPath = join(dir, entry.name, MANIFEST_FILENAME);
 		if (!existsSync(manifestPath)) continue;
 
@@ -88,6 +101,13 @@ export function loadReadHandlerRegistry(workspaceDir: string): Map<string, ReadH
 		if (!handler) continue;
 
 		for (const mimeType of handler.mimeTypes) {
+			if (SUPPORTED_IMAGE_MIME_TYPES.has(mimeType) && !handler.overridesBuiltinImageHandling) {
+				log.logWarning(
+					`read-handlers: "${handler.name}" claims ${mimeType}, a built-in image type, but doesn't set ` +
+						`"overridesBuiltinImageHandling": true — ignoring that mimeType, the built-in vision path will handle it.`,
+				);
+				continue;
+			}
 			const existing = registry.get(mimeType);
 			if (existing && existing.name !== handler.name) {
 				log.logWarning(

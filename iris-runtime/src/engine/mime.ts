@@ -11,7 +11,7 @@
 import { fileTypeFromBuffer, fileTypeFromFile } from "file-type";
 
 /** MIME types pi-ai's ImageContent (and every provider module that consumes it) accepts. */
-const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+export const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
 /** Bytes needed for file-type's magic-byte sniffing; matches its own recommended sniff window. */
 export const MIME_SNIFF_BYTES = 4100;

@@ -72,7 +72,9 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 
 			// Re-scanned per read, not cached at tool construction, so a handler
 			// dropped into read-handlers/ (core-shipped or overlay) hot-reloads
-			// the same way skills do — no restart needed.
+			// the same way skills do — no restart needed. A handler only occupies an
+			// image mimeType slot here if it opted in via overridesBuiltinImageHandling
+			// (see read-handlers.ts) — otherwise the built-in image path below always wins.
 			const handler = mimeType ? loadReadHandlerRegistry(options.workspaceDir).get(mimeType) : undefined;
 			if (handler) {
 				const result = await executor.exec(renderHandlerCommand(handler, path), {
@@ -82,15 +84,38 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				if (result.code !== 0) {
 					throw new Error(result.stderr || `read-handler "${handler.name}" failed on: ${path}`);
 				}
+				// Apply the same offset/limit paging the plain-text path below supports,
+				// so handler output isn't a dead end for offset/limit despite the tool
+				// description promising it for large files.
+				const handlerLines = result.stdout.split("\n");
+				const totalHandlerLines = handlerLines.length;
+				const handlerStartLine = offset ? Math.max(1, offset) : 1;
+				if (handlerStartLine > totalHandlerLines) {
+					throw new Error(`Offset ${offset} is beyond end of read-handler output (${totalHandlerLines} lines total)`);
+				}
+				let handlerSelectedLines = handlerLines.slice(handlerStartLine - 1);
+				let handlerUserLimitedLines: number | undefined;
+				if (limit !== undefined) {
+					handlerUserLimitedLines = Math.min(limit, handlerSelectedLines.length);
+					handlerSelectedLines = handlerSelectedLines.slice(0, handlerUserLimitedLines);
+				}
+				const handlerSelectedContent = handlerSelectedLines.join("\n");
+
 				// Handler output is model context just like ordinary text reads. Keep
 				// the same limits here: a text-heavy PDF must not bypass the 50KB /
 				// 2,000-line guard merely because it was extracted by pdftotext.
-				const truncation = truncateHead(result.stdout);
+				const truncation = truncateHead(handlerSelectedContent);
 				let outputText = truncation.content;
 				if (truncation.firstLineExceedsLimit) {
-					outputText = `[Read-handler "${handler.name}" output starts with a ${formatSize(Buffer.byteLength(result.stdout.split("\n")[0], "utf-8"))} line, exceeding the ${formatSize(DEFAULT_MAX_BYTES)} limit.]`;
+					outputText = `[Read-handler "${handler.name}" output starts with a ${formatSize(Buffer.byteLength(handlerSelectedContent.split("\n")[0], "utf-8"))} line, exceeding the ${formatSize(DEFAULT_MAX_BYTES)} limit.]`;
 				} else if (truncation.truncated) {
-					outputText += `\n\n[Read-handler "${handler.name}" output truncated after ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(DEFAULT_MAX_BYTES)} limit).]`;
+					const endLineDisplay = handlerStartLine + truncation.outputLines - 1;
+					outputText += `\n\n[Read-handler "${handler.name}" output showing lines ${handlerStartLine}-${endLineDisplay} of ${totalHandlerLines}. Use offset=${endLineDisplay + 1} to continue]`;
+				} else if (handlerUserLimitedLines !== undefined) {
+					const linesFromStart = handlerStartLine - 1 + handlerUserLimitedLines;
+					if (linesFromStart < totalHandlerLines) {
+						outputText += `\n\n[${totalHandlerLines - linesFromStart} more lines in read-handler "${handler.name}" output. Use offset=${handlerStartLine + handlerUserLimitedLines} to continue]`;
+					}
 				}
 				return {
 					content: [{ type: "text", text: outputText }],

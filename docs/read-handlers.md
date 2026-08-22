@@ -39,6 +39,12 @@ read-handlers/
   with the shell-escaped file path before it runs through the same sandboxed
   executor every other tool call uses.
 - `timeoutSeconds` — optional, defaults to 30.
+- `overridesBuiltinImageHandling` — optional, defaults to `false`. The read
+  tool always sends `jpg`/`png`/`gif`/`webp` as image attachments through its
+  built-in vision path. A handler claiming one of those MIME types is ignored
+  unless this is set to `true` — e.g. to route images through OCR instead of
+  vision. Without it, that MIME type is dropped from the handler at load time
+  (with a warning), not silently honored.
 
 A handler is deliberately **not** loadable code — no JS/TS module is ever
 imported into the running process. It's a shell command, run the same way
