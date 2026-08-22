@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Read handlers: workspace-discovered `read-handlers/<name>/handler.json`
+  shell recipes that map a sniffed MIME type to a text-extraction command,
+  hot-reloading the same way skills do. Core ships one, `pdf-text`
+  (`pdftotext -layout`, `poppler-utils` now installed by `bootstrap.sh`), so
+  the `read` tool extracts a PDF's text layer instead of dumping raw binary
+  at the model — scanned/image-only PDFs have no text layer and read back
+  empty. Overlays add or override handlers by directory name, same rule as
+  skills. See `docs/read-handlers.md`. (#141)
+
 ### Security
 
 - Migrated `pi-agent-core`, `pi-ai`, and `pi-coding-agent` from the deprecated

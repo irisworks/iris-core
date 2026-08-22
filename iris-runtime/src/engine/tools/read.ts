@@ -3,30 +3,32 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { Type } from "@sinclair/typebox";
 import type { Executor } from "../sandbox.js";
 import { resizeImageIfNeededAsync } from "../image-resize.js";
-import { detectImageMimeType, MIME_SNIFF_BYTES } from "../mime.js";
+import { detectImageMimeType, detectMimeType, MIME_SNIFF_BYTES } from "../mime.js";
+import { loadReadHandlerRegistry, renderHandlerCommand } from "../read-handlers.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
 /**
- * Sniff whether a file is a supported image format from its magic bytes, not
- * its filename — a mislabeled or extensionless attachment (e.g. a Telegram
- * document with no name) would otherwise never be recognized. Reads only the
- * small header window sniffing needs, via the same executor as everything
- * else in this tool (the path may be inside a sandboxed container/VM, not
- * the host filesystem, so this can't just open() the file directly).
- * Returns undefined (not an error) if `path` doesn't exist — the caller's
- * existing text-read path below will surface that as its normal "no such
- * file" error instead.
+ * Sniff a file's type from its magic bytes, not its filename — a mislabeled
+ * or extensionless attachment (e.g. a Telegram document with no name) would
+ * otherwise never be recognized. Reads only the small header window sniffing
+ * needs, via the same executor as everything else in this tool (the path may
+ * be inside a sandboxed container/VM, not the host filesystem, so this can't
+ * just open() the file directly). Returns all-undefined (not an error) if
+ * `path` doesn't exist — the caller's existing text-read path below will
+ * surface that as its normal "no such file" error instead.
  */
-async function sniffImageMimeType(
+async function sniffFileType(
 	executor: Executor,
 	path: string,
 	signal?: AbortSignal,
-): Promise<string | undefined> {
+): Promise<{ imageMimeType: string | undefined; mimeType: string | undefined }> {
 	try {
 		const head = await execBase64(executor, `head -c ${MIME_SNIFF_BYTES} ${shellEscape(path)}`, signal);
-		return await detectImageMimeType(head);
+		const imageMimeType = await detectImageMimeType(head);
+		const mimeType = imageMimeType ?? (await detectMimeType(head));
+		return { imageMimeType, mimeType };
 	} catch {
-		return undefined;
+		return { imageMimeType: undefined, mimeType: undefined };
 	}
 }
 
@@ -51,22 +53,77 @@ interface ReadToolDetails {
 export interface ReadToolOptions {
 	/** Whether the active model's provider accepts image input. */
 	supportsImageInput: boolean;
+	/** Host workspace root — read-handlers are discovered from `<workspaceDir>/read-handlers/`. */
+	workspaceDir: string;
 }
 
 export function createReadTool(executor: Executor, options: ReadToolOptions): AgentTool<typeof readSchema> {
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp)${options.supportsImageInput ? "" : " — NOTE: the active model does not accept image input, so images will be reported as unreadable"}. Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
+		description: `Read the contents of a file. Supports text files, images (jpg, png, gif, webp)${options.supportsImageInput ? "" : " — NOTE: the active model does not accept image input, so images will be reported as unreadable"}, and any format with an installed read-handler (PDF text layer out of the box — scanned/image-only PDFs read back empty). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
 		parameters: readSchema,
 		execute: async (
 			_toolCallId: string,
 			{ path, offset, limit }: { label: string; path: string; offset?: number; limit?: number },
 			signal?: AbortSignal,
 		): Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }> => {
-			const mimeType = await sniffImageMimeType(executor, path, signal);
+			const { imageMimeType, mimeType } = await sniffFileType(executor, path, signal);
 
-			if (mimeType) {
+			// Re-scanned per read, not cached at tool construction, so a handler
+			// dropped into read-handlers/ (core-shipped or overlay) hot-reloads
+			// the same way skills do — no restart needed. A handler only occupies an
+			// image mimeType slot here if it opted in via overridesBuiltinImageHandling
+			// (see read-handlers.ts) — otherwise the built-in image path below always wins.
+			const handler = mimeType ? loadReadHandlerRegistry(options.workspaceDir).get(mimeType) : undefined;
+			if (handler) {
+				const result = await executor.exec(renderHandlerCommand(handler, path), {
+					signal,
+					timeout: handler.timeoutSeconds,
+				});
+				if (result.code !== 0) {
+					throw new Error(result.stderr || `read-handler "${handler.name}" failed on: ${path}`);
+				}
+				// Apply the same offset/limit paging the plain-text path below supports,
+				// so handler output isn't a dead end for offset/limit despite the tool
+				// description promising it for large files.
+				const handlerLines = result.stdout.split("\n");
+				const totalHandlerLines = handlerLines.length;
+				const handlerStartLine = offset ? Math.max(1, offset) : 1;
+				if (handlerStartLine > totalHandlerLines) {
+					throw new Error(`Offset ${offset} is beyond end of read-handler output (${totalHandlerLines} lines total)`);
+				}
+				let handlerSelectedLines = handlerLines.slice(handlerStartLine - 1);
+				let handlerUserLimitedLines: number | undefined;
+				if (limit !== undefined) {
+					handlerUserLimitedLines = Math.min(limit, handlerSelectedLines.length);
+					handlerSelectedLines = handlerSelectedLines.slice(0, handlerUserLimitedLines);
+				}
+				const handlerSelectedContent = handlerSelectedLines.join("\n");
+
+				// Handler output is model context just like ordinary text reads. Keep
+				// the same limits here: a text-heavy PDF must not bypass the 50KB /
+				// 2,000-line guard merely because it was extracted by pdftotext.
+				const truncation = truncateHead(handlerSelectedContent);
+				let outputText = truncation.content;
+				if (truncation.firstLineExceedsLimit) {
+					outputText = `[Read-handler "${handler.name}" output starts with a ${formatSize(Buffer.byteLength(handlerSelectedContent.split("\n")[0], "utf-8"))} line, exceeding the ${formatSize(DEFAULT_MAX_BYTES)} limit.]`;
+				} else if (truncation.truncated) {
+					const endLineDisplay = handlerStartLine + truncation.outputLines - 1;
+					outputText += `\n\n[Read-handler "${handler.name}" output showing lines ${handlerStartLine}-${endLineDisplay} of ${totalHandlerLines}. Use offset=${endLineDisplay + 1} to continue]`;
+				} else if (handlerUserLimitedLines !== undefined) {
+					const linesFromStart = handlerStartLine - 1 + handlerUserLimitedLines;
+					if (linesFromStart < totalHandlerLines) {
+						outputText += `\n\n[${totalHandlerLines - linesFromStart} more lines in read-handler "${handler.name}" output. Use offset=${handlerStartLine + handlerUserLimitedLines} to continue]`;
+					}
+				}
+				return {
+					content: [{ type: "text", text: outputText }],
+					details: truncation.truncated ? { truncation } : undefined,
+				};
+			}
+
+			if (imageMimeType) {
 				if (!options.supportsImageInput) {
 					// Don't return an ImageContent block — pi-ai's provider layer filters
 					// it out based on model.input before the request goes out, and the
@@ -76,7 +133,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 						content: [
 							{
 								type: "text",
-								text: `[${path}] is a ${mimeType} image, but the active model does not accept image input. Its contents cannot be read this way.`,
+								text: `[${path}] is a ${imageMimeType} image, but the active model does not accept image input. Its contents cannot be read this way.`,
 							},
 						],
 						details: undefined,
@@ -96,12 +153,12 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				// decoded/shrunk under the ceiling; send the original and let the provider
 				// decide rather than failing the read.
 				const base64 = imageData.toString("base64");
-				const resized = await resizeImageIfNeededAsync(base64, mimeType, signal);
+				const resized = await resizeImageIfNeededAsync(base64, imageMimeType, signal);
 
 				return {
 					content: [
-						{ type: "text", text: `Read image file [${resized?.mimeType ?? mimeType}]` },
-						{ type: "image", data: resized?.data ?? base64, mimeType: resized?.mimeType ?? mimeType },
+						{ type: "text", text: `Read image file [${resized?.mimeType ?? imageMimeType}]` },
+						{ type: "image", data: resized?.data ?? base64, mimeType: resized?.mimeType ?? imageMimeType },
 					],
 					details: undefined,
 				};

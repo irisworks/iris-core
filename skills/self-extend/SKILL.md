@@ -70,3 +70,22 @@ cd /iris/repo && git add "skills/slack-notify/SKILL.md" && \
 # 3. Test (iris-runtime reloads skills automatically)
 slack-notify "#iris-dev" "test message from iris"
 ```
+
+## Read handlers use the same protocol
+
+A [read handler](../../docs/read-handlers.md) teaches the `read` tool how to
+extract text from a file format the read tool doesn't already handle (docx,
+pptx, a proprietary format). Same protocol, different target:
+
+1. Identify the need — a file format `read` can't extract text from
+2. Write `read-handlers/<name>/handler.json` (`mimeTypes`, `command`,
+   optional `timeoutSeconds` — see [Read Handlers](../../docs/read-handlers.md))
+3. Commit to GitHub before using it
+4. Test it — `read` a real file of that format once
+5. Done — no restart, no registration step; the next `read` call picks it up
+
+A handler's `command` is a shell string, run through the sandboxed executor
+exactly like a skill's script — never write JS/TS and expect it to be
+imported into `iris-runtime` directly, that seam doesn't exist and shouldn't:
+it would run with the engine's own privileges instead of the sandboxed ones
+every other tool call gets.
