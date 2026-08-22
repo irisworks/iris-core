@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Structural (schema-aware) compression for large JSON tool output: `bash`,
+  `read`, and MCP tool results now emit a compact summary (keys/shape plus a
+  handful of sample values) instead of a blind head/tail byte cut when the
+  output is valid JSON over the size limit. (#158)
+
 ### Security
 
 - Migrated `pi-agent-core`, `pi-ai`, and `pi-coding-agent` from the deprecated
