@@ -12,6 +12,7 @@ import {
 	formatSize,
 	truncateHead,
 	truncateTail,
+	compressJsonStructure,
 	DEFAULT_MAX_LINES,
 	DEFAULT_MAX_BYTES,
 } from "../dist/engine/tools/truncate.js";
@@ -444,4 +445,110 @@ test("truncateTail: content exceeding default byte limit returns partial from en
 	assert.equal(result.lastLinePartial, true);
 	assert.equal(result.outputBytes, DEFAULT_MAX_BYTES);
 	assert.ok(content.endsWith(result.content));
+});
+
+// ---------------------------------------------------------------------------
+// compressJsonStructure
+// ---------------------------------------------------------------------------
+
+test("compressJsonStructure: returns null when content is within limits (no compression needed)", () => {
+	const content = JSON.stringify({ a: 1, b: [1, 2, 3] });
+	assert.equal(compressJsonStructure(content, { maxLines: 100, maxBytes: 10_000 }), null);
+});
+
+test("compressJsonStructure: returns null for non-JSON content that exceeds limits", () => {
+	const content = "not json at all\n".repeat(1000);
+	assert.equal(compressJsonStructure(content, { maxLines: 10, maxBytes: 100 }), null);
+});
+
+test("compressJsonStructure: returns null for JSON primitives (bare string/number)", () => {
+	assert.equal(compressJsonStructure(JSON.stringify("x".repeat(1000)), { maxLines: 10, maxBytes: 100 }), null);
+	assert.equal(compressJsonStructure("12345", { maxLines: 10, maxBytes: 3 }), null);
+});
+
+test("compressJsonStructure: returns null for malformed JSON-looking content", () => {
+	const content = `{"unterminated": ${"x".repeat(200)}`;
+	assert.equal(compressJsonStructure(content, { maxLines: 10, maxBytes: 100 }), null);
+});
+
+test("compressJsonStructure: large array is summarized with length and a few sample items", () => {
+	const items = Array.from({ length: 1000 }, (_, i) => ({ id: i, name: `item-${i}` }));
+	const content = JSON.stringify(items);
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 2000 });
+	assert.ok(result);
+	assert.equal(result.truncated, true);
+	assert.equal(result.truncatedBy, "structure");
+	assert.equal(result.totalBytes, Buffer.byteLength(content, "utf-8"));
+
+	const parsed = JSON.parse(result.content);
+	assert.equal(parsed._arrayLength, 1000);
+	assert.equal(parsed._sampleItems.length, 3);
+	assert.deepEqual(parsed._sampleItems[0], { id: 0, name: "item-0" });
+	assert.match(parsed._note, /3 of 1000/);
+});
+
+test("compressJsonStructure: small array (<= sample size) is kept in full, no _note", () => {
+	const items = [{ id: 1 }, { id: 2 }];
+	// Force the "exceeds limits" gate even though the array itself is tiny -
+	// the oversized (and thus string-truncated) padding pushes it over.
+	const content = JSON.stringify({ items, padding: "x".repeat(1000) });
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 500 });
+	assert.ok(result);
+	const parsed = JSON.parse(result.content);
+	assert.deepEqual(parsed.items, items);
+});
+
+test("compressJsonStructure: object with many keys samples a subset and notes the total", () => {
+	const obj = {};
+	for (let i = 0; i < 200; i++) obj[`key${i}`] = i;
+	const content = JSON.stringify(obj);
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 1000 });
+	assert.ok(result);
+	const parsed = JSON.parse(result.content);
+	assert.equal(Object.keys(parsed).filter((k) => k !== "_note").length, 50);
+	assert.match(parsed._note, /50 of 200/);
+});
+
+test("compressJsonStructure: long strings are truncated with a char-count suffix", () => {
+	const content = JSON.stringify({ text: "a".repeat(1000), padding: "b".repeat(1000) });
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 1000 });
+	assert.ok(result);
+	const parsed = JSON.parse(result.content);
+	assert.match(parsed.text, /^a+… \(1000 chars total\)$/);
+});
+
+test("compressJsonStructure: deeply nested structures are capped by depth", () => {
+	let nested = { value: "leaf" };
+	for (let i = 0; i < 20; i++) nested = { child: nested, padding: "x".repeat(500) };
+	const content = JSON.stringify(nested);
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 2000 });
+	assert.ok(result);
+	// Must not throw and must produce valid, bounded JSON with the deep tail collapsed.
+	const parsed = JSON.parse(result.content);
+	assert.ok(parsed);
+	assert.match(result.content, /Object\(\d+ keys\)/);
+});
+
+test("compressJsonStructure: pathological shape falls back to a hard byte-capped summary", () => {
+	// Many wide top-level keys, each holding a long string - even sampled down
+	// to 50 keys, the summary could still exceed a tiny byte budget.
+	const obj = {};
+	for (let i = 0; i < 50; i++) obj[`key${i}`] = "x".repeat(1000);
+	const content = JSON.stringify(obj);
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 50 });
+	assert.ok(result);
+	assert.equal(result.truncatedBy, "structure");
+	assert.ok(result.outputBytes <= 50);
+});
+
+test("compressJsonStructure: whitespace-wrapped JSON is still detected", () => {
+	const items = Array.from({ length: 1000 }, (_, i) => i);
+	const content = `\n\n  ${JSON.stringify(items)}  \n`;
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 100 });
+	assert.ok(result);
+	assert.equal(result.truncatedBy, "structure");
+});
+
+test("compressJsonStructure: empty content returns null", () => {
+	assert.equal(compressJsonStructure("", { maxLines: 1, maxBytes: 1 }), null);
 });
