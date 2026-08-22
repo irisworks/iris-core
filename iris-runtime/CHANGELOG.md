@@ -13,6 +13,30 @@
   empty. Overlays add or override handlers by directory name, same rule as
   skills. See `docs/read-handlers.md`. (#141)
 
+### Security
+
+- Migrated `pi-agent-core`, `pi-ai`, and `pi-coding-agent` from the deprecated
+  `@mariozechner` npm scope to `@earendil-works` at 0.79.0, fixing three
+  high/moderate advisories with no fix released under the old scope
+  (GHSA-jfgx-wxx8-mp94, GHSA-7v5m-pr3q-6453, GHSA-r95r-rj6r-c39x;
+  Dependabot alerts #34, #35, #36). This dependency now requires Node
+  >=22.19.0 (bundled `undici` uses newer webidl APIs); bumped
+  `engines.node` and CI's `setup-node` version accordingly, and fixed
+  `bootstrap.sh`'s Node-install gate, which previously skipped the Node 22
+  install on any host already running Node 20 or 21.
+- Bumped transitive dependency `shell-quote` (via `@anthropic-ai/sandbox-runtime`)
+  to 1.10.0, fixing a critical command-injection advisory in `quote()`
+  (GHSA-w7jw-789q-3m8p, Dependabot alert #29).
+- Bumped transitive `axios` (1.15.0 → 1.19.0) and `form-data` (4.0.5 → 4.0.6)
+  via `overrides` to pick up fixes for several high-severity advisories
+  (prototype pollution / NO_PROXY bypass in axios, CRLF injection in
+  form-data). `extract-zip` (pulled in by `@mariozechner/pi-coding-agent`)
+  has no upstream fix yet — tracked, not resolved.
+- Bumped `ws` (8.20.0 → 8.21.3) and transitive `hono`, `fast-uri`, `ip-address`
+  to their latest patch releases. Split out of the `pi-coding-agent` 0.84.2
+  group bump, which requires `agent.ts` changes for that release's breaking
+  API changes and is tracked separately.
+
 ### Fixed
 
 - Langfuse tool observations now reach the dashboard. The legacy REST batch
