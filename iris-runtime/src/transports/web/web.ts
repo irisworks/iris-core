@@ -20,8 +20,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { randomBytes } from "crypto";
-import { createReadStream, existsSync, mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { createReadStream, existsSync, mkdirSync, writeFileSync, appendFileSync } from "fs";
+import { basename, join } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as log from "../../engine/log.js";
 import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
@@ -295,6 +295,12 @@ export class WebTransport implements ChannelTransport {
 				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
 			},
 			replaceMessage: async (text: string) => {
+				// #217: SESSION- turns driven through the session REST API must reach
+				// log.jsonl like they do on Slack/Telegram — nothing is posted
+				// anywhere else for those channels. Logged once per turn (the final
+				// text supersedes the streaming partials respond() accumulated).
+				// WEBUI- channels keep their browser-only scope.
+				if (event.channel.startsWith("SESSION-")) this.logBotResponse(event.channel, text);
 				if (!messageId) messageId = randomToken();
 				this.broadcast(event.channel, { type: "final", id: messageId, text });
 			},
@@ -339,12 +345,46 @@ export class WebTransport implements ChannelTransport {
 		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
 		const ts = (Date.now() / 1000).toFixed(6);
+
+		// Log user message to session directory (#217), mirroring Slack/Telegram.
+		// `original` is the on-disk name: the API caller uploaded the file itself,
+		// so there is no separate uploader-supplied filename to preserve.
+		this.logToFile(channelId, {
+			date: new Date().toISOString(),
+			ts,
+			user,
+			text,
+			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
+			isBot: false,
+		});
+
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
 		this.dispatch({ channel: channelId, user, text, ts, attachments }, this);
 		return responsePromise;
 	}
 
 	resetSessionContext(_sessionId: string): void {}
+
+	// ==========================================================================
+	// Logging (mirrors Slack/Telegram) — SESSION- turns must reach log.jsonl
+	// ==========================================================================
+
+	private logToFile(channelId: string, entry: object): void {
+		const dir = resolveChannelDir(this.workingDir, channelId);
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+		appendFileSync(join(dir, "log.jsonl"), `${JSON.stringify(entry)}\n`);
+	}
+
+	private logBotResponse(channelId: string, text: string): void {
+		this.logToFile(channelId, {
+			date: new Date().toISOString(),
+			ts: Date.now().toString(),
+			user: "bot",
+			text,
+			attachments: [],
+			isBot: true,
+		});
+	}
 
 	// ==========================================================================
 	// Internals

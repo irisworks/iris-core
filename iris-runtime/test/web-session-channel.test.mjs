@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test, after } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
@@ -147,6 +147,42 @@ test("web transport: a traversal-bearing SESSION- channel is still rejected", as
 		ws.on("error", () => resolve(true));
 	});
 	assert.equal(rejected, true);
+});
+
+// #217: SESSION- turns driven through the session REST API must reach the
+// channel's log.jsonl (user message via injectSessionMessage, bot reply via
+// replaceMessage) — GET /sessions/:id/history and restart replay depend on it.
+test("web transport: SESSION- turn replies are logged to log.jsonl", async () => {
+	const port = 19431;
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ctx = transport.createContext({ channel: "SESSION-weblog", user: "tester", text: "q", ts: "1" }, {});
+	await ctx.respond("streaming partial");
+	await ctx.replaceMessage("final answer");
+
+	const logPath = join(workingDir, "SESSION-weblog", "log.jsonl");
+	assert.ok(existsSync(logPath), "expected SESSION-weblog/log.jsonl to exist");
+	const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+	assert.equal(lines.length, 1, "one bot entry per turn");
+	const entry = JSON.parse(lines[0]);
+	assert.equal(entry.isBot, true);
+	assert.equal(entry.user, "bot");
+	assert.equal(entry.text, "final answer");
+});
+
+// WEBUI- channels keep their browser-only scope — no log.jsonl writes there.
+test("web transport: WEBUI- turns stay unlogged", async () => {
+	const workingDir = makeWorkingDir();
+	const transport = new WebTransport({ port: 19432, workingDir, dispatch: () => {}, commands: makeCommands() });
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ctx = transport.createContext({ channel: "WEBUI-nolog", user: "tester", text: "q", ts: "1" }, {});
+	await ctx.replaceMessage("browser answer");
+	assert.ok(!existsSync(join(workingDir, "WEBUI-nolog")));
 });
 
 // A SESSION- socket observes a turn the session API owns. Letting it write

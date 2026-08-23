@@ -34,7 +34,7 @@ function tempWorkspace() {
  */
 function makeEngineHarness(workingDir, run) {
 	const engine = createEngine({ workingDir, sandbox: {}, provider: "test", model: "test" });
-	const transport = new BridgeTransport({ promptProfile: { fragments: [] }, dispatch: () => {} });
+	const transport = new BridgeTransport({ promptProfile: { fragments: [] }, workingDir, dispatch: () => {} });
 	const seed = (channelId) => engine.channelStates.set(channelId, {
 		running: false,
 		stopRequested: false,

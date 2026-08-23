@@ -39,6 +39,14 @@
 
 ### Fixed
 
+- `SESSION-` channel turns are now written to the session's `log.jsonl` on
+  every transport. Slack and Telegram already logged them, but turns driven
+  through `POST /sessions/:id/message` on a headless install (Bridge/Web
+  transports) left no trace: `GET /sessions/:id/history` came back empty and
+  restart replay had nothing to restore context from. The user message is now
+  logged by `injectSessionMessage` and the run's final reply as a bot entry,
+  matching the existing Slack/Telegram entry shape. (#217)
+
 - Langfuse tool observations now reach the dashboard. The legacy REST batch
   endpoint (`/api/public/ingestion`) silently rejected `TOOL`-typed events
   with HTTP 207 while reporting success; the client has been migrated to the
