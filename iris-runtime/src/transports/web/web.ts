@@ -378,7 +378,9 @@ export class WebTransport implements ChannelTransport {
 	private logBotResponse(channelId: string, text: string): void {
 		this.logToFile(channelId, {
 			date: new Date().toISOString(),
-			ts: Date.now().toString(),
+			// Same slack-style seconds format injectSessionMessage uses, so one
+			// channel's log.jsonl sorts consistently by ts.
+			ts: (Date.now() / 1000).toFixed(6),
 			user: "bot",
 			text,
 			attachments: [],
