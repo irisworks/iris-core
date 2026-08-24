@@ -37,7 +37,7 @@ env vars.
 | `IRIS_BASH_AUDIT_FILE` | `<workspace>/meta/bash-audit.log` | Location of the append-only bash command audit log — see [Bash Policy Layer](bash-policy.md) |
 | `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills, sub-agents, and self-edits to (the `github` skill's push target — see [Extending Iris](overlay.md)). Use your own private overlay repo, or a private mirror of `iris-core` — never the upstream you cloned from, and never a public fork, since Iris's memory lands here. Prompted by bootstrap alongside the GitHub token; also injected into the constitution as Iris's identity source |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
-| `IRIS_SECRETS_MODE` | `env` | `env` \| `store` \| `proxy` — opt-in credential broker, see [Secrets](secrets.md) |
+| `IRIS_SECRETS_MODE` | `store` | `store` (default) \| `proxy` \| `env` (legacy opt-out) — credential backend, see [Secrets](secrets.md) |
 | `IRIS_SECRET_KEY_FILE` / `IRIS_SECRET_STORE_FILE` | `/iris/secret.key` / `/iris/secrets.json.enc` | Encrypted store paths (`store` mode) |
 | `IRIS_BROKER_PORT` / `IRIS_BROKER_HOST` | `9099` / `127.0.0.1` | iris-broker daemon bind (`proxy` mode) |
 | `IRIS_BROKER_SERVICES_FILE` | `/iris/broker/services.json` | Operator overrides for the injection gateway's service map |

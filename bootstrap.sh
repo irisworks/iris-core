@@ -53,7 +53,7 @@ FC_GUEST_IP="172.20.1.2"
 IRIS_PROVIDER="${IRIS_PROVIDER:-}"
 IRIS_MODEL="${IRIS_MODEL:-}"
 IRIS_ENV="${IRIS_ENV:-prod}"
-SECRETS_MODE="${IRIS_SECRETS_MODE:-env}"   # env | store | proxy (see docs/secrets.md)
+SECRETS_MODE="${IRIS_SECRETS_MODE:-}"      # env | store | proxy (resolved below; see docs/secrets.md)
 IRIS_BROKER_PORT="${IRIS_BROKER_PORT:-9099}"
 IRIS_BASE_DOMAIN="${IRIS_BASE_DOMAIN:-}"
 CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
@@ -119,6 +119,20 @@ for arg in "$@"; do
     *) die "Unknown argument: $arg" ;;
   esac
 done
+
+# Default secrets mode is `store` (encrypted local store): plaintext credentials
+# in /iris/.env were the most likely leak path in the product — one `env` or
+# `cat /iris/.env` tool call exposes every key (docs/secrets.md). Resolution
+# order:
+#   1. explicit --secrets-mode flag or IRIS_SECRETS_MODE env var
+#   2. whatever the existing install's /iris/.env records — a plain re-run never
+#      silently migrates an env-mode install; pass --secrets-mode=store once to
+#      opt in (import-env is idempotent, so re-runs are safe either way)
+#   3. fresh install → store
+if [[ -z "$SECRETS_MODE" && -f "$IRIS_DIR/.env" ]]; then
+  SECRETS_MODE=$(grep -m1 '^IRIS_SECRETS_MODE=' "$IRIS_DIR/.env" | cut -d= -f2- || true)
+fi
+SECRETS_MODE="${SECRETS_MODE:-store}"
 
 case "$SECRETS_MODE" in
   env|store|proxy) ;;
@@ -1277,8 +1291,7 @@ elif [[ -f "$REPO_DIR/data/models.json.template" ]]; then
 fi
 
 # Secrets-mode tokens: preserved across re-runs (read back from the existing
-# .env), generated once otherwise. Env mode gets neither — default installs
-# keep today's loopback-trust behavior byte for byte.
+# .env), generated once otherwise. Env mode gets neither.
 IRIS_API_TOKEN="${IRIS_API_TOKEN:-}"
 BROKER_TOKEN="${BROKER_TOKEN:-}"
 if [[ "$SECRETS_MODE" != "env" ]]; then
@@ -1367,8 +1380,8 @@ cd - > /dev/null
 
 # ────────────────────────────────────────────────────────────
 # 9b. Secrets mode (store / proxy) — encrypted store, broker daemon, CLI,
-#     .env migration. Skipped entirely in env mode (the default).
-#     See docs/secrets.md.
+#     .env migration. Skipped entirely in env mode (the legacy opt-out;
+#     store is the default). See docs/secrets.md.
 # ────────────────────────────────────────────────────────────
 if [[ "$SECRETS_MODE" != "env" ]]; then
   log_h "Setting up secrets mode: $SECRETS_MODE"
@@ -1454,7 +1467,11 @@ UNIT
   # Move known credential vars out of /iris/.env into the store (idempotent;
   # prune rewrites .env without those lines). The runtime resolves them via
   # the store/broker from here on.
-  sudo /usr/local/bin/iris-secret import-env "$IRIS_DIR/.env" --prune
+  if ! sudo /usr/local/bin/iris-secret import-env "$IRIS_DIR/.env" --prune; then
+    # Not fatal: the runtime's store provider falls back to env vars, so any
+    # credential import-env didn't reach keeps resolving from .env as before.
+    die "iris-secret import-env failed — credentials remain in /iris/.env and keep working via the env fallback; fix the error above and re-run bootstrap."
+  fi
   sudo chmod 600 "$IRIS_DIR/.env"
   if [[ "$SECRETS_MODE" == "store" && -f "$IRIS_DIR/secrets.json.enc" ]]; then
     # import-env ran as root; the runtime (TARGET_USER) owns the store file.

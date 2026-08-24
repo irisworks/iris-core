@@ -1,39 +1,43 @@
 ---
 title: Secrets
-description: The opt-in credential broker — encrypted store, injection proxy, and out-of-band secret submission.
+description: The credential broker — encrypted store (default), injection proxy, and out-of-band secret submission.
 ---
 
 # Secrets
 
-By default (`IRIS_SECRETS_MODE=env`), Iris reads credentials from `/iris/.env`
-exactly as every release before this one — nothing on this page applies until
-you opt in. The two opt-in modes exist because the default has a sharp edge:
-everything in `.env` is loaded into the runtime's environment, agent shell
-commands inherit that environment, and a single `env` or `cat /iris/.env` in a
-tool call can leak every credential into the conversation.
+By default (`IRIS_SECRETS_MODE=store`), credentials live in an encrypted local
+store and are kept out of `/iris/.env` and the process environment. The legacy
+`env` mode — reading credentials straight from `.env` as every release before
+the broker did — remains available as an explicit opt-out. It exists because
+`env` mode has a sharp edge: everything in `.env` is loaded into the runtime's
+environment, agent shell commands inherit that environment, and a single `env`
+or `cat /iris/.env` in a tool call can leak every credential into the
+conversation.
 
 `.env` is only read once, at process startup (`dotenv/config`, plus whatever
-systemd exported at spawn). Editing the file after the fact — whether by hand
-or via the agent's own shell/file tools — does not change the running
-process's environment; `iris.service` must be restarted before a new or
-updated value is resolvable. Note that `set-secret`/`PUT /secrets/:name` has
-no writable backend in env mode and returns 503 rather than touching `.env`
-(see the API table below), so anything that ends up in `.env` got there by a
-direct file write, not through the secrets API. `store`/`proxy` mode doesn't
-have this restart gap: the encrypted store file is re-read on every lookup,
-so secrets added there apply immediately.
+systemd exported at spawn). In `env` mode, editing the file after the fact —
+whether by hand or via the agent's own shell/file tools — does not change the
+running process's environment; `iris.service` must be restarted before a new or
+updated value is resolvable. Note that `set-secret`/`PUT /secrets/:name` has no
+writable backend in env mode and returns 503 rather than touching `.env` (see
+the API table below), so anything that ends up in `.env` got there by a direct
+file write, not through the secrets API. `store`/`proxy` mode doesn't have this
+restart gap: the encrypted store file is re-read on every lookup, so secrets
+added there apply immediately.
 
-Pick a mode at bootstrap (`bootstrap.sh --secrets-mode=store` or
-`--secrets-mode=proxy`) or set `IRIS_SECRETS_MODE` in `/iris/.env` and follow
-the migration section below.
+The mode is chosen at bootstrap (`bootstrap.sh --secrets-mode=store|proxy|env`;
+`store` needs no flag) or by setting `IRIS_SECRETS_MODE` in `/iris/.env` and
+following the migration section below. Installs predating the store default
+keep whatever their `.env` records until they pass `--secrets-mode=store`
+explicitly — bootstrap never silently migrates an existing env-mode install.
 
 ## What each mode protects against
 
 | Mode | Protects against |
 |---|---|
-| `env` (default) | Nothing new — status quo. |
-| `store` | Accidental leakage: `env` dumps, `cat /iris/.env`, sub-agent `--env-file` inheritance, plaintext store backups. The agent shares a uid with the runtime, so it can still read the key file; `get-secret` still returns plaintext. |
+| `store` (default) | Accidental leakage: `env` dumps, `cat /iris/.env`, sub-agent `--env-file` inheritance, plaintext store backups. The agent shares a uid with the runtime, so it can still read the key file; `get-secret` still returns plaintext. |
 | `proxy` | All of the above, **plus**: key/store files are owned by a dedicated `iris-broker` user the agent cannot read as, and secrets marked *proxy-only* can never be read in plaintext by anyone — only exercised through the injection gateway. |
+| `env` (legacy opt-out) | Nothing new — status quo before the broker existed. |
 
 Honest limits: in `store` mode encryption-at-rest mainly stops *accidental*
 leaks, not a deliberately malicious agent on the same uid. `proxy` mode adds a
