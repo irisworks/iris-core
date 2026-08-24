@@ -4,6 +4,7 @@ import { execFileSync } from "child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
+import { ChannelQueue } from "../../engine/channel-queue.js";
 import { callAgentBridge, loadAgentRegistry, parseAgentMention, throttleStatus } from "../../engine/bridge.js";
 import { admitsBotMessage, parseAdminCommand, parseVerboseCommand, resolveDispatch, type InboundMessage } from "../../engine/dispatch.js";
 import {
@@ -216,37 +217,9 @@ export interface IrisHandler {
 }
 
 // ============================================================================
-// Per-channel queue for sequential processing
+// Per-channel queue for sequential processing — shared engine/channel-queue.ts
+// (also used by telegram.ts and bridge-transport.ts).
 // ============================================================================
-
-type QueuedWork = () => Promise<void>;
-
-class ChannelQueue {
-	private queue: QueuedWork[] = [];
-	private processing = false;
-
-	enqueue(work: QueuedWork): void {
-		this.queue.push(work);
-		this.processNext();
-	}
-
-	size(): number {
-		return this.queue.length;
-	}
-
-	private async processNext(): Promise<void> {
-		if (this.processing || this.queue.length === 0) return;
-		this.processing = true;
-		const work = this.queue.shift()!;
-		try {
-			await work();
-		} catch (err) {
-			log.logWarning("Queue error", err instanceof Error ? err.message : String(err));
-		}
-		this.processing = false;
-		this.processNext();
-	}
-}
 
 // ============================================================================
 // SlackBot
@@ -469,7 +442,7 @@ export class SlackBot implements ChannelTransport {
 		});
 		slackEvent.channel = sessionChannel;
 		const queue = this.getQueue(sessionChannel);
-		if (queue.size() >= 5) {
+		if (queue.isFull()) {
 			this.postInThread(realChannel, threadTs, "_Too many messages queued. Please wait._");
 		} else {
 			queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
@@ -493,7 +466,7 @@ export class SlackBot implements ChannelTransport {
 		const channelId = `SESSION-${sessionId}`;
 		const queue = this.getQueue(channelId);
 
-		if (queue.size() >= 5) {
+		if (queue.isFull()) {
 			throw new Error("Session message queue is full");
 		}
 
@@ -888,7 +861,7 @@ export class SlackBot implements ChannelTransport {
 			return false;
 		}
 		const queue = this.getQueue(event.channel);
-		if (queue.size() >= 5) {
+		if (queue.isFull()) {
 			log.logWarning(`Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
 			return false;
 		}
@@ -1026,7 +999,7 @@ export class SlackBot implements ChannelTransport {
 						return;
 					case "chat": {
 						const queue = this.getQueue(e.channel);
-						if (queue.size() >= 5) {
+						if (queue.isFull()) {
 							this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
 						} else {
 							queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
@@ -1201,7 +1174,7 @@ export class SlackBot implements ChannelTransport {
 							// Ambient top-level dispatch (the leads recipe): don't post a notice into what's
 							// often an external-facing feed — the message is already in log.jsonl.
 							const queue = this.getQueue(e.channel);
-							if (queue.size() >= 5) {
+							if (queue.isFull()) {
 								log.logWarning(`[${e.channel}] leads queue full, not dispatching: ${slackEvent.text.substring(0, 50)}`);
 							} else {
 								queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
@@ -1209,7 +1182,7 @@ export class SlackBot implements ChannelTransport {
 							return;
 						}
 						const dmQueue = this.getQueue(e.channel);
-						if (dmQueue.size() >= 5) {
+						if (dmQueue.isFull()) {
 							this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
 						} else {
 							dmQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));

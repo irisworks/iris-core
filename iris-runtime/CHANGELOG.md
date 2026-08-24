@@ -24,6 +24,11 @@
 - `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
   both HTTP surfaces that write into a channel dir.
 
+- The per-channel `ChannelQueue` moved from three identical copies (slack.ts,
+  telegram.ts, bridge-transport.ts) to one shared `engine/channel-queue.ts`,
+  with the 5-message overflow convention expressed once as
+  `CHANNEL_QUEUE_LIMIT`/`isFull()`. No behavior change. (#138)
+
 ### Fixed
 
 - `BridgeTransport` now queues per-channel like Slack/Telegram, so two

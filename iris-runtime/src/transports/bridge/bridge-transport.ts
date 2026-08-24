@@ -9,6 +9,7 @@
 // ============================================================================
 
 import * as log from "../../engine/log.js";
+import { ChannelQueue } from "../../engine/channel-queue.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
 	registerPromptProfile,
@@ -37,35 +38,6 @@ export interface BridgeTransportOptions {
 // requestId ⇒ same BRIDGE-{id} channel) dispatch two concurrent runs against
 // the same ChannelState, and both append to the same context.jsonl.
 // ============================================================================
-
-type QueuedWork = () => Promise<void>;
-
-class ChannelQueue {
-	private queue: QueuedWork[] = [];
-	private processing = false;
-
-	enqueue(work: QueuedWork): void {
-		this.queue.push(work);
-		this.processNext();
-	}
-
-	size(): number {
-		return this.queue.length;
-	}
-
-	private async processNext(): Promise<void> {
-		if (this.processing || this.queue.length === 0) return;
-		this.processing = true;
-		const work = this.queue.shift()!;
-		try {
-			await work();
-		} catch (err) {
-			log.logWarning("Queue error", err instanceof Error ? err.message : String(err));
-		}
-		this.processing = false;
-		this.processNext();
-	}
-}
 
 /**
  * A `BRIDGE-{requestId}` channel is engine/bridge.ts's own — the pending HTTP
@@ -122,7 +94,7 @@ export class BridgeTransport implements ChannelTransport {
 
 	enqueueEvent(event: TransportEvent): boolean {
 		const queue = this.getQueue(event.channel);
-		if (queue.size() >= 5) {
+		if (queue.isFull()) {
 			log.logWarning(`[bridge] Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
 			return false;
 		}
@@ -191,7 +163,7 @@ export class BridgeTransport implements ChannelTransport {
 		// handler in api.ts maps the rejection to a 504) instead of registering a
 		// promise that hangs until its 90s timeout while queued work waits.
 		const queue = this.getQueue(channelId);
-		if (queue.size() >= 5) {
+		if (queue.isFull()) {
 			log.logWarning(`[bridge] Session message queue full for ${channelId}, rejecting: ${text.substring(0, 50)}`);
 			throw new Error(`session message queue full for ${channelId}`);
 		}
