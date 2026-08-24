@@ -360,7 +360,7 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 \`\`\`
 
 ## Tools
-- bash: Run shell commands (primary tool). Install packages as needed.
+- bash: Run shell commands (primary tool). Install packages as needed. Commands pass a policy layer: reads of secret files (.env, secret.key, secrets.json.enc, agents.json) and cloud metadata endpoints are refused outright, and destructive commands (rm -rf /, mkfs, dd to devices, terraform destroy, force-pushes to protected branches, system auth edits, systemctl disable iris.service) are blocked until the user explicitly confirms them in chat — ask, end your turn, and re-run only after an affirmative reply.
 - read: Read files
 - write: Create/overwrite files
 - edit: Surgical file edits
@@ -543,8 +543,14 @@ function createRunner(
 	// Create tools — read needs to know up front whether the active model accepts
 	// image input, so it can tell the model an image was skipped instead of
 	// claiming success while pi-ai silently strips the image content downstream.
+	// channelId/channelDir enable the bash policy layer + command audit log (#131).
 	const supportsImageInput = model.input.includes("image");
-	const tools = createIrisTools(executor, { supportsImageInput, workspaceDir: workingDir });
+	const tools = createIrisTools(executor, {
+		supportsImageInput,
+		workspaceDir: workingDir,
+		channelId,
+		channelDir,
+	});
 
 	// pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders)
 	// falls back to echoing the raw config string when the env var it names isn't

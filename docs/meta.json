@@ -11,6 +11,7 @@
 		"read-handlers",
 		"mcp",
 		"secrets",
+		"bash-policy",
 		"observability",
 		"sub-agents",
 		"overlay",
