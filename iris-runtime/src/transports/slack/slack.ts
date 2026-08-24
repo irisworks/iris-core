@@ -123,6 +123,15 @@ export interface SlackEvent {
 	attachments?: Attachment[];
 }
 
+/** The fields we use from a Slack slash-command envelope (`slash_commands`). */
+interface SlashCommandBody {
+	/** The invoked command, slash included (e.g. `/stop`). */
+	command?: string;
+	/** Everything typed after the command. */
+	text?: string;
+	channel_id?: string;
+}
+
 export interface SlackUser {
 	id: string;
 	userName: string;
@@ -418,6 +427,20 @@ export class SlackBot implements ChannelTransport {
 		} else {
 			this.handler.handleReset(channelId, this);
 		}
+	}
+
+	/**
+	 * Execute an "admin" dispatch decision. `decision.channel` is the channel whose
+	 * run the command acts on — for a command sent inside a session thread that's
+	 * `SESSION-<id>`, not the Slack channel it arrived in. Register that session's
+	 * reply route first: after a restart nothing has re-registered it yet, and
+	 * postMessage silently drops status messages for an unrouted `SESSION-` id.
+	 */
+	private runAdminDecision(target: string, cmd: "stop" | "compact" | "reset", origin: string, threadTs?: string): void {
+		if (target.startsWith("SESSION-") && threadTs && !this.sessionRoutes.has(target)) {
+			this.sessionRoutes.set(target, { channel: origin, threadTs });
+		}
+		this.runAdminCommand(target, cmd);
 	}
 
 	/**
@@ -985,7 +1008,7 @@ export class SlackBot implements ChannelTransport {
 					case "ignore":
 						return;
 					case "admin":
-						this.runAdminCommand(e.channel, decision.cmd);
+						this.runAdminDecision(decision.channel, decision.cmd, e.channel, e.thread_ts);
 						return;
 					case "relay-refused":
 						log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
@@ -1158,7 +1181,7 @@ export class SlackBot implements ChannelTransport {
 					case "ignore":
 						return;
 					case "admin":
-						this.runAdminCommand(e.channel, decision.cmd);
+						this.runAdminDecision(decision.channel, decision.cmd, e.channel, e.thread_ts);
 						return;
 					case "relay-refused":
 						log.logWarning(`[${e.channel}] passthrough mode but no url configured`);
@@ -1194,6 +1217,78 @@ export class SlackBot implements ChannelTransport {
 				log.logWarning("[message] handler error", err instanceof Error ? err.message : String(err));
 			} finally {
 				ackOnce();
+			}
+		});
+
+		// Native Slack slash commands (/stop, /compact, /clear, /reset, /verbose).
+		// Only fires for commands the workspace's Slack app actually declares — an
+		// install that never adds them keeps using the bare-word spellings and never
+		// sees this path (see docs/channel-modes.md).
+		//
+		// A slash command is unambiguous and can only be typed deliberately, so it
+		// needs none of the addressed-to-Iris disambiguation the text spellings do.
+		// The refusals are the two containers where the channel id isn't the thing
+		// running: relay (Iris's LLM never runs there) and sessions (runs live per
+		// thread, and a slash command carries no thread).
+		this.socketClient.on("slash_commands", async ({ body, ack }: { body: SlashCommandBody; ack: (response?: unknown) => Promise<void> }) => {
+			// Exactly one ack per envelope, whichever branch (or a throw) gets there first.
+			let acked = false;
+			const ackOnce = async (response?: unknown) => {
+				if (acked) return;
+				acked = true;
+				await ack(response);
+			};
+			try {
+				const channelId = body.channel_id;
+				const command = (body.command ?? "").trim();
+				const args = (body.text ?? "").trim();
+				if (!channelId || !command) return;
+
+				if (this.allowedChannels.size > 0 && !this.allowedChannels.has(channelId)) {
+					await ackOnce({ response_type: "ephemeral", text: "_Iris isn't enabled in this channel._" });
+					return;
+				}
+				const container = this.getDispatchConfig(channelId).container;
+				if (container === "relay") {
+					await ackOnce({
+						response_type: "ephemeral",
+						text: "_This channel forwards to an external endpoint — Iris keeps no context here to control._",
+					});
+					return;
+				}
+				// A sessions channel keeps its runs and context per thread, under
+				// `SESSION-<id>`. Slack sends no thread with a slash command, so there is
+				// no way to tell which session was meant — acting on the channel instead
+				// would abort nothing and clear nothing while reporting success.
+				if (container === "sessions") {
+					await ackOnce({
+						response_type: "ephemeral",
+						text: "_This channel runs one session per thread, and a slash command carries no thread. Reply `stop`, `compact`, or `clear` inside the session's thread instead._",
+					});
+					return;
+				}
+
+				const verboseCmd = parseVerboseCommand(args ? `${command} ${args}` : command);
+				if (verboseCmd) {
+					await ackOnce();
+					this.handler.handleVerboseCommand(channelId, this, verboseCmd);
+					return;
+				}
+				// Any trailing text is ignored: `/stop now` means `/stop`.
+				const adminCmd = parseAdminCommand(command);
+				if (adminCmd) {
+					await ackOnce();
+					this.runAdminCommand(channelId, adminCmd);
+					return;
+				}
+				await ackOnce({
+					response_type: "ephemeral",
+					text: `_Unknown command \`${command}\`. Iris knows \`/stop\`, \`/compact\`, \`/clear\`, and \`/verbose on|off\`._`,
+				});
+			} catch (err) {
+				log.logWarning("[slash_commands] handler error", err instanceof Error ? err.message : String(err));
+			} finally {
+				await ackOnce().catch(() => {});
 			}
 		});
 	}

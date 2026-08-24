@@ -6,11 +6,20 @@
 // `BRIDGE-*` channel — see resolveIfBridgeChannel() — while for a `SESSION-*`
 // channel, responses accumulate in the context and are consumed by session
 // requests (POST /sessions/:id/message) instead.
+//
+// Like Slack/Telegram, SESSION- turns are mirrored to the channel's log.jsonl
+// (#217): injectSessionMessage logs the user message, replaceMessage logs the
+// run's final reply as a bot entry. Without this, API-driven sessions on a
+// bridge-only install had empty history (GET /sessions/:id/history) and
+// nothing to replay into context after a restart.
 // ============================================================================
 
+import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { basename, join } from "path";
 import * as log from "../../engine/log.js";
 import { ChannelQueue } from "../../engine/channel-queue.js";
 import type { ChannelState } from "../../engine/index.js";
+import { resolveChannelDir } from "../../engine/store.js";
 import {
 	registerPromptProfile,
 	type ChannelInfo,
@@ -24,6 +33,8 @@ import {
 export interface BridgeTransportOptions {
 	/** Prompt fragments for bridge runs (currently the Slack fragments, status quo) */
 	promptProfile: TransportPromptProfile;
+	/** Working dir — SESSION- channel dirs (log.jsonl) live here */
+	workingDir: string;
 	/**
 	 * Dispatch an event into the engine (wired in main.ts to engine.handleEvent).
 	 * Returns the run's promise so enqueueEvent's per-channel queue (below) can
@@ -60,11 +71,13 @@ export class BridgeTransport implements ChannelTransport {
 	readonly transportId = "bridge";
 	readonly promptProfile: TransportPromptProfile;
 	readonly stopCommandHint = "say `stop` first";
+	private readonly workingDir: string;
 	private readonly dispatch: BridgeTransportOptions["dispatch"];
 	private readonly queues = new Map<string, ChannelQueue>();
 
 	constructor(options: BridgeTransportOptions) {
 		this.promptProfile = options.promptProfile;
+		this.workingDir = options.workingDir;
 		this.dispatch = options.dispatch;
 		registerPromptProfile(this.promptProfile);
 	}
@@ -136,6 +149,13 @@ export class BridgeTransport implements ChannelTransport {
 				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
 			},
 			replaceMessage: async (text: string) => {
+				// #217: nothing is ever posted for a SESSION- channel, so the run's
+				// final reply must be logged here or the turn leaves no trace in
+				// log.jsonl. Logged once per turn (the final text supersedes the
+				// streaming partials respond() accumulated), matching how Slack/
+				// Telegram record bot entries with `isBot: true`. BRIDGE- requests
+				// stay unlogged — they're ephemeral HTTP round-trips, like Slack.
+				if (event.channel.startsWith("SESSION-")) this.logBotResponse(event.channel, text);
 				await resolveIfBridgeChannel(event.channel, text);
 			},
 			respondInThread: async () => {},
@@ -148,7 +168,7 @@ export class BridgeTransport implements ChannelTransport {
 	}
 
 	// ==========================================================================
-	// SessionInjector surface (required by api.ts)
+	// Session message injection (used by API POST /sessions/:id/message)
 	// ==========================================================================
 
 	async injectSessionMessage(
@@ -169,6 +189,19 @@ export class BridgeTransport implements ChannelTransport {
 		}
 		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const ts = (Date.now() / 1000).toFixed(6);
+
+		// Log user message to session directory (#217), mirroring Slack/Telegram.
+		// `original` is the on-disk name: the API caller uploaded the file itself,
+		// so there is no separate uploader-supplied filename to preserve.
+		this.logToFile(channelId, {
+			date: new Date().toISOString(),
+			ts,
+			user,
+			text,
+			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
+			isBot: false,
+		});
+
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
 		const event = { channel: channelId, user, text, ts, attachments };
 		queue.enqueue(async () => {
@@ -179,5 +212,28 @@ export class BridgeTransport implements ChannelTransport {
 
 	resetSessionContext(_sessionId: string): void {
 		// File-based reset is handled directly in api.ts (context.jsonl wiped)
+	}
+
+	// ==========================================================================
+	// Logging (mirrors Slack/Telegram) — SESSION- turns must reach log.jsonl
+	// ==========================================================================
+
+	private logToFile(channelId: string, entry: object): void {
+		const dir = resolveChannelDir(this.workingDir, channelId);
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+		appendFileSync(join(dir, "log.jsonl"), `${JSON.stringify(entry)}\n`);
+	}
+
+	private logBotResponse(channelId: string, text: string): void {
+		this.logToFile(channelId, {
+			date: new Date().toISOString(),
+			// Same slack-style seconds format injectSessionMessage uses, so one
+			// channel's log.jsonl sorts consistently by ts.
+			ts: (Date.now() / 1000).toFixed(6),
+			user: "bot",
+			text,
+			attachments: [],
+			isBot: true,
+		});
 	}
 }

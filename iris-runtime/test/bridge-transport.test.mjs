@@ -8,15 +8,16 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BridgeTransport } from "../dist/transports/bridge/bridge-transport.js";
 import { startBridgeServer } from "../dist/engine/bridge.js";
 
-function makeTransport() {
+function makeTransport(workingDir = mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-"))) {
 	return new BridgeTransport({
 		promptProfile: { fragments: [] },
+		workingDir,
 		dispatch: () => {},
 	});
 }
@@ -89,6 +90,7 @@ test("BridgeTransport.enqueueEvent serializes concurrent requests on the same ch
 	const order = [];
 	const transport = new BridgeTransport({
 		promptProfile: { fragments: [] },
+		workingDir: mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-")),
 		dispatch: async (event) => {
 			active.add(event.text);
 			maxConcurrent = Math.max(maxConcurrent, active.size);
@@ -114,6 +116,7 @@ test("BridgeTransport.enqueueEvent runs different channels concurrently", async 
 	let maxConcurrent = 0;
 	const transport = new BridgeTransport({
 		promptProfile: { fragments: [] },
+		workingDir: mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-")),
 		dispatch: async (event) => {
 			active.add(event.channel);
 			maxConcurrent = Math.max(maxConcurrent, active.size);
@@ -139,6 +142,7 @@ test("BridgeTransport.injectSessionMessage rejects when the channel queue is ful
 	const gate = new Promise((r) => (release = r));
 	const transport = new BridgeTransport({
 		promptProfile: { fragments: [] },
+		workingDir: mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-")),
 		dispatch: () => gate, // never resolves until `release` — keeps 1 run active + N queued
 	});
 
@@ -155,4 +159,53 @@ test("BridgeTransport.injectSessionMessage rejects when the channel queue is ful
 
 	await assert.rejects(() => transport.injectSessionMessage("full", "test", "hello"), /queue full/);
 	release();
+});
+
+// #217: SESSION- turns driven through the API must reach log.jsonl even on a
+// bridge-only install (no Slack/Telegram transport to do the logging).
+test("BridgeTransport.injectSessionMessage logs the user message to the session's log.jsonl", async () => {
+	const workingDir = mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-"));
+	const transport = makeTransport(workingDir);
+	const { resolveSessionRequest } = await import("../dist/engine/sessions.js");
+
+	const responsePromise = transport.injectSessionMessage("loguser", "tester", "hello session");
+	// Let injectSessionMessage reach its awaited registerSessionRequest() first.
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	// Simulate the engine resolving the run (dispatch is a stub here).
+	assert.ok(resolveSessionRequest("loguser", "fake reply"));
+	await responsePromise;
+
+	const logPath = join(workingDir, "SESSION-loguser", "log.jsonl");
+	assert.ok(existsSync(logPath), "expected SESSION-loguser/log.jsonl to exist");
+	const entry = JSON.parse(readFileSync(logPath, "utf-8").trim());
+	assert.equal(entry.user, "tester");
+	assert.equal(entry.text, "hello session");
+	assert.equal(entry.isBot, false);
+	assert.ok(entry.date);
+	assert.ok(entry.ts);
+});
+
+test("BridgeTransport.replaceMessage on a SESSION- channel logs one bot reply", async () => {
+	const workingDir = mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-"));
+	const transport = makeTransport(workingDir);
+	const ctx = transport.createContext({ channel: "SESSION-botlog", user: "test", text: "hi", ts: "1" }, {});
+
+	await ctx.respond("_→ running bash_", false); // progress marker — never logged
+	await ctx.respond("streaming partial", true); // superseded by the final text
+	await ctx.replaceMessage("final answer");
+
+	const lines = readFileSync(join(workingDir, "SESSION-botlog", "log.jsonl"), "utf-8").trim().split("\n");
+	assert.equal(lines.length, 1, "exactly one bot entry per turn");
+	const entry = JSON.parse(lines[0]);
+	assert.equal(entry.isBot, true);
+	assert.equal(entry.user, "bot");
+	assert.equal(entry.text, "final answer");
+});
+
+test("BridgeTransport.replaceMessage leaves BRIDGE- channels unlogged", async () => {
+	const workingDir = mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-"));
+	const transport = makeTransport(workingDir);
+	const ctx = transport.createContext({ channel: "BRIDGE-nolog", user: "test", text: "hi", ts: "1" }, {});
+	await ctx.replaceMessage("sub-agent reply");
+	assert.ok(!existsSync(join(workingDir, "BRIDGE-nolog")), "BRIDGE- round-trips stay ephemeral");
 });

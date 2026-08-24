@@ -90,9 +90,9 @@ Stream lines are:
 
 ```jsonl
 {"type":"accepted","requestId":"slack-C123","protocol":1}
-{"type":"status","text":"→ running bash"}
+{"type":"status","text":"→ running bash","seq":1}
 {"type":"heartbeat"}
-{"type":"final","text":"the answer","requestId":"slack-C123"}
+{"type":"final","text":"the answer","requestId":"slack-C123","seq":2}
 ```
 
 Exactly one terminal line closes the stream — `final`, or
@@ -120,10 +120,27 @@ keeps making progress, bounded by:
 | `IRIS_BRIDGE_HEARTBEAT_MS` | `15000` | Keepalive cadence on a streaming response. |
 | `IRIS_BRIDGE_LEGACY_TIMEOUT_MS` | `240000` | Ceiling for non-streaming requests. Keep it under ~300s. |
 | `IRIS_BRIDGE_STATUS_THROTTLE_MS` | `3000` | Minimum gap between chat edits while forwarding progress. |
+| `IRIS_BRIDGE_JOB_RETENTION_MS` | `86400000` | How long a finished request's durable job log is kept before being swept (`0` keeps it forever). |
+| `IRIS_BRIDGE_JOB_POLL_MS` | `2000` | How often a recovering caller re-polls the job log after its stream broke. |
 
-Two caveats worth knowing. The open connection *is* the job handle: if it drops, or
-if Iris restarts mid-request, the reply is lost even though the sub-agent finished
-the work. And behind a response-buffering proxy the stream degrades to arriving all
+**The reply survives the connection.** The stream is the live path, not the
+only one: every `status`, `final`, and `error` event is also appended to a
+durable per-request log at `{workingDir}/bridge-jobs/{requestId}.jsonl`, one
+JSON line per event with a monotonic `seq`. The bridge server serves that log
+back via `GET /bridge/jobs/{requestId}?since={seq}` — events after `seq` plus
+a `done` flag — so a caller whose connection dropped mid-run resumes from its
+last seen `seq` and still gets the reply; `callAgentBridge()` does exactly
+that automatically (poll-to-recover under the live stream). A disconnect is
+deliberately *not* recorded as a failure: the run keeps going and the reply
+stays recoverable until the retention sweep removes the log. Two limits
+remain by design: recovery gives up when no new event arrives for
+`IRIS_BRIDGE_IDLE_TIMEOUT_MS` (the job log carries statuses but not
+heartbeats, so silence still means wedged) or when the overall bridge
+deadline passes; and if Iris herself restarts mid-request her side of the
+call is gone from memory, so nobody re-issues the poll automatically — the
+reply is still in the sub-agent's job log and can be fetched by hand with
+`curl "$BRIDGE_URL/bridge/jobs/$REQUEST_ID"`.
+And behind a response-buffering proxy the stream degrades to arriving all
 at once — the reply still lands, but the progress and liveness signals don't.
 `X-Accel-Buffering: no` is set for nginx; the default loopback topology is
 unaffected.
@@ -249,7 +266,8 @@ the read-modify-write and one substitution can get silently clobbered back to
 its placeholder. And when verifying a freshly spawned agent, its `/health`
 lives on the internal API port (`IRIS_API_PORT`, `BRIDGE_PORT+100` for
 service mode), not the bridge port — the bridge server only implements
-`POST /bridge` and 404s on anything else, including `GET /health`.
+`POST /bridge` and its recovery endpoint `GET /bridge/jobs/:id`, and 404s on
+anything else, including `GET /health`.
 
 ## Internal HTTP API
 
@@ -278,6 +296,12 @@ The runtime exposes an internal API (default `127.0.0.1:3000`, always on — see
 Sessions are the backbone of `thread`/`interactive-thread`
 [channel modes](channel-modes.md) and of human-in-the-loop workflows (reset +
 inject-turn let a human take over a conversation seamlessly).
+
+Every turn is durably logged: the injected user message and Iris's final reply
+are both appended to the session's `SESSION-<id>/log.jsonl`, no matter which
+transport served the turn (Slack, Telegram, or a headless bridge/web install).
+This is what `GET /sessions/:id/history` returns and what gets replayed into
+context after a restart.
 
 ### Driving a session from your own application
 

@@ -10,7 +10,7 @@ Link core, don't fork it — unless you need to change core's own code. An
 pinned as a submodule to a release tag.
 
 Linking works because the extension surface is read from the workspace at
-runtime: skills, sub-agents, and config hot-reload through symlinks, so your
+runtime: skills, sub-agents, read handlers, and config hot-reload through symlinks, so your
 behavior lives outside `core/` and a core upgrade stays a one-line submodule
 bump. The one thing linking can't give you is editing core code — see
 [When you need core code changes](#when-you-need-core-code-changes).
@@ -32,6 +32,7 @@ iris-yourcompany/
 ├── overlay/
 │   ├── agents/<name>/       # your sub-agents — symlinked into the workspace
 │   ├── skills/<name>/       # your skills — symlinked; override core skills on name collision
+│   ├── read-handlers/<name>/ # your file-format handlers — same override rule as skills
 │   └── data/                # CONSTITUTION.md, MEMORY.md seeds, models.json, channels.json
 ├── terraform/               # install-specific infra (if any)
 ├── .env.example             # committed template; the real .env.yourcompany is not
@@ -58,7 +59,8 @@ itself or to any repo that resolves as public — Iris's commits carry
 `MEMORY.md` and skill content, which must stay private.
 
 The wrapper bootstrap sets `REPO_DIR`, calls `core/bootstrap.sh`, then symlinks
-`overlay/agents/*` and `overlay/skills/*` into the workspace. Hot reload works
+`overlay/agents/*`, `overlay/skills/*`, and `overlay/read-handlers/*` into the
+workspace. Hot reload works
 through symlinks, so overlay skills behave exactly like core skills.
 
 ## Rules that keep this clean
@@ -77,10 +79,11 @@ through symlinks, so overlay skills behave exactly like core skills.
 
 ## What belongs in the overlay vs. core
 
-Skills, sub-agents, and config (`channels.json`, `models.json`, `mcp.json`,
-`CONSTITUTION.md`) are overlay content by design — they're read from the
-workspace at runtime and hot-reload without a core change, so your business
-logic and per-client behavior never touches `core/`.
+Skills, sub-agents, [read handlers](read-handlers.md), and config
+(`channels.json`, `models.json`, `mcp.json`, `CONSTITUTION.md`) are overlay
+content by design — they're read from the workspace at runtime and
+hot-reload without a core change, so your business logic, per-client
+behavior, and file-format support never touches `core/`.
 
 **Chat transports are the exception.** A `ChannelTransport`
 (`src/transport/types.ts` — see [Writing a Transport](writing-a-transport.md)

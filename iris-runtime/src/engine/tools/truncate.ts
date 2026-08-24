@@ -6,6 +6,12 @@
  * - Byte limit (default: 50KB)
  *
  * Never returns partial lines (except bash tail truncation edge case).
+ *
+ * For JSON output, `compressJsonStructure` offers a schema-aware alternative
+ * to blind head/tail truncation: instead of chopping raw bytes, it emits a
+ * compact structural summary (keys/shape plus a handful of sample values) so
+ * the model still sees the shape of the data. Callers should try it first and
+ * fall back to `truncateHead`/`truncateTail` when it returns null.
  */
 
 export const DEFAULT_MAX_LINES = 2000;
@@ -16,8 +22,8 @@ export interface TruncationResult {
 	content: string;
 	/** Whether truncation occurred */
 	truncated: boolean;
-	/** Which limit was hit: "lines", "bytes", or null if not truncated */
-	truncatedBy: "lines" | "bytes" | null;
+	/** Which limit was hit: "lines", "bytes", "structure" (JSON structural summary), or null if not truncated */
+	truncatedBy: "lines" | "bytes" | "structure" | null;
 	/** Total number of lines in the original content */
 	totalLines: number;
 	/** Total number of bytes in the original content */
@@ -210,6 +216,144 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 		outputLines: outputLinesArr.length,
 		outputBytes: finalOutputBytes,
 		lastLinePartial,
+		firstLineExceedsLimit: false,
+	};
+}
+
+const JSON_SAMPLE_ITEMS = 3;
+const JSON_SAMPLE_KEYS = 50;
+const JSON_MAX_STRING_LENGTH = 200;
+const JSON_MAX_DEPTH = 6;
+// Hard ceiling on payload size before we attempt a synchronous JSON.parse.
+// Anything larger falls back to cheap byte truncation instead of potentially
+// blocking the event loop parsing a pathological payload.
+const JSON_PARSE_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Cut a string to at most `max` code points without splitting surrogate pairs. */
+function sliceCodePoints(value: string, max: number): string {
+	let out = "";
+	for (const char of value) {
+		if (out.length + char.length > max) break;
+		out += char;
+	}
+	return out;
+}
+
+/**
+ * Recursively reduce a parsed JSON value to a compact structural summary:
+ * arrays keep only a handful of sample elements (plus their true length),
+ * objects with very many keys keep only a handful of sample keys, long
+ * strings are cut short, and depth is capped. This preserves the shape and
+ * representative data of the JSON without reproducing all of it.
+ */
+function summarizeJsonValue(value: unknown, depth: number): unknown {
+	if (typeof value === "string") {
+		return value.length > JSON_MAX_STRING_LENGTH
+			? `${sliceCodePoints(value, JSON_MAX_STRING_LENGTH)}… (${value.length} chars total)`
+			: value;
+	}
+
+	if (value === null || typeof value !== "object") {
+		return value;
+	}
+
+	if (depth >= JSON_MAX_DEPTH) {
+		return Array.isArray(value) ? `[Array(${value.length})]` : `{Object(${Object.keys(value).length} keys)}`;
+	}
+
+	if (Array.isArray(value)) {
+		const sample = value.slice(0, JSON_SAMPLE_ITEMS).map((item) => summarizeJsonValue(item, depth + 1));
+		if (value.length <= JSON_SAMPLE_ITEMS) {
+			return sample;
+		}
+		return {
+			_arrayLength: value.length,
+			_sampleItems: sample,
+			_note: `showing ${sample.length} of ${value.length} items`,
+		};
+	}
+
+	const entries = Object.entries(value as Record<string, unknown>);
+	const sampleEntries = entries.slice(0, JSON_SAMPLE_KEYS);
+	const result: Record<string, unknown> = {};
+	for (const [key, val] of sampleEntries) {
+		result[key] = summarizeJsonValue(val, depth + 1);
+	}
+	if (entries.length > JSON_SAMPLE_KEYS) {
+		// Avoid clobbering a real key from the source object that happens to be
+		// named "_note" (or "_note2", ...) - keep incrementing until we find a
+		// name that isn't already one of the sampled keys.
+		let noteKey = "_note";
+		for (let i = 2; noteKey in result; i++) {
+			noteKey = `_note${i}`;
+		}
+		result[noteKey] = `showing ${sampleEntries.length} of ${entries.length} keys`;
+	}
+	return result;
+}
+
+/**
+ * If `content` is a JSON object/array that exceeds the line/byte limits,
+ * produce a compact structural summary instead of chopping raw bytes -
+ * preserving keys/shape plus a handful of sample values so the model still
+ * sees representative data. Returns null when content isn't within limits
+ * that warrant compression, isn't JSON, or doesn't parse as an object/array
+ * (compressing a bare string/number would lose information for no benefit).
+ */
+export function compressJsonStructure(content: string, options: TruncationOptions = {}): TruncationResult | null {
+	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+
+	const totalBytes = Buffer.byteLength(content, "utf-8");
+	const totalLines = content.split("\n").length;
+
+	if (totalLines <= maxLines && totalBytes <= maxBytes) {
+		return null;
+	}
+
+	// Don't attempt to parse pathologically large payloads - a synchronous
+	// JSON.parse of hundreds of MB would block the event loop. Cheap byte
+	// truncation is the right fallback at that scale.
+	if (totalBytes > JSON_PARSE_MAX_BYTES) {
+		return null;
+	}
+
+	const trimmed = content.trim();
+	if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) {
+		return null;
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+	if (parsed === null || typeof parsed !== "object") {
+		return null;
+	}
+
+	const summary = summarizeJsonValue(parsed, 0);
+	let summaryText = JSON.stringify(summary, null, 2);
+
+	// Safety net: pathological shapes (e.g. many wide top-level keys) could
+	// still exceed the byte limit even after sampling. Fall back to a hard
+	// byte truncation of the summary itself so output is always bounded.
+	if (Buffer.byteLength(summaryText, "utf-8") > maxBytes) {
+		summaryText = truncateHead(summaryText, { maxLines: Number.POSITIVE_INFINITY, maxBytes }).content;
+	}
+
+	const outputBytes = Buffer.byteLength(summaryText, "utf-8");
+
+	return {
+		content: summaryText,
+		truncated: true,
+		truncatedBy: "structure",
+		totalLines,
+		totalBytes,
+		outputLines: summaryText.split("\n").length,
+		outputBytes,
+		lastLinePartial: false,
 		firstLineExceedsLimit: false,
 	};
 }

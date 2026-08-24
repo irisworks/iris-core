@@ -1,5 +1,5 @@
-import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import { getModel, type ImageContent } from "@mariozechner/pi-ai";
+import { Agent, type AgentEvent } from "@earendil-works/pi-agent-core";
+import { getModel, type ImageContent } from "@earendil-works/pi-ai";
 import {
 	AgentSession,
 	AuthStorage,
@@ -11,7 +11,7 @@ import {
 	type ResourceLoader,
 	SessionManager,
 	type Skill,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -544,7 +544,7 @@ function createRunner(
 	// image input, so it can tell the model an image was skipped instead of
 	// claiming success while pi-ai silently strips the image content downstream.
 	const supportsImageInput = model.input.includes("image");
-	const tools = createIrisTools(executor, { supportsImageInput });
+	const tools = createIrisTools(executor, { supportsImageInput, workspaceDir: workingDir });
 
 	// pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders)
 	// falls back to echoing the raw config string when the env var it names isn't

@@ -136,7 +136,8 @@ curl -s http://127.0.0.1:$((<port>+100))/health
 `/health` is served by the internal API (`engine/api.ts`), which listens on
 `IRIS_API_PORT` (`BRIDGE_PORT+100`, set by the template) — not `<port>`
 itself. `<port>` is the bridge server, which only implements `POST /bridge`
-and 404s on anything else, including `GET /health`.
+and its recovery endpoint `GET /bridge/jobs/:id`, and 404s on anything else,
+including `GET /health`.
 
 Done. `@<name>` works in the next message.
 

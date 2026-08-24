@@ -1,0 +1,6 @@
+{
+	"name": "pdf-text",
+	"mimeTypes": ["application/pdf"],
+	"command": "pdftotext -layout {path} -",
+	"timeoutSeconds": 30
+}

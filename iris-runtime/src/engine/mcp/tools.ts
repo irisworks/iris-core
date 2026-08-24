@@ -9,12 +9,12 @@
  * the whole server.
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import AjvModule from "ajv";
 import { createHash } from "crypto";
-import { truncateTail } from "../tools/truncate.js";
+import { compressJsonStructure, truncateTail } from "../tools/truncate.js";
 import type { McpServerConfig } from "./config.js";
 
 // ajv ships CJS with a default-exported class; under Node16 ESM interop the
@@ -97,7 +97,11 @@ export function mapMcpContent(blocks: McpContentBlock[] | undefined): (TextConte
 	}
 
 	if (textParts.length > 0) {
-		content.unshift({ type: "text", text: truncateTail(textParts.join("\n")).content });
+		const joined = textParts.join("\n");
+		// Many MCP servers return JSON payloads (API responses, query results).
+		// Prefer a schema-aware structural summary over blind tail truncation so
+		// the model still sees keys/shape and sample values.
+		content.unshift({ type: "text", text: (compressJsonStructure(joined) ?? truncateTail(joined)).content });
 	}
 	if (content.length === 0) {
 		content.push({ type: "text", text: "(empty result)" });

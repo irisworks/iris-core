@@ -6,11 +6,16 @@
  * `GET /api/public/sessions/:sessionId` without any other correlation key.
  *
  * Design constraints:
- * - Dependency-free: talks to the public ingestion API over `fetch`, no SDK.
+ * - Dependency-free: talks to the OTel ingestion API over `fetch`, no SDK.
  * - Opt-in: unconfigured (missing keys) means every entry point is a no-op.
  * - Never fails a run: all public methods swallow their own errors. Tracing is
  *   observability, not business logic — a broken Langfuse must not surface to
  *   the user or abort a turn.
+ *
+ * Transport: OTLP/HTTP JSON → POST /api/public/otel/v1/traces. This is the
+ * path the official langfuse-js SDK uses and the only one that accepts the
+ * full observation type set (TOOL, AGENT, etc.). The deprecated REST batch
+ * endpoint (/api/public/ingestion) is intentionally avoided.
  */
 
 import { randomUUID } from "crypto";
@@ -90,12 +95,102 @@ export interface TraceEnd {
 
 type FetchImpl = typeof fetch;
 
-interface IngestionEvent {
-	id: string;
-	type: string;
-	timestamp: string;
-	body: Record<string, unknown>;
+// -- OTLP/HTTP JSON wire types -----------------------------------------------
+
+interface OtelAttrValue {
+	stringValue?: string;
+	intValue?: string;
+	doubleValue?: number;
+	boolValue?: boolean;
+	arrayValue?: { values: OtelAttrValue[] };
 }
+
+interface OtelAttr {
+	key: string;
+	value: OtelAttrValue;
+}
+
+interface OtelSpan {
+	traceId: string;
+	spanId: string;
+	parentSpanId?: string;
+	name: string;
+	kind: number;
+	startTimeUnixNano: string;
+	endTimeUnixNano: string;
+	attributes: OtelAttr[];
+	status: Record<string, unknown>;
+}
+
+// -- OTLP helpers ------------------------------------------------------------
+
+/** Strip UUID hyphens → 32 lowercase hex chars for OTel traceId (16 bytes). */
+function traceIdHex(uuid: string): string {
+	return uuid.replace(/-/g, "");
+}
+
+/** First 16 hex chars of a stripped UUID → OTel spanId (8 bytes). */
+function spanIdHex(uuid: string): string {
+	return uuid.replace(/-/g, "").slice(0, 16);
+}
+
+/** Date → nanoseconds-since-epoch string (avoids Number precision loss). */
+function toNano(date: Date): string {
+	return (BigInt(date.getTime()) * 1_000_000n).toString();
+}
+
+function strAttr(key: string, value: string): OtelAttr {
+	return { key, value: { stringValue: value } };
+}
+
+function arrAttr(key: string, values: string[]): OtelAttr {
+	return { key, value: { arrayValue: { values: values.map((v) => ({ stringValue: v })) } } };
+}
+
+/**
+ * Serialize a value to JSON, then wrap as a string OTel attribute.
+ * Langfuse expects input/output/usage_details/cost_details as JSON strings.
+ * Returns undefined if the value is undefined (so callers can skip the attr).
+ */
+function jsonStrAttr(key: string, value: unknown): OtelAttr | undefined {
+	if (value === undefined) return undefined;
+	try {
+		return strAttr(key, JSON.stringify(value));
+	} catch {
+		return strAttr(key, '"[unserializable]"');
+	}
+}
+
+// -- Payload clipping --------------------------------------------------------
+
+/** Cap payload size — a 200k-char tool result has no business in a trace. */
+const MAX_FIELD_CHARS = 20000;
+
+function clipString(value: string): string {
+	return value.length > MAX_FIELD_CHARS ? `${value.slice(0, MAX_FIELD_CHARS)}… (truncated)` : value;
+}
+
+/**
+ * Cap a payload field. Strings truncate directly; anything structured is sized
+ * by its serialized form, because tool arguments arrive as objects and a single
+ * oversized member (a `Write` call's `content`, say) would otherwise sail past
+ * the cap. Oversized structures degrade to a truncated JSON string rather than
+ * being dropped — a clipped view beats none. Unserializable values (circular
+ * references) are replaced with a marker.
+ */
+function clip(value: unknown): unknown {
+	if (typeof value === "string") return clipString(value);
+	if (value === null || value === undefined || typeof value === "number" || typeof value === "boolean") return value;
+	let serialized: string;
+	try {
+		serialized = JSON.stringify(value) ?? "";
+	} catch {
+		return "[unserializable]";
+	}
+	return serialized.length > MAX_FIELD_CHARS ? clipString(serialized) : value;
+}
+
+// ---------------------------------------------------------------------------
 
 /**
  * Strip the `SESSION-` channel prefix so the Langfuse `sessionId` is the bare
@@ -131,43 +226,19 @@ export function langfuseConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Lan
 	};
 }
 
-/** Cap payload size — a 200k-char tool result has no business in a trace. */
-const MAX_FIELD_CHARS = 20000;
-
-function clipString(value: string): string {
-	return value.length > MAX_FIELD_CHARS ? `${value.slice(0, MAX_FIELD_CHARS)}… (truncated)` : value;
-}
-
 /**
- * Cap a payload field. Strings truncate directly; anything structured is sized
- * by its serialized form, because tool arguments arrive as objects and a single
- * oversized member (a `Write` call's `content`, say) would otherwise sail past
- * the cap. Oversized structures degrade to a truncated JSON string rather than
- * being dropped — a clipped view beats none. Unserializable values (circular
- * references) are replaced with a marker.
- */
-function clip(value: unknown): unknown {
-	if (typeof value === "string") return clipString(value);
-	if (value === null || value === undefined || typeof value === "number" || typeof value === "boolean") return value;
-	let serialized: string;
-	try {
-		serialized = JSON.stringify(value) ?? "";
-	} catch {
-		return "[unserializable]";
-	}
-	return serialized.length > MAX_FIELD_CHARS ? clipString(serialized) : value;
-}
-
-/**
- * One in-flight run trace. Records are buffered and shipped by `flush()`; the
- * trace body itself is re-sent on flush (Langfuse upserts by id) so the final
- * output/stop reason land on the same trace the observations point at.
+ * One in-flight run trace. Observations are buffered as OTel child spans and
+ * shipped by `flush()`; the root span (representing the trace) is rebuilt on
+ * each flush so the final output/stop reason land correctly (Langfuse upserts
+ * by traceId).
  */
 export class LangfuseTrace {
 	readonly traceId = randomUUID();
 	readonly sessionId: string;
+	private readonly _traceIdHex: string;
+	private readonly rootSpanId: string;
 	private readonly startedAt = new Date();
-	private readonly events: IngestionEvent[] = [];
+	private readonly childSpans: OtelSpan[] = [];
 	private ended?: TraceEnd;
 
 	constructor(
@@ -175,6 +246,8 @@ export class LangfuseTrace {
 		private readonly start: TraceStart,
 	) {
 		this.sessionId = start.sessionId;
+		this._traceIdHex = traceIdHex(this.traceId);
+		this.rootSpanId = spanIdHex(randomUUID());
 	}
 
 	/** Langfuse UI deep link for this trace (id-only route, resolves the project). */
@@ -184,37 +257,46 @@ export class LangfuseTrace {
 
 	recordGeneration(record: GenerationRecord): void {
 		try {
-			const usageDetails: Record<string, number> | undefined = record.usage
-				? {
-						input: record.usage.input,
-						output: record.usage.output,
-						cache_read_input_tokens: record.usage.cacheRead,
-						cache_creation_input_tokens: record.usage.cacheWrite,
-						total: record.usage.input + record.usage.output + record.usage.cacheRead + record.usage.cacheWrite,
-					}
-				: undefined;
-			const costDetails: Record<string, number> | undefined = record.usage
-				? {
-						input: record.usage.cost.input + record.usage.cost.cacheRead + record.usage.cost.cacheWrite,
-						output: record.usage.cost.output,
-						total: record.usage.cost.total,
-					}
-				: undefined;
-			this.push("generation-create", {
-				id: randomUUID(),
-				traceId: this.traceId,
-				name: record.name ?? "llm-call",
-				model: record.model ?? this.start.model,
-				startTime: record.startTime.toISOString(),
-				endTime: record.endTime.toISOString(),
-				input: this.io(record.input),
-				output: this.io(record.output),
-				usageDetails,
-				costDetails,
-				level: record.errorMessage ? "ERROR" : "DEFAULT",
-				statusMessage: record.errorMessage,
-				environment: this.client.config.environment,
-			});
+			const attrs: OtelAttr[] = [
+				strAttr("langfuse.observation.type", "generation"),
+				strAttr("langfuse.observation.level", record.errorMessage ? "ERROR" : "DEFAULT"),
+			];
+			const model = record.model ?? this.start.model;
+			if (model) attrs.push(strAttr("langfuse.observation.model.name", model));
+
+			const ioInput = jsonStrAttr("langfuse.observation.input", this.io(record.input));
+			if (ioInput) attrs.push(ioInput);
+			const ioOutput = jsonStrAttr("langfuse.observation.output", this.io(record.output));
+			if (ioOutput) attrs.push(ioOutput);
+
+			if (record.usage) {
+				attrs.push(
+					strAttr(
+						"langfuse.observation.usage_details",
+						JSON.stringify({
+							input: record.usage.input,
+							output: record.usage.output,
+							cache_read_input_tokens: record.usage.cacheRead,
+							cache_creation_input_tokens: record.usage.cacheWrite,
+							total: record.usage.input + record.usage.output + record.usage.cacheRead + record.usage.cacheWrite,
+						}),
+					),
+				);
+				attrs.push(
+					strAttr(
+						"langfuse.observation.cost_details",
+						JSON.stringify({
+							input: record.usage.cost.input + record.usage.cost.cacheRead + record.usage.cost.cacheWrite,
+							output: record.usage.cost.output,
+							total: record.usage.cost.total,
+						}),
+					),
+				);
+			}
+			if (record.errorMessage) attrs.push(strAttr("langfuse.observation.status_message", record.errorMessage));
+			if (this.client.config.environment) attrs.push(strAttr("langfuse.environment", this.client.config.environment));
+
+			this.pushChild(record.name ?? "llm-call", record.startTime, record.endTime, attrs);
 		} catch {
 			// Tracing must never break a run.
 		}
@@ -222,18 +304,17 @@ export class LangfuseTrace {
 
 	recordTool(record: ToolRecord): void {
 		try {
-			this.push("observation-create", {
-				id: randomUUID(),
-				traceId: this.traceId,
-				type: "TOOL",
-				name: record.name,
-				startTime: record.startTime.toISOString(),
-				endTime: record.endTime.toISOString(),
-				input: this.io(record.input),
-				output: this.io(record.output),
-				level: record.isError ? "ERROR" : "DEFAULT",
-				environment: this.client.config.environment,
-			});
+			const attrs: OtelAttr[] = [
+				strAttr("langfuse.observation.type", "tool"),
+				strAttr("langfuse.observation.level", record.isError ? "ERROR" : "DEFAULT"),
+			];
+			const ioInput = jsonStrAttr("langfuse.observation.input", this.io(record.input));
+			if (ioInput) attrs.push(ioInput);
+			const ioOutput = jsonStrAttr("langfuse.observation.output", this.io(record.output));
+			if (ioOutput) attrs.push(ioOutput);
+			if (this.client.config.environment) attrs.push(strAttr("langfuse.environment", this.client.config.environment));
+
+			this.pushChild(record.name, record.startTime, record.endTime, attrs);
 		} catch {
 			// Tracing must never break a run.
 		}
@@ -246,57 +327,69 @@ export class LangfuseTrace {
 	/** Ship everything buffered so far. Resolves even when Langfuse is down. */
 	async flush(): Promise<void> {
 		try {
-			const batch = [this.traceEvent(), ...this.events];
-			this.events.length = 0;
-			await this.client.send(batch);
+			const spans = [this.rootSpan(), ...this.childSpans];
+			this.childSpans.length = 0;
+			await this.client.send(spans);
 		} catch {
 			// send() already logs; nothing here may throw.
 		}
 	}
 
-	private traceEvent(): IngestionEvent {
+	private rootSpan(): OtelSpan {
 		const usage = this.ended?.usage;
+		const tags = [
+			"iris",
+			...(this.start.transportId ? [`transport:${this.start.transportId}`] : []),
+			...(this.start.tags ?? []),
+		];
+
+		const attrs: OtelAttr[] = [
+			strAttr("langfuse.session.id", this.sessionId),
+			strAttr("langfuse.trace.name", this.start.name ?? "iris-run"),
+			arrAttr("langfuse.trace.tags", tags),
+			strAttr("langfuse.trace.metadata.source", "iris-runtime"),
+			strAttr("langfuse.trace.metadata.channelId", this.start.channelId),
+			strAttr("langfuse.trace.metadata.sessionId", this.sessionId),
+		];
+
+		if (this.start.userId) attrs.push(strAttr("langfuse.user.id", this.start.userId));
+		if (this.client.config.environment) attrs.push(strAttr("langfuse.environment", this.client.config.environment));
+		if (this.client.config.release) attrs.push(strAttr("langfuse.release", this.client.config.release));
+		if (this.start.provider) attrs.push(strAttr("langfuse.trace.metadata.provider", this.start.provider));
+		if (this.start.model) attrs.push(strAttr("langfuse.trace.metadata.model", this.start.model));
+		if (this.start.transportId) attrs.push(strAttr("langfuse.trace.metadata.transportId", this.start.transportId));
+		if (this.ended?.stopReason) attrs.push(strAttr("langfuse.trace.metadata.stopReason", this.ended.stopReason));
+		if (this.ended?.errorMessage) attrs.push(strAttr("langfuse.trace.metadata.errorMessage", this.ended.errorMessage));
+
+		if (usage) {
+			attrs.push(strAttr("langfuse.trace.metadata.totalCostUsd", String(usage.cost.total)));
+			attrs.push(strAttr("langfuse.trace.metadata.inputTokens", String(usage.input)));
+			attrs.push(strAttr("langfuse.trace.metadata.outputTokens", String(usage.output)));
+			attrs.push(strAttr("langfuse.trace.metadata.cacheReadTokens", String(usage.cacheRead)));
+			attrs.push(strAttr("langfuse.trace.metadata.cacheWriteTokens", String(usage.cacheWrite)));
+		}
+
+		for (const [k, v] of Object.entries(this.start.metadata ?? {})) {
+			if (v !== undefined && v !== null) attrs.push(strAttr(`langfuse.trace.metadata.${k}`, String(v)));
+		}
+		for (const [k, v] of Object.entries(this.ended?.metadata ?? {})) {
+			if (v !== undefined && v !== null) attrs.push(strAttr(`langfuse.trace.metadata.${k}`, String(v)));
+		}
+
+		const ioInput = jsonStrAttr("langfuse.trace.input", this.io(this.start.input));
+		if (ioInput) attrs.push(ioInput);
+		const ioOutput = jsonStrAttr("langfuse.trace.output", this.io(this.ended?.output));
+		if (ioOutput) attrs.push(ioOutput);
+
 		return {
-			id: randomUUID(),
-			type: "trace-create",
-			timestamp: new Date().toISOString(),
-			body: {
-				id: this.traceId,
-				name: this.start.name ?? "iris-run",
-				sessionId: this.sessionId,
-				userId: this.start.userId,
-				timestamp: this.startedAt.toISOString(),
-				input: this.io(this.start.input),
-				output: this.io(this.ended?.output),
-				release: this.client.config.release,
-				environment: this.client.config.environment,
-				tags: [
-					"iris",
-					...(this.start.transportId ? [`transport:${this.start.transportId}`] : []),
-					...(this.start.tags ?? []),
-				],
-				metadata: {
-					source: "iris-runtime",
-					channelId: this.start.channelId,
-					sessionId: this.sessionId,
-					provider: this.start.provider,
-					model: this.start.model,
-					transportId: this.start.transportId,
-					stopReason: this.ended?.stopReason,
-					errorMessage: this.ended?.errorMessage,
-					...(usage
-						? {
-								totalCostUsd: usage.cost.total,
-								inputTokens: usage.input,
-								outputTokens: usage.output,
-								cacheReadTokens: usage.cacheRead,
-								cacheWriteTokens: usage.cacheWrite,
-							}
-						: {}),
-					...this.start.metadata,
-					...this.ended?.metadata,
-				},
-			},
+			traceId: this._traceIdHex,
+			spanId: this.rootSpanId,
+			name: this.start.name ?? "iris-run",
+			kind: 1,
+			startTimeUnixNano: toNano(this.startedAt),
+			endTimeUnixNano: toNano(new Date()),
+			attributes: attrs,
+			status: {},
 		};
 	}
 
@@ -308,49 +401,58 @@ export class LangfuseTrace {
 		return this.client.config.captureIo ? clip(value) : undefined;
 	}
 
-	private push(type: string, body: Record<string, unknown>): void {
-		this.events.push({ id: randomUUID(), type, timestamp: new Date().toISOString(), body });
+	private pushChild(name: string, startTime: Date, endTime: Date, attributes: OtelAttr[]): void {
+		this.childSpans.push({
+			traceId: this._traceIdHex,
+			spanId: spanIdHex(randomUUID()),
+			parentSpanId: this.rootSpanId,
+			name,
+			kind: 1,
+			startTimeUnixNano: toNano(startTime),
+			endTimeUnixNano: toNano(endTime),
+			attributes,
+			status: {},
+		});
 	}
 }
 
 /**
- * Per-request body budget. The ingestion endpoint caps request size server-side
- * (Langfuse Cloud rejects bodies over ~3.5 MB with HTTP 413), so a turn with
- * many tool calls has to be split — otherwise the single request carrying the
- * whole trace is rejected and nothing at all is recorded.
+ * Per-request body budget. The ingestion endpoint caps request size server-side,
+ * so a turn with many tool calls has to be split — otherwise the single request
+ * carrying the whole trace is rejected and nothing at all is recorded.
  */
 const MAX_BATCH_BYTES = 2_500_000;
 
 /**
- * Split a batch into sub-budget chunks. The trace event leads the batch, so it
- * always lands in the first chunk. An event larger than the budget on its own
+ * Split spans into sub-budget chunks. The root span leads the batch so it
+ * always lands in the first chunk. A span larger than the budget on its own
  * still ships alone — the server may reject that one, but it no longer takes
  * the rest of the trace with it.
  */
-function chunkBatch(batch: IngestionEvent[]): IngestionEvent[][] {
-	const chunks: IngestionEvent[][] = [];
-	let current: IngestionEvent[] = [];
+function chunkSpans(spans: OtelSpan[]): OtelSpan[][] {
+	const chunks: OtelSpan[][] = [];
+	let current: OtelSpan[] = [];
 	let bytes = 0;
-	for (const event of batch) {
+	for (const span of spans) {
 		let size: number;
 		try {
-			size = Buffer.byteLength(JSON.stringify(event));
+			size = Buffer.byteLength(JSON.stringify(span));
 		} catch {
-			continue; // unserializable event — skipping it beats failing the batch
+			continue; // unserializable span — skipping it beats failing the batch
 		}
 		if (current.length > 0 && bytes + size > MAX_BATCH_BYTES) {
 			chunks.push(current);
 			current = [];
 			bytes = 0;
 		}
-		current.push(event);
+		current.push(span);
 		bytes += size;
 	}
 	if (current.length > 0) chunks.push(current);
 	return chunks;
 }
 
-/** Thin ingestion-API client. Failures are logged once per streak, never thrown. */
+/** Thin OTel ingestion client. Failures are logged once per streak, never thrown. */
 export class LangfuseClient {
 	private failureStreak = 0;
 
@@ -364,27 +466,37 @@ export class LangfuseClient {
 	}
 
 	/**
-	 * Ship a batch, split across as many requests as the size cap needs. A long
-	 * turn's observations add up fast, and one oversized request would take the
-	 * whole trace down with it (see MAX_BATCH_BYTES).
+	 * Ship a batch of spans, split across as many requests as the size cap needs.
 	 */
-	async send(batch: IngestionEvent[]): Promise<void> {
-		for (const chunk of chunkBatch(batch)) {
+	async send(spans: OtelSpan[]): Promise<void> {
+		for (const chunk of chunkSpans(spans)) {
 			await this.post(chunk);
 		}
 	}
 
-	private async post(batch: IngestionEvent[]): Promise<void> {
-		if (batch.length === 0) return;
+	private async post(spans: OtelSpan[]): Promise<void> {
+		if (spans.length === 0) return;
 		const auth = Buffer.from(`${this.config.publicKey}:${this.config.secretKey}`).toString("base64");
+		const resourceAttrs: OtelAttr[] = [strAttr("service.name", "iris-runtime")];
+		if (this.config.environment) resourceAttrs.push(strAttr("langfuse.environment", this.config.environment));
+		if (this.config.release) resourceAttrs.push(strAttr("langfuse.release", this.config.release));
+
+		const body = {
+			resourceSpans: [
+				{
+					resource: { attributes: resourceAttrs },
+					scopeSpans: [{ scope: { name: "iris-runtime" }, spans }],
+				},
+			],
+		};
 		try {
-			const res = await this.fetchImpl(`${this.config.baseUrl}/api/public/ingestion`, {
+			const res = await this.fetchImpl(`${this.config.baseUrl}/api/public/otel/v1/traces`, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
 					authorization: `Basic ${auth}`,
 				},
-				body: JSON.stringify({ batch }),
+				body: JSON.stringify(body),
 				signal: AbortSignal.timeout(this.config.timeoutMs),
 			});
 			if (!res.ok) {

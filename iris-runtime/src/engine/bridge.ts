@@ -22,7 +22,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import * as log from "./log.js";
@@ -34,16 +34,18 @@ import * as log from "./log.js";
 /** A line of the NDJSON stream a bridge request may emit before its reply. */
 export type BridgeStreamLine =
 	| { type: "accepted"; requestId: string; protocol: number }
-	| { type: "status"; text: string }
+	| { type: "status"; text: string; seq?: number }
 	| { type: "heartbeat" }
-	| { type: "final"; text: string; requestId: string }
-	| { type: "error"; error: string; code: string; requestId: string };
+	| { type: "final"; text: string; requestId: string; seq?: number }
+	| { type: "error"; error: string; code: string; requestId: string; seq?: number };
+
+type FinalLine = Extract<BridgeStreamLine, { type: "final" }>;
 
 interface PendingRequest {
-	resolve: (text: string) => void;
+	resolve: (line: FinalLine) => void;
 	reject: (err: Error) => void;
 	/** Present only for streaming (NDJSON) requests — legacy callers get no progress. */
-	onStatus?: (text: string) => void;
+	onStatus?: (line: BridgeStreamLine) => void;
 	/** Reset the idle deadline. Called on every sign of agent progress. */
 	touch: () => void;
 	/** Release the idle/hard timers and any heartbeat interval. */
@@ -51,6 +53,129 @@ interface PendingRequest {
 }
 
 const pendingRequests = new Map<string, PendingRequest>();
+
+// ============================================================================
+// Durable job log (issue #137)
+//
+// The open HTTP connection is a fragile job handle: if it drops mid-run, or the
+// sub-agent process restarts mid-request, the pending registry (above) loses
+// the request and the reply — though produced — goes nowhere. So every status,
+// final, and error event is *also* appended to `{workingDir}/bridge-jobs/
+// {requestId}.jsonl`, one JSON line per event with a monotonic `seq`, and
+// `GET /bridge/jobs/{requestId}?since={seq}` serves events after `seq` plus a
+// `done` flag. A caller that lost its stream resumes from its last seen seq;
+// files, not a DB — core's default path is a plain Linux box.
+//
+// Only meaningful inside a sub-agent process (the bridge server owns the
+// workingDir); on Iris's side `jobLogDir` stays unset and every append no-ops.
+// One bridge server per process is the operating assumption.
+// ============================================================================
+
+const JOB_LOG_DIR_NAME = "bridge-jobs";
+
+let jobLogDir: string | undefined;
+
+/** Per-request seq counters, lazily resumed from an existing log on first use. */
+const jobSeq = new Map<string, number>();
+
+function jobRetentionMs(): number {
+	return envMs("IRIS_BRIDGE_JOB_RETENTION_MS", 24 * 60 * 60 * 1000);
+}
+
+function bridgeJobPath(requestId: string): string | undefined {
+	if (!jobLogDir) return undefined;
+	// The requestId is caller-supplied and becomes a filename; same collapsing as
+	// the channelId gets (see sanitizeBridgeKey).
+	return join(jobLogDir, `${sanitizeBridgeKey(requestId)}.jsonl`);
+}
+
+/** Highest `seq` in an existing job log, or its line count if none carries one. */
+function lastSeqInFile(path: string): number {
+	try {
+		const lines = readFileSync(path, "utf-8").split("\n").filter((l) => l.trim());
+		for (let i = lines.length - 1; i >= 0; i--) {
+			try {
+				const seq = (JSON.parse(lines[i]) as { seq?: number }).seq;
+				if (Number.isFinite(seq)) return seq as number;
+			} catch {
+				// Skip torn/unreadable lines.
+			}
+		}
+		return lines.length;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Append one event to the request's durable log with the next monotonic seq,
+ * returning the line to write to the wire so both carry the same seq. Never
+ * throws — the durable log is a safety net, and a filesystem hiccup must not
+ * take down the live reply path.
+ */
+function appendJobEvent(requestId: string, event: BridgeStreamLine): BridgeStreamLine {
+	const path = bridgeJobPath(requestId);
+	if (!path) return event;
+	let seq = jobSeq.get(requestId);
+	if (seq === undefined) {
+		seq = lastSeqInFile(path);
+		jobSeq.set(requestId, seq);
+	}
+	seq += 1;
+	jobSeq.set(requestId, seq);
+	const line = { ...event, seq } as BridgeStreamLine;
+	try {
+		appendFileSync(path, `${JSON.stringify(line)}\n`);
+	} catch (err) {
+		log.logWarning(`[bridge] Failed to append to job log for ${requestId}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	return line;
+}
+
+/**
+ * Start a fresh job log for a new POST reusing an existing conversation key:
+ * truncate rather than unlink, so a poller racing the reset sees an empty live
+ * job instead of a 404.
+ */
+function resetJobLog(requestId: string): void {
+	jobSeq.delete(requestId);
+	const path = bridgeJobPath(requestId);
+	if (!path) return;
+	try {
+		writeFileSync(path, "");
+	} catch (err) {
+		log.logWarning(`[bridge] Failed to reset job log for ${requestId}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+}
+
+/**
+ * Delete job logs older than `retentionMs`. Exported for tests; wired from
+ * startBridgeServer at startup and then hourly.
+ */
+export function sweepBridgeJobLogs(retentionMs: number = jobRetentionMs()): number {
+	if (!jobLogDir || retentionMs === 0) return 0;
+	let removed = 0;
+	let entries: string[];
+	try {
+		entries = readdirSync(jobLogDir);
+	} catch {
+		return 0;
+	}
+	const cutoff = Date.now() - retentionMs;
+	for (const entry of entries) {
+		if (!entry.endsWith(".jsonl")) continue;
+		const path = join(jobLogDir, entry);
+		try {
+			if (statSync(path).mtimeMs < cutoff) {
+				rmSync(path);
+				removed++;
+			}
+		} catch {
+			// Raced a delete or a permission hiccup — leave it for the next sweep.
+		}
+	}
+	return removed;
+}
 
 /** Settle a pending request: unregister it, stop its timers, hand it to `finish`. */
 function settleBridgeRequest(requestId: string, finish: (pending: PendingRequest) => void): boolean {
@@ -64,10 +189,14 @@ function settleBridgeRequest(requestId: string, finish: (pending: PendingRequest
 
 /**
  * Called by slack.ts when a message is posted to a BRIDGE-{requestId} channel.
- * Resolves the waiting HTTP request.
+ * Resolves the waiting HTTP request. Also appended to the durable job log, so
+ * a caller whose connection dropped — or one that comes back after the
+ * sub-agent restarted — still receives the reply via
+ * `GET /bridge/jobs/{requestId}` (issue #137).
  */
 export function resolveBridgeRequest(requestId: string, text: string): boolean {
-	return settleBridgeRequest(requestId, (pending) => pending.resolve(text));
+	const line = appendJobEvent(requestId, { type: "final", text, requestId });
+	return settleBridgeRequest(requestId, (pending) => pending.resolve(line as FinalLine));
 }
 
 /**
@@ -76,12 +205,16 @@ export function resolveBridgeRequest(requestId: string, text: string): boolean {
  * idle deadline doesn't fire under a long but healthy run. Wired from the engine
  * (engine/index.ts) onto `ctx.setStatus` for BRIDGE- channels, which agent.ts
  * already fires once per tool call.
+ *
+ * The status is persisted to the durable job log even when nobody is listening:
+ * that is exactly the disconnected-caller case the log exists for.
  */
 export function publishBridgeStatus(requestId: string, text: string): boolean {
+	const line = appendJobEvent(requestId, { type: "status", text: text.substring(0, STATUS_MAX_CHARS) });
 	const pending = pendingRequests.get(requestId);
 	if (!pending) return false;
 	pending.touch();
-	pending.onStatus?.(text);
+	pending.onStatus?.(line);
 	return true;
 }
 
@@ -101,12 +234,22 @@ export function hasPendingBridgeRequest(requestId: string): boolean {
  * conversation key, or the caller hung up.
  */
 export function failBridgeRequest(requestId: string, reason: string, code = "failed"): boolean {
-	return settleBridgeRequest(requestId, (pending) => pending.reject(new BridgeRequestError(reason, code)));
+	// A caller hanging up is not the job failing — the run keeps going and its
+	// reply must stay recoverable via GET /bridge/jobs/:id, so "disconnected"
+	// deliberately leaves no terminal event in the durable log.
+	const line = code === "disconnected"
+		? undefined
+		: appendJobEvent(requestId, { type: "error", error: reason, code, requestId });
+	return settleBridgeRequest(requestId, (pending) => pending.reject(new BridgeRequestError(reason, code, line)));
 }
 
 /** An error carrying the `code` that goes out on a streamed `error` line. */
 class BridgeRequestError extends Error {
-	constructor(message: string, readonly code: string) {
+	/**
+	 * The durable-log line for this failure, so the server can echo the exact
+	 * seq'd event on the wire rather than reconstructing it.
+	 */
+	constructor(message: string, readonly code: string, readonly line?: BridgeStreamLine) {
 		super(message);
 	}
 }
@@ -128,6 +271,53 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 	const payload = JSON.stringify(body);
 	res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) });
 	res.end(payload);
+}
+
+/**
+ * Serve `GET /bridge/jobs/{requestId}?since={seq}` — the recovery half of the
+ * durable-job design (issue #137). Returns every log event after `since` plus
+ * whether the job has reached a terminal event. An unknown requestId is a 404,
+ * which tells a recovering caller there is nothing to resume.
+ */
+function handleJobPoll(res: ServerResponse, url: URL): void {
+	// Malformed percent-encoding (e.g. `/bridge/jobs/%zz`) makes decodeURIComponent
+	// throw; escaping the async handler would be an unhandled rejection that takes
+	// the whole sub-agent process down.
+	let requestId: string;
+	try {
+		requestId = decodeURIComponent(url.pathname.slice("/bridge/jobs/".length));
+	} catch {
+		jsonResponse(res, 400, { error: "invalid requestId" });
+		return;
+	}
+	const parsedSince = Number.parseInt(url.searchParams.get("since") ?? "0", 10);
+	const since = Number.isFinite(parsedSince) && parsedSince > 0 ? parsedSince : 0;
+	const path = bridgeJobPath(requestId);
+	if (!path || !existsSync(path)) {
+		jsonResponse(res, 404, { error: "unknown job" });
+		return;
+	}
+	const events: BridgeStreamLine[] = [];
+	let done = false;
+	try {
+		for (const raw of readFileSync(path, "utf-8").split("\n")) {
+			if (!raw.trim()) continue;
+			let line: BridgeStreamLine;
+			try {
+				line = JSON.parse(raw) as BridgeStreamLine;
+			} catch {
+				continue; // Skip torn lines rather than failing the whole poll.
+			}
+			if ((line as { seq?: number }).seq === undefined || (line as { seq?: number }).seq as number > since) {
+				events.push(line);
+			}
+			if (line.type === "final" || line.type === "error") done = true;
+		}
+	} catch (err) {
+		jsonResponse(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		return;
+	}
+	jsonResponse(res, 200, { requestId, done, events });
 }
 
 function envMs(name: string, fallback: number): number {
@@ -166,6 +356,13 @@ export const BRIDGE_STREAM_CONTENT_TYPE = "application/x-ndjson";
  * Neither shape has a fixed overall deadline any more. A request lives as long
  * as the agent keeps making progress (`publishBridgeStatus`), bounded by an idle
  * deadline and a hard cap — see the env vars below.
+ *
+ * Every status/final/error event is also appended to a durable per-request log
+ * under `{workingDir}/bridge-jobs/` (issue #137), served back by
+ * `GET /bridge/jobs/{requestId}?since={seq}` so a caller whose connection
+ * dropped mid-run — or one returning after this process restarted — can resume
+ * from its last seen `seq` instead of losing the reply. Finished logs are swept
+ * after `IRIS_BRIDGE_JOB_RETENTION_MS` (default 24h; 0 keeps them forever).
  */
 export function startBridgeServer(port: number, workingDir: string): import("http").Server {
 	// No progress for this long ⇒ the agent is presumed wedged.
@@ -179,8 +376,31 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 	// the caller's own fetch tears down the connection before we answer.
 	const LEGACY_MAX_MS = envMs("IRIS_BRIDGE_LEGACY_TIMEOUT_MS", 240_000);
 
+	jobLogDir = join(workingDir, JOB_LOG_DIR_NAME);
+	try {
+		mkdirSync(jobLogDir, { recursive: true });
+	} catch (err) {
+		log.logWarning(`[bridge] Failed to create ${JOB_LOG_DIR_NAME}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	sweepBridgeJobLogs();
+	if (jobRetentionMs() > 0) {
+		setInterval(() => sweepBridgeJobLogs(), 60 * 60 * 1000).unref?.();
+	}
+
 	const server = createServer(async (req, res) => {
-		if (req.method !== "POST" || req.url !== "/bridge") {
+		let url: URL;
+		try {
+			url = new URL(req.url ?? "/", "http://localhost");
+		} catch {
+			jsonResponse(res, 400, { error: "invalid URL" });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname.startsWith("/bridge/jobs/")) {
+			handleJobPoll(res, url);
+			return;
+		}
+		if (req.method !== "POST" || url.pathname !== "/bridge") {
 			jsonResponse(res, 404, { error: "not found" });
 			return;
 		}
@@ -210,6 +430,9 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 			log.logWarning(`[bridge] Request ${requestId} superseded by a newer request`);
 			failBridgeRequest(requestId, "superseded by a newer request", "superseded");
 		}
+		// A new POST starts a fresh job: truncate any prior log for this key (a
+		// reused conversation key) so recovery polling never mixes runs.
+		resetJobLog(requestId);
 
 		const writeLine = (line: BridgeStreamLine): void => {
 			if (res.writableEnded) return;
@@ -240,7 +463,7 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 		const hardMs = streaming ? MAX_MS : tighter(MAX_MS, LEGACY_MAX_MS);
 
 		let registration: PendingRequest | undefined;
-		const responsePromise = new Promise<string>((resolve, reject) => {
+		const responsePromise = new Promise<FinalLine>((resolve, reject) => {
 			const armIdle = () => {
 				clearTimeout(idleTimer);
 				if (idleMs > 0) {
@@ -270,7 +493,7 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 					if (heartbeat) clearInterval(heartbeat);
 				},
 				onStatus: streaming
-					? (statusText) => writeLine({ type: "status", text: statusText.substring(0, STATUS_MAX_CHARS) })
+					? (line) => writeLine(line)
 					: undefined,
 			};
 			pendingRequests.set(requestId, registration);
@@ -322,13 +545,13 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 
 		// Wait for agent to respond
 		try {
-			const responseText = await responsePromise;
-			log.logInfo(`[bridge] Response for ${requestId}: ${responseText.substring(0, 60)}`);
+			const finalLine = await responsePromise;
+			log.logInfo(`[bridge] Response for ${requestId}: ${finalLine.text.substring(0, 60)}`);
 			if (streaming) {
-				writeLine({ type: "final", text: responseText, requestId });
+				writeLine(finalLine);
 				res.end();
 			} else {
-				jsonResponse(res, 200, { text: responseText, requestId });
+				jsonResponse(res, 200, { text: finalLine.text, requestId });
 			}
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -337,7 +560,9 @@ export function startBridgeServer(port: number, workingDir: string): import("htt
 			if (code === "disconnected") {
 				res.destroy();
 			} else if (streaming) {
-				writeLine({ type: "error", error: msg, code, requestId });
+				writeLine(err instanceof BridgeRequestError && err.line
+					? err.line
+					: { type: "error", error: msg, code, requestId });
 				res.end();
 			} else {
 				jsonResponse(res, 504, { error: "Bridge request failed." });
@@ -488,9 +713,70 @@ export function throttleStatus(emit: (text: string) => void, ms: number = bridge
 	return push;
 }
 
+/** How often a recovering caller re-polls `GET /bridge/jobs/{id}`. */
+function bridgeJobPollMs(): number {
+	return envMs("IRIS_BRIDGE_JOB_POLL_MS", 2_000);
+}
+
+/**
+ * Poll the sub-agent's durable job log after a stream broke mid-run (issue
+ * #137), replaying events after `progress.seq` until a terminal one arrives.
+ *
+ * Gives up — returning undefined so the caller can rethrow its original error —
+ * when the overall bridge deadline passes, or when no new event shows up for
+ * `idleTimeoutMs`, preserving the fail-fast semantics of the idle timeout (the
+ * job log carries statuses but not heartbeats, so silence still means wedged).
+ * A terminal error event is thrown like the stream would have thrown it.
+ */
+async function recoverFromJobLog(
+	bridgeUrl: string,
+	requestId: string,
+	progress: { seq: number },
+	deadline: number,
+	idleTimeoutMs: number,
+): Promise<string | undefined> {
+	const path = `/bridge/jobs/${encodeURIComponent(requestId)}`;
+	let lastEventAt = Date.now();
+	while (Date.now() < deadline && Date.now() - lastEventAt < idleTimeoutMs) {
+		// Floor the delay: a misconfigured IRIS_BRIDGE_JOB_POLL_MS=0 must not
+		// turn this into a tight fetch loop for the whole give-up window.
+		const delay = Math.max(50, Math.min(bridgeJobPollMs(), Math.max(deadline - Date.now(), 0)));
+		await new Promise((r) => setTimeout(r, delay));
+		let body: { done?: boolean; events?: BridgeStreamLine[] };
+		try {
+			const res = await fetch(`${bridgeUrl}${path}?since=${progress.seq}`, {
+				headers: { Accept: "application/json" },
+			});
+			if (res.status === 404) return undefined; // Unknown job — nothing to resume.
+			if (!res.ok) continue; // Transient server hiccup — keep polling.
+			body = await res.json() as { done?: boolean; events?: BridgeStreamLine[] };
+		} catch {
+			continue; // The sub-agent may itself be restarting — keep polling.
+		}
+		for (const line of body.events ?? []) {
+			if (typeof (line as { seq?: number }).seq === "number" && (line as { seq?: number }).seq as number > progress.seq) {
+				progress.seq = (line as { seq?: number }).seq as number;
+			}
+			lastEventAt = Date.now();
+			if (line.type === "final") return line.text;
+			if (line.type === "error") throw new Error(`Bridge failed (${line.code}): ${line.error}`);
+		}
+		// done with nothing after `since`: the job reached a terminal event at or
+		// before our resume point (e.g. we already parsed that very error line
+		// off the wire). Nothing further will arrive — stop instead of idling to
+		// the give-up deadline.
+		if (body.done && (body.events ?? []).length === 0) return undefined;
+	}
+	return undefined;
+}
+
 /**
  * Forward a message to a sub-agent via its bridge server.
  * Returns the agent's response text, or throws on timeout/error.
+ *
+ * If the streaming connection breaks mid-run, the reply is not lost: this
+ * recovers by polling the sub-agent's durable job log (`GET /bridge/jobs/…`,
+ * issue #137) from the last seen `seq` until the terminal event shows up.
  *
  * `conversationKey`, when given, is reused as the bridge requestId (and thus
  * the sub-agent's `BRIDGE-{id}` session directory) instead of a fresh random
@@ -537,7 +823,12 @@ export async function callAgentBridge(
 
 	const controller = new AbortController();
 	let abortReason = `Agent bridge timed out after ${timeoutMs / 1000}s`;
+	const startedAt = Date.now();
 	const hardTimer = setTimeout(() => controller.abort(), timeoutMs);
+	// Highest seq seen on the wire, so a broken stream can resume from the
+	// durable job log without replaying statuses the caller already showed.
+	const progress = { seq: 0 };
+	let streamStarted = false;
 	let idleTimer: ReturnType<typeof setTimeout> | undefined;
 	// Armed only once a stream is actually flowing (below). Arming it up front
 	// would cap a non-streaming reply — which sends nothing until the run ends —
@@ -573,9 +864,18 @@ export async function callAgentBridge(
 			const result = await response.json() as { text?: string };
 			return result.text ?? "(no response)";
 		}
+		streamStarted = true;
 		armIdle();
-		return await readBridgeStream(response, armIdle, onStatus);
+		return await readBridgeStream(response, armIdle, progress, onStatus);
 	} catch (err) {
+		// The stream broke mid-run — connection dropped, sub-agent restarted.
+		// The durable job log is the recovery path; only if it yields nothing
+		// does the original error surface. (A pre-stream failure has no job to
+		// poll, and a legacy single-JSON call never started one.)
+		if (streamStarted) {
+			const recovered = await recoverFromJobLog(bridgeUrl, requestId, progress, startedAt + timeoutMs, idleTimeoutMs);
+			if (recovered !== undefined) return recovered;
+		}
 		if ((err as Error).name === "AbortError") {
 			throw new Error(abortReason);
 		}
@@ -596,6 +896,7 @@ export async function callAgentBridge(
 async function readBridgeStream(
 	response: Response,
 	onLine: () => void,
+	progress: { seq: number },
 	onStatus?: (text: string) => void,
 ): Promise<string> {
 	if (!response.body) throw new Error("Bridge stream had no body");
@@ -616,6 +917,8 @@ async function readBridgeStream(
 			return undefined;
 		}
 		// Unknown types are ignored on purpose, so the protocol can grow.
+		const seq = (line as { seq?: number }).seq;
+		if (typeof seq === "number" && seq > progress!.seq) progress!.seq = seq;
 		if (line.type === "status") onStatus?.(line.text);
 		else if (line.type === "error") throw new Error(`Bridge failed (${line.code}): ${line.error}`);
 		else if (line.type === "final") return line.text;

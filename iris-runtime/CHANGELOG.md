@@ -4,6 +4,113 @@
 
 ### Added
 
+- Bridge replies now survive a dropped connection or a sub-agent restart
+  mid-request (durable job handle). Alongside the live NDJSON stream, every
+  `status`/`final`/`error` event is appended to
+  `{workingDir}/bridge-jobs/{requestId}.jsonl` with a monotonic `seq`, and the
+  bridge server serves that log back via `GET /bridge/jobs/{requestId}?since={seq}`
+  (events after `seq` plus a `done` flag). When a stream breaks mid-run,
+  `callAgentBridge()` resumes from its last seen `seq` and polls the job log
+  until the reply shows up instead of failing — stream-when-connected,
+  poll-to-recover, both reading the same log. A caller disconnect is not
+  recorded as a failure: the run keeps going and the reply stays recoverable.
+  Finished logs are swept after `IRIS_BRIDGE_JOB_RETENTION_MS` (default 24h);
+  recovery re-polls every `IRIS_BRIDGE_JOB_POLL_MS` (default 2s) and gives up
+  on the overall bridge deadline or `IRIS_BRIDGE_IDLE_TIMEOUT_MS` of silence.
+  What remains unrecoverable by design: if Iris herself restarts mid-request
+  nobody re-issues the poll automatically — the reply stays in the sub-agent's
+  job log for manual fetch until the sweep. See `docs/sub-agents.md`. (#137)
+
+- Bash tool policy layer with a tamper-resistant command audit log (#131).
+  Every bash command is now screened before execution: reads of secret files
+  (`.env`, `secret.key`, `secrets.json.enc`, `agents.json`) and requests to
+  cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`,
+  `100.100.100.100`) are refused outright, and destructive commands (`rm -rf /`
+  and near-root variants, `mkfs*`, `dd of=/dev/*`, `terraform destroy`,
+  force-pushes to `main`/`master`/`release/*`, writes to `/etc/passwd`/
+  `sudoers*`/`authorized_keys`/`sshd_config`, `systemctl disable|mask
+  iris.service`) are held until the user explicitly confirms them in chat — the
+  model asks, ends its turn, and may re-run the exact same command once after an
+  affirmative human reply in the channel log. Every command appends a JSONL
+  entry (channel, decision, exit code) to `<workspace>/meta/bash-audit.log`
+  (override with `IRIS_BASH_AUDIT_FILE`); the writer only ever appends, never
+  truncates, and `docs/bash-policy.md` documents the root-owned `chattr +a`
+  setup that makes entries survive agent-side erasure attempts.
+  `IRIS_BASH_POLICY=off` disables refusals and confirmation gates as an
+  explicit escape hatch (auditing stays on). The layer is accident-catching,
+  not a security boundary — pattern matching is trivially bypassed by an
+  adversarial model, and docs say exactly that.
+
+- Structural (schema-aware) compression for large JSON tool output: `bash`,
+  `read`, and MCP tool results now emit a compact summary (keys/shape plus a
+  handful of sample values) instead of a blind head/tail byte cut when the
+  output is valid JSON over the size limit. (#158)
+- Read handlers: workspace-discovered `read-handlers/<name>/handler.json`
+  shell recipes that map a sniffed MIME type to a text-extraction command,
+  hot-reloading the same way skills do. Core ships one, `pdf-text`
+  (`pdftotext -layout`, `poppler-utils` now installed by `bootstrap.sh`), so
+  the `read` tool extracts a PDF's text layer instead of dumping raw binary
+  at the model — scanned/image-only PDFs have no text layer and read back
+  empty. Overlays add or override handlers by directory name, same rule as
+  skills. See `docs/read-handlers.md`. (#141)
+
+### Security
+
+- Migrated `pi-agent-core`, `pi-ai`, and `pi-coding-agent` from the deprecated
+  `@mariozechner` npm scope to `@earendil-works` at 0.79.0, fixing three
+  high/moderate advisories with no fix released under the old scope
+  (GHSA-jfgx-wxx8-mp94, GHSA-7v5m-pr3q-6453, GHSA-r95r-rj6r-c39x;
+  Dependabot alerts #34, #35, #36). This dependency now requires Node
+  >=22.19.0 (bundled `undici` uses newer webidl APIs); bumped
+  `engines.node` and CI's `setup-node` version accordingly, and fixed
+  `bootstrap.sh`'s Node-install gate, which previously skipped the Node 22
+  install on any host already running Node 20 or 21.
+- Bumped transitive dependency `shell-quote` (via `@anthropic-ai/sandbox-runtime`)
+  to 1.10.0, fixing a critical command-injection advisory in `quote()`
+  (GHSA-w7jw-789q-3m8p, Dependabot alert #29).
+- Bumped transitive `axios` (1.15.0 → 1.19.0) and `form-data` (4.0.5 → 4.0.6)
+  via `overrides` to pick up fixes for several high-severity advisories
+  (prototype pollution / NO_PROXY bypass in axios, CRLF injection in
+  form-data). `extract-zip` (pulled in by `@mariozechner/pi-coding-agent`)
+  has no upstream fix yet — tracked, not resolved.
+- Bumped `ws` (8.20.0 → 8.21.3) and transitive `hono`, `fast-uri`, `ip-address`
+  to their latest patch releases. Split out of the `pi-coding-agent` 0.84.2
+  group bump, which requires `agent.ts` changes for that release's breaking
+  API changes and is tracked separately.
+
+### Fixed
+
+- `SESSION-` channel turns are now written to the session's `log.jsonl` on
+  every transport. Slack and Telegram already logged them, but turns driven
+  through `POST /sessions/:id/message` on a headless install (Bridge/Web
+  transports) left no trace: `GET /sessions/:id/history` came back empty and
+  restart replay had nothing to restore context from. The user message is now
+  logged by `injectSessionMessage` and the run's final reply as a bot entry,
+  matching the existing Slack/Telegram entry shape. (#217)
+
+- Langfuse tool observations now reach the dashboard. The legacy REST batch
+  endpoint (`/api/public/ingestion`) silently rejected `TOOL`-typed events
+  with HTTP 207 while reporting success; the client has been migrated to the
+  OTel ingestion path (`POST /api/public/otel/v1/traces`) that the official
+  Langfuse SDK uses, which accepts the full observation type set. Generation
+  observations are migrated to the same transport. (#IRIS-171)
+
+## [1.7.0] - 2026-08-19
+
+### Added
+
+- Slack slash commands `/stop`, `/compact`, `/clear`, `/reset`, `/verbose` —
+  handled from the `slash_commands` socket envelope, in `dm`/`admin`/`leads`
+  channels. Registering them in the Slack app is optional; installs that don't
+  keep using the bare-word spellings. Refused in `thread`/`interactive-thread`
+  channels (a slash command carries no thread, so no session can be resolved)
+  and in `passthrough` channels. (#156)
+
+- `stop`/`compact`/`reset` sent inside a session thread now act on that
+  session's run (`SESSION-<id>`) instead of the channel's, which has none. The
+  session's Slack reply route is registered on the spot, so the status message
+  lands in the thread even after a restart. (#156)
+
 - `POST /sessions/:id/stop` — aborts a session's in-flight turn via the same
   `engine.handleStop` Telegram's `/stop`, Slack's `stop`, and the web UI's Stop
   button use. A turn driven through `POST /sessions/:id/message` previously
@@ -19,8 +126,6 @@
   WebTransport's `/upload` on the API's own port and token, so a programmatic
   consumer needs neither the web UI enabled nor its password. (#185)
 
-### Changed
-
 - `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
   both HTTP surfaces that write into a channel dir.
 
@@ -30,6 +135,20 @@
   `CHANNEL_QUEUE_LIMIT`/`isFull()`. No behavior change. (#138)
 
 ### Fixed
+
+- Telegram: replying to an earlier message now prepends that message's content
+  (or a content-type note for media) to the text Iris receives, so reply-based
+  follow-ups resolve their context instead of arriving as standalone text. (#157)
+
+- A leading `/` is now optional on the text-parsed control commands, so
+  `@iris /stop` runs the command instead of becoming a prompt. (#156)
+
+- **Behavior change:** `stop`/`compact`/`reset` in a DM or an explicit `@iris`
+  mention now work in every channel mode, not only `admin`. Previously they were
+  swallowed in other modes — neither executed nor answered. The `adminCommands`
+  flag now governs only bare top-level channel text, which stays off for `leads`
+  (an email bot's "STOP" is an unsubscribe keyword, not a command) and is on for
+  `dm`, making `admin` mode identical to `dm` and a permanent alias. (#156)
 
 - `BridgeTransport` now queues per-channel like Slack/Telegram, so two
   requests sharing a `conversationKey` (same `requestId` ⇒ same
@@ -42,6 +161,11 @@
   until the 90s session timeout. (#138)
 
 ### Docs
+
+- `docs/channel-modes.md` gains a Control commands section: what `stop` /
+  `compact` / `reset` do and which message shapes are read as commands, plus the
+  `admin`-is-now-`dm` note. Slash-command registration added to the Slack app
+  reference in `docs/SETUP.md` and `bootstrap.sh`. (#156)
 
 - `docs/web-ui.md` states what the web transport is not: the bundled page is a
   reference implementation, its password is a door lock rather than RBAC, and

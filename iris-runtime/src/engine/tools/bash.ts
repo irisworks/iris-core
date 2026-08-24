@@ -2,10 +2,17 @@ import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Executor } from "../sandbox.js";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateTail } from "./truncate.js";
+import {
+	compressJsonStructure,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type TruncationResult,
+	truncateTail,
+} from "./truncate.js";
 
 /**
  * Generate a unique temp file path for bash output
@@ -49,18 +56,21 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 				output += result.stderr;
 			}
 
-			const totalBytes = Buffer.byteLength(output, "utf-8");
+			// For large JSON output, prefer a schema-aware structural summary over
+			// blind tail truncation so the model still sees keys/shape and sample
+			// values instead of an arbitrarily cut-off blob.
+			const truncation = compressJsonStructure(output) ?? truncateTail(output);
 
-			// Write to temp file if output exceeds limit
-			if (totalBytes > DEFAULT_MAX_BYTES) {
+			// Write to temp file whenever truncation occurred (whether by lines,
+			// bytes, or structural summarization) so the notices below can always
+			// point at the full output.
+			if (truncation.truncated) {
 				tempFilePath = getTempFilePath();
 				tempFileStream = createWriteStream(tempFilePath);
 				tempFileStream.write(output);
 				tempFileStream.end();
 			}
 
-			// Apply tail truncation
-			const truncation = truncateTail(output);
 			let outputText = truncation.content || "(no output)";
 
 			// Build details with truncation info
@@ -72,18 +82,23 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 					fullOutputPath: tempFilePath,
 				};
 
-				// Build actionable notice
-				const startLine = truncation.totalLines - truncation.outputLines + 1;
-				const endLine = truncation.totalLines;
-
-				if (truncation.lastLinePartial) {
+				if (truncation.truncatedBy === "structure") {
+					outputText += `\n\n[Output is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw output. Full output: ${tempFilePath}]`;
+				} else if (truncation.lastLinePartial) {
 					// Edge case: last line alone > 50KB
+					const endLine = truncation.totalLines;
 					const lastLineSize = formatSize(Buffer.byteLength(output.split("\n").pop() || "", "utf-8"));
 					outputText += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${tempFilePath}]`;
-				} else if (truncation.truncatedBy === "lines") {
-					outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${tempFilePath}]`;
 				} else {
-					outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${tempFilePath}]`;
+					// Build actionable notice
+					const startLine = truncation.totalLines - truncation.outputLines + 1;
+					const endLine = truncation.totalLines;
+
+					if (truncation.truncatedBy === "lines") {
+						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${tempFilePath}]`;
+					} else {
+						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${tempFilePath}]`;
+					}
 				}
 			}
 

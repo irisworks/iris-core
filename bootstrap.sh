@@ -209,10 +209,15 @@ fi
 
 if ! command -v jq &>/dev/null; then sudo apt-get install -y jq; fi
 
+# poppler-utils' pdftotext backs the core-shipped pdf-text read handler (see
+# docs/read-handlers.md) — scanned/image-only PDFs have no text layer and
+# read back empty.
+if ! command -v pdftotext &>/dev/null; then sudo apt-get install -y poppler-utils; fi
+
 # nginx + certbot are installed in step 5, and only when a public domain
 # (IRIS_BASE_DOMAIN) is configured — the default path serves nothing publicly.
 
-if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' 2>/dev/null; then
+if ! command -v node &>/dev/null || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
   log "Installing Node.js 22..."
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
@@ -522,6 +527,10 @@ prompt_secrets() {
     echo "  │         message.im   message.mpim                            │"
     echo "  │                                                               │"
     echo "  │  5. App Home → enable Messages Tab                           │"
+    echo "  │                                                               │"
+    echo "  │  6. Optional — Slash Commands → Create New Command for each   │"
+    echo "  │     of  /stop  /compact  /clear  /reset  /verbose             │"
+    echo "  │     (leave Request URL blank; Socket Mode delivers them)      │"
     echo "  │                                                               │"
     echo "  │  Note: Make sure to store the xapp and xoxb tokens securely  │"
     echo "  │  as they will be required in the next steps.                 │"
@@ -1236,6 +1245,7 @@ mkdir -p "$IRIS_DIR/data"
 ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
+ln -sfn "$REPO_DIR/read-handlers"   "$IRIS_DIR/data/read-handlers"
 
 # Skill scripts are documented and invoked by other skills as bare commands,
 # but nothing else puts a skill's own directory on PATH — the sandbox executor
