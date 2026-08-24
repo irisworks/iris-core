@@ -16,6 +16,8 @@
 
 import { appendFileSync, existsSync, mkdirSync } from "fs";
 import { basename, join } from "path";
+import * as log from "../../engine/log.js";
+import { ChannelQueue } from "../../engine/channel-queue.js";
 import type { ChannelState } from "../../engine/index.js";
 import { resolveChannelDir } from "../../engine/store.js";
 import {
@@ -33,9 +35,20 @@ export interface BridgeTransportOptions {
 	promptProfile: TransportPromptProfile;
 	/** Working dir — SESSION- channel dirs (log.jsonl) live here */
 	workingDir: string;
-	/** Dispatch an event into the engine (wired in main.ts to engine.handleEvent) */
-	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void;
+	/**
+	 * Dispatch an event into the engine (wired in main.ts to engine.handleEvent).
+	 * Returns the run's promise so enqueueEvent's per-channel queue (below) can
+	 * wait for one run to finish before starting the next on the same channel.
+	 */
+	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void | Promise<void>;
 }
+
+// ============================================================================
+// Per-channel queue for sequential processing — mirrors slack.ts/telegram.ts.
+// Without this, two requests that reuse the same conversationKey (same
+// requestId ⇒ same BRIDGE-{id} channel) dispatch two concurrent runs against
+// the same ChannelState, and both append to the same context.jsonl.
+// ============================================================================
 
 /**
  * A `BRIDGE-{requestId}` channel is engine/bridge.ts's own — the pending HTTP
@@ -60,6 +73,7 @@ export class BridgeTransport implements ChannelTransport {
 	readonly stopCommandHint = "say `stop` first";
 	private readonly workingDir: string;
 	private readonly dispatch: BridgeTransportOptions["dispatch"];
+	private readonly queues = new Map<string, ChannelQueue>();
 
 	constructor(options: BridgeTransportOptions) {
 		this.promptProfile = options.promptProfile;
@@ -92,8 +106,24 @@ export class BridgeTransport implements ChannelTransport {
 	async updateMessage(_channelId: string, _messageId: string, _text: string): Promise<void> {}
 
 	enqueueEvent(event: TransportEvent): boolean {
-		this.dispatch(event, this);
+		const queue = this.getQueue(event.channel);
+		if (queue.isFull()) {
+			log.logWarning(`[bridge] Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
+			return false;
+		}
+		queue.enqueue(async () => {
+			await this.dispatch(event, this);
+		});
 		return true;
+	}
+
+	private getQueue(channelId: string): ChannelQueue {
+		let queue = this.queues.get(channelId);
+		if (!queue) {
+			queue = new ChannelQueue();
+			this.queues.set(channelId, queue);
+		}
+		return queue;
 	}
 
 	createContext(event: TransportEvent, _state: ChannelState): MessageContext {
@@ -147,8 +177,17 @@ export class BridgeTransport implements ChannelTransport {
 		text: string,
 		attachments: Array<{ local: string }> = [],
 	): Promise<string> {
-		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
+		// Same 5-message-per-channel convention as enqueueEvent above. Checked
+		// before registerSessionRequest so a full queue fails fast (the HTTP
+		// handler in api.ts maps the rejection to a 504) instead of registering a
+		// promise that hangs until its 90s timeout while queued work waits.
+		const queue = this.getQueue(channelId);
+		if (queue.isFull()) {
+			log.logWarning(`[bridge] Session message queue full for ${channelId}, rejecting: ${text.substring(0, 50)}`);
+			throw new Error(`session message queue full for ${channelId}`);
+		}
+		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const ts = (Date.now() / 1000).toFixed(6);
 
 		// Log user message to session directory (#217), mirroring Slack/Telegram.
@@ -164,7 +203,10 @@ export class BridgeTransport implements ChannelTransport {
 		});
 
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
-		this.dispatch({ channel: channelId, user, text, ts, attachments }, this);
+		const event = { channel: channelId, user, text, ts, attachments };
+		queue.enqueue(async () => {
+			await this.dispatch(event, this);
+		});
 		return responsePromise;
 	}
 

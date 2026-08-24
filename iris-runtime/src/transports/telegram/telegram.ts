@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "../../engine/log.js";
+import { ChannelQueue } from "../../engine/channel-queue.js";
 import { callAgentBridge, loadAgentRegistry, parseAgentMention, throttleStatus } from "../../engine/bridge.js";
 import { parseVerboseCommand } from "../../engine/dispatch.js";
 import { registerSessionRequest, resolveSessionRequest } from "../../engine/sessions.js";
@@ -161,37 +162,9 @@ export interface IrisTelegramHandler {
 }
 
 // ============================================================================
-// Per-channel queue (mirrors slack.ts)
+// Per-channel queue — shared engine/channel-queue.ts
+// (also used by slack.ts and bridge-transport.ts).
 // ============================================================================
-
-type QueuedWork = () => Promise<void>;
-
-class ChannelQueue {
-	private queue: QueuedWork[] = [];
-	private processing = false;
-
-	enqueue(work: QueuedWork): void {
-		this.queue.push(work);
-		this.processNext();
-	}
-
-	size(): number {
-		return this.queue.length;
-	}
-
-	private async processNext(): Promise<void> {
-		if (this.processing || this.queue.length === 0) return;
-		this.processing = true;
-		const work = this.queue.shift()!;
-		try {
-			await work();
-		} catch (err) {
-			log.logWarning("Queue error", err instanceof Error ? err.message : String(err));
-		}
-		this.processing = false;
-		this.processNext();
-	}
-}
 
 // ============================================================================
 // Markdown → Telegram HTML
@@ -682,7 +655,7 @@ export class TelegramBot implements ChannelTransport {
 		const channelId = `SESSION-${sessionId}`;
 		const queue = this.getQueue(channelId);
 
-		if (queue.size() >= 5) throw new Error("Session message queue is full");
+		if (queue.isFull()) throw new Error("Session message queue is full");
 
 		const ts = String(Date.now());
 		// `original` is the on-disk name: the API caller uploaded the file itself,
@@ -721,7 +694,7 @@ export class TelegramBot implements ChannelTransport {
 
 	enqueueEvent(event: TelegramEvent): boolean {
 		const queue = this.getQueue(event.channel);
-		if (queue.size() >= 5) {
+		if (queue.isFull()) {
 			log.logWarning(`[telegram] Event queue full for ${event.channel}`);
 			return false;
 		}
@@ -961,7 +934,7 @@ export class TelegramBot implements ChannelTransport {
 		};
 
 		const queue = this.getQueue(channelId);
-		if (queue.size() >= 5) {
+		if (queue.isFull()) {
 			await this.postMessage(channelId, "_Too many messages queued. Please wait._");
 		} else {
 			queue.enqueue(() => this.handler.handleEvent(event, this));

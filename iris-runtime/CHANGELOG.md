@@ -126,16 +126,19 @@
   WebTransport's `/upload` on the API's own port and token, so a programmatic
   consumer needs neither the web UI enabled nor its password. (#185)
 
+- `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
+  both HTTP surfaces that write into a channel dir.
+
+- The per-channel `ChannelQueue` moved from three identical copies (slack.ts,
+  telegram.ts, bridge-transport.ts) to one shared `engine/channel-queue.ts`,
+  with the 5-message overflow convention expressed once as
+  `CHANNEL_QUEUE_LIMIT`/`isFull()`. No behavior change. (#138)
+
 ### Fixed
 
 - Telegram: replying to an earlier message now prepends that message's content
   (or a content-type note for media) to the text Iris receives, so reply-based
   follow-ups resolve their context instead of arriving as standalone text. (#157)
-
-### Changed
-
-- `safeJoin` moved from `transports/web/web.ts` to `engine/store.ts`, shared by
-  both HTTP surfaces that write into a channel dir.
 
 - A leading `/` is now optional on the text-parsed control commands, so
   `@iris /stop` runs the command instead of becoming a prompt. (#156)
@@ -146,6 +149,16 @@
   flag now governs only bare top-level channel text, which stays off for `leads`
   (an email bot's "STOP" is an unsubscribe keyword, not a command) and is on for
   `dm`, making `admin` mode identical to `dm` and a permanent alias. (#156)
+
+- `BridgeTransport` now queues per-channel like Slack/Telegram, so two
+  requests sharing a `conversationKey` (same `requestId` ⇒ same
+  `BRIDGE-{id}`/`SESSION-{id}` channel) run one at a time instead of two
+  concurrent runs interleaving writes to one `context.jsonl`. (#138)
+
+- `injectSessionMessage` honors the same 5-message-per-channel queue cap as
+  `enqueueEvent`, checked before the response promise is registered: a full
+  queue rejects immediately (the API handler returns 504) instead of hanging
+  until the 90s session timeout. (#138)
 
 ### Docs
 

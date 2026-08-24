@@ -80,6 +80,87 @@ test("BridgeTransport.replaceMessage on a non-BRIDGE channel is a no-op (SESSION
 	await assert.doesNotReject(() => ctx.replaceMessage("some text"));
 });
 
+// Issue #138: two enqueueEvent() calls on the same channel used to dispatch
+// straight into the engine with no queue, so both runs executed concurrently
+// against one ChannelState/context.jsonl. The per-channel queue must instead
+// run them one at a time, in order.
+test("BridgeTransport.enqueueEvent serializes concurrent requests on the same channel", async () => {
+	const active = new Set();
+	let maxConcurrent = 0;
+	const order = [];
+	const transport = new BridgeTransport({
+		promptProfile: { fragments: [] },
+		workingDir: mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-")),
+		dispatch: async (event) => {
+			active.add(event.text);
+			maxConcurrent = Math.max(maxConcurrent, active.size);
+			// Resolve out of enqueue order to prove the queue — not incidental
+			// ordering — is what serializes the runs.
+			await new Promise((r) => setTimeout(r, event.text === "first" ? 30 : 5));
+			active.delete(event.text);
+			order.push(event.text);
+		},
+	});
+
+	transport.enqueueEvent({ channel: "BRIDGE-same", user: "test", text: "first", ts: "1" });
+	transport.enqueueEvent({ channel: "BRIDGE-same", user: "test", text: "second", ts: "2" });
+
+	await new Promise((r) => setTimeout(r, 100));
+
+	assert.equal(maxConcurrent, 1, "two events on one channel must never run concurrently");
+	assert.deepEqual(order, ["first", "second"]);
+});
+
+test("BridgeTransport.enqueueEvent runs different channels concurrently", async () => {
+	const active = new Set();
+	let maxConcurrent = 0;
+	const transport = new BridgeTransport({
+		promptProfile: { fragments: [] },
+		workingDir: mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-")),
+		dispatch: async (event) => {
+			active.add(event.channel);
+			maxConcurrent = Math.max(maxConcurrent, active.size);
+			await new Promise((r) => setTimeout(r, 20));
+			active.delete(event.channel);
+		},
+	});
+
+	transport.enqueueEvent({ channel: "BRIDGE-a", user: "test", text: "x", ts: "1" });
+	transport.enqueueEvent({ channel: "BRIDGE-b", user: "test", text: "y", ts: "2" });
+
+	await new Promise((r) => setTimeout(r, 60));
+
+	assert.equal(maxConcurrent, 2, "unrelated channels must not block each other");
+});
+
+// injectSessionMessage shares the SESSION-{id} channel queue with enqueueEvent,
+// so it must honor the same 5-message cap. Checked *before* registerSessionRequest:
+// a full queue must reject immediately (the API handler turns that into a 504)
+// rather than register a promise that hangs until its 90s timeout.
+test("BridgeTransport.injectSessionMessage rejects when the channel queue is full", async () => {
+	let release;
+	const gate = new Promise((r) => (release = r));
+	const transport = new BridgeTransport({
+		promptProfile: { fragments: [] },
+		workingDir: mkdtempSync(join(tmpdir(), "iris-bridge-transport-test-")),
+		dispatch: () => gate, // never resolves until `release` — keeps 1 run active + N queued
+	});
+
+	// First event starts processing (shifted out of the queue), the next five fill
+	// the queue to the cap; the seventh enqueueEvent is the overflow sentinel.
+	for (let i = 0; i < 6; i++) {
+		assert.equal(
+			transport.enqueueEvent({ channel: "SESSION-full", user: "test", text: String(i), ts: String(i) }),
+			true,
+			`enqueue ${i} should be accepted`,
+		);
+	}
+	assert.equal(transport.enqueueEvent({ channel: "SESSION-full", user: "test", text: "overflow", ts: "6" }), false);
+
+	await assert.rejects(() => transport.injectSessionMessage("full", "test", "hello"), /queue full/);
+	release();
+});
+
 // #217: SESSION- turns driven through the API must reach log.jsonl even on a
 // bridge-only install (no Slack/Telegram transport to do the logging).
 test("BridgeTransport.injectSessionMessage logs the user message to the session's log.jsonl", async () => {
