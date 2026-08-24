@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-24
+
 ### Added
 
 - Bridge replies now survive a dropped connection or a sub-agent restart
