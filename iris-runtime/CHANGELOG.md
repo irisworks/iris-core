@@ -41,6 +41,10 @@
   not a security boundary — pattern matching is trivially bypassed by an
   adversarial model, and docs say exactly that.
 
+- Structural (schema-aware) compression for large JSON tool output: `bash`,
+  `read`, and MCP tool results now emit a compact summary (keys/shape plus a
+  handful of sample values) instead of a blind head/tail byte cut when the
+  output is valid JSON over the size limit. (#158)
 - Read handlers: workspace-discovered `read-handlers/<name>/handler.json`
   shell recipes that map a sniffed MIME type to a text-extraction command,
   hot-reloading the same way skills do. Core ships one, `pdf-text`
@@ -75,6 +79,14 @@
   API changes and is tracked separately.
 
 ### Fixed
+
+- `SESSION-` channel turns are now written to the session's `log.jsonl` on
+  every transport. Slack and Telegram already logged them, but turns driven
+  through `POST /sessions/:id/message` on a headless install (Bridge/Web
+  transports) left no trace: `GET /sessions/:id/history` came back empty and
+  restart replay had nothing to restore context from. The user message is now
+  logged by `injectSessionMessage` and the run's final reply as a bot entry,
+  matching the existing Slack/Telegram entry shape. (#217)
 
 - Langfuse tool observations now reach the dashboard. The legacy REST batch
   endpoint (`/api/public/ingestion`) silently rejected `TOOL`-typed events

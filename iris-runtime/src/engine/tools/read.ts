@@ -5,7 +5,14 @@ import type { Executor } from "../sandbox.js";
 import { resizeImageIfNeededAsync } from "../image-resize.js";
 import { detectImageMimeType, detectMimeType, MIME_SNIFF_BYTES } from "../mime.js";
 import { loadReadHandlerRegistry, renderHandlerCommand } from "../read-handlers.js";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import {
+	compressJsonStructure,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type TruncationResult,
+	truncateHead,
+} from "./truncate.js";
 
 /**
  * Sniff a file's type from its magic bytes, not its filename — a mislabeled
@@ -204,8 +211,12 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				userLimitedLines = endLine;
 			}
 
-			// Apply truncation (respects both line and byte limits)
-			const truncation = truncateHead(selectedContent);
+			// For large JSON files, prefer a schema-aware structural summary over
+			// blind head truncation so the model still sees keys/shape and sample
+			// values instead of an arbitrarily cut-off blob. Falls back to normal
+			// line/byte truncation when the content isn't (fully) valid JSON - e.g.
+			// an offset/limit slice of a file that cuts JSON mid-structure.
+			const truncation = compressJsonStructure(selectedContent) ?? truncateHead(selectedContent);
 
 			let outputText: string;
 			let details: ReadToolDetails | undefined;
@@ -214,6 +225,13 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				// First line at offset exceeds 50KB - tell model to use bash
 				const firstLineSize = formatSize(Buffer.byteLength(selectedContent.split("\n")[0], "utf-8"));
 				outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
+				details = { truncation };
+			} else if (truncation.truncatedBy === "structure") {
+				outputText = `${truncation.content}\n\n[File is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw content. Use bash/jq to query specific values.]`;
+				const summarizedEnd = startLineDisplay + truncation.totalLines - 1;
+				if (summarizedEnd < totalFileLines) {
+					outputText += ` Use offset=${summarizedEnd + 1} to continue past the summarized section.`;
+				}
 				details = { truncation };
 			} else if (truncation.truncated) {
 				// Truncation occurred - build actionable notice
