@@ -53,7 +53,10 @@ env vars.
 The runtime loads provider endpoints and model definitions from
 `<workspace>/models.json` (generated from `data/models.json.template` at bootstrap).
 Anthropic and OpenAI work out of the box; custom endpoints (Azure AI Foundry,
-DeepSeek, Mistral, AWS Bedrock) are defined in the template. Switch with:
+DeepSeek, Mistral, AWS Bedrock) are defined in the template. Model and API-key
+resolution go through one shared runtime created at startup — a malformed
+`models.json` fails the boot instead of surfacing on the first message. Switch
+with:
 
 ```bash
 IRIS_PROVIDER=anthropic
@@ -91,6 +94,17 @@ automatic and has no env var to tune; a decode failure just falls back to
 sending the original size as-is. An animated GIF or WebP over those limits
 is sent as-is rather than resized, to avoid silently collapsing it to a
 single still frame.
+
+LLM calls retry at two layers. Inside a single request, transient provider
+errors (429s with a `Retry-After`, mid-stream connection resets) are retried
+automatically with capped backoff, so one blip no longer fails the whole
+turn; hung streams fail fast on an idle timeout instead of hanging until the
+outer timer kills them (setting the idle timeout to `0` disables it, as
+documented, rather than timing out immediately). On top of that, Iris's own
+whole-turn retry loop (`IRIS_LLM_MAX_RETRIES`, `IRIS_LLM_RETRY_BASE_MS`,
+`IRIS_LLM_TIMEOUT_SECS`) still catches anything that escapes — if
+`IRIS_LLM_TIMEOUT_SECS` ever fires while a provider-level retry is still
+backing off, raise it.
 
 A PDF attachment is listed in the prompt like any other non-image file; the
 `read` tool then extracts its text layer via the core-shipped `pdf-text`

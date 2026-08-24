@@ -136,7 +136,7 @@ await validateSandbox(sandbox);
 // Engine (per-channel state + run/stop/compact/reset flows)
 // ============================================================================
 
-const engine = createEngine({ workingDir, sandbox, provider, model, botToken: IRIS_SLACK_BOT_TOKEN });
+const engine = await createEngine({ workingDir, sandbox, provider, model, botToken: IRIS_SLACK_BOT_TOKEN });
 
 // ============================================================================
 // Migration — move flat channel dirs into slack/ and telegram/ subdirectories

@@ -1,13 +1,13 @@
 import { Agent, type AgentEvent } from "@earendil-works/pi-agent-core";
-import { getModel, type ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import {
 	AgentSession,
-	AuthStorage,
 	convertToLlm,
 	createExtensionRuntime,
 	formatSkillsForPrompt,
 	loadSkillsFromDir,
-	ModelRegistry,
+	ModelRuntime,
+	type ModelRuntimeAuthOverrides,
 	type ResourceLoader,
 	SessionManager,
 	type Skill,
@@ -66,16 +66,42 @@ export interface AgentRunner {
 	reset(): void;
 }
 
-async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
-	const key = await authStorage.getApiKey("anthropic");
-	if (!key) {
-		throw new Error(
-			"No API key found for anthropic.\n\n" +
-				"Set an API key environment variable, or use /login with Anthropic and link to auth.json from " +
-				join(homedir(), ".pi", "iris", "auth.json"),
-		);
-	}
-	return key;
+// Shared model/auth runtime (pi-coding-agent >= 0.84), one per workspace
+// working directory. It owns auth.json credential resolution and models.json
+// custom provider loading, which are identical for every channel in that
+// workspace. Created once per workingDir (create() is async) and handed to
+// each runner in that workspace, so runner creation itself stays synchronous
+// and per-channel caching semantics are unchanged. Keyed by workingDir rather
+// than a single global so a second workspace can't silently inherit the
+// first one's providers/auth (a single-slot cache did exactly that).
+const modelRuntimesByWorkingDir = new Map<string, Promise<ModelRuntime>>();
+
+export function getModelRuntime(workingDir: string): Promise<ModelRuntime> {
+	const existing = modelRuntimesByWorkingDir.get(workingDir);
+	if (existing) return existing;
+
+	const workspaceModelsJson = join(workingDir, "models.json");
+	const runtimePromise = (async () => {
+		// null disables models.json loading entirely — without a workspace
+		// models.json we want built-ins only, NOT the agent-dir default path.
+		// Normalize bare env-var-name apiKey fields to "$NAME" first (see
+		// normalizeModelsJsonApiKeys' doc comment) — 0.84's config resolver treats
+		// an un-prefixed value as a literal string, not an env reference.
+		const modelsPath = existsSync(workspaceModelsJson)
+			? normalizeModelsJsonApiKeys(workspaceModelsJson, join(homedir(), ".pi", "iris"))
+			: null;
+		const runtime = await ModelRuntime.create({
+			authPath: join(homedir(), ".pi", "iris", "auth.json"),
+			modelsPath,
+		});
+		// See applySecretStoreApiKeyFallback's doc comment for why this wraps the
+		// runtime method itself instead of only feeding the getApiKey() callback
+		// each runner registers on its Agent (#242).
+		applySecretStoreApiKeyFallback(runtime, workspaceModelsJson);
+		return runtime;
+	})();
+	modelRuntimesByWorkingDir.set(workingDir, runtimePromise);
+	return runtimePromise;
 }
 
 /**
@@ -478,6 +504,9 @@ const channelRunners = new Map<string, AgentRunner>();
 /**
  * Get or create an AgentRunner for a channel.
  * Runners are cached - one per channel, persistent across messages.
+ *
+ * Requires the shared ModelRuntime from getModelRuntime() — create that first
+ * (engine init awaits it) so runner construction can stay synchronous.
  */
 export function getOrCreateRunner(
 	sandboxConfig: SandboxConfig,
@@ -486,30 +515,30 @@ export function getOrCreateRunner(
 	provider: string,
 	modelId: string,
 	workingDir: string,
+	modelRuntime: ModelRuntime,
 ): AgentRunner {
 	const existing = channelRunners.get(channelId);
 	if (existing) return existing;
 
-	const runner = createRunner(sandboxConfig, channelId, channelDir, provider, modelId, workingDir);
+	const runner = createRunner(sandboxConfig, channelId, channelDir, provider, modelId, workingDir, modelRuntime);
 	channelRunners.set(channelId, runner);
 	return runner;
 }
 
-// pi-coding-agent's ModelRegistry only migrates a bare "MY_KEY" apiKey value to a
-// resolvable "$MY_KEY" env reference for providers added via registerProvider();
-// providers loaded from a models.json file skip that migration, so
-// getApiKeyAndHeaders() resolves the raw string as a literal and echoes it back
-// verbatim — even when the named env var is set. Every consumer of that registry
-// is affected, including AgentSession.compact() and branch-summary, which (unlike
-// normal turns) don't go through iris-core's isUnresolvedEchoedConfig guard below.
-// Fix it at the source instead: rewrite bare legacy-style apiKey values to "$NAME"
-// before the file reaches ModelRegistry, so resolution is correct for every caller.
-// Only rewrite when the named env var is actually set — an apiKey that merely looks
-// like one (e.g. a literal all-caps key) but has no matching env var is left as-is,
-// so this migration can't turn a previously-working literal key into a 401.
+// pi-coding-agent's config resolver (resolveConfigValue, used by ModelRuntime.getAuth)
+// only treats a "$"-prefixed value as an env reference; a bare "MY_KEY" apiKey value —
+// the shape models.json's custom providers use — is a plain literal, resolved and
+// returned as-is regardless of process.env. Every consumer of ModelRuntime is affected,
+// including AgentSession.compact() and branch-summary, which (unlike normal turns) don't
+// go through iris-core's applySecretStoreApiKeyFallback guard below. Fix it at the source
+// instead: rewrite bare legacy-style apiKey values to "$NAME" before the file reaches
+// ModelRuntime, so resolution is correct for every caller. Only rewrite when the named
+// env var is actually set — an apiKey that merely looks like one (e.g. a literal all-caps
+// key) but has no matching env var is left as-is, so this migration can't turn a
+// previously-working literal key into a 401.
 const LEGACY_ENV_VAR_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 
-export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: string): string {
+export function normalizeModelsJsonApiKeys(sourcePath: string, destDir: string): string {
 	let parsed: { providers?: Record<string, { apiKey?: string }> };
 	try {
 		parsed = JSON.parse(readFileSync(sourcePath, "utf8"));
@@ -528,43 +557,44 @@ export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: strin
 		}
 	}
 	if (!changed) return sourcePath;
-	mkdirSync(channelDir, { recursive: true });
-	const normalizedPath = join(channelDir, ".models-normalized.json");
+	mkdirSync(destDir, { recursive: true });
+	const normalizedPath = join(destDir, ".models-normalized.json");
 	writeFileSync(normalizedPath, JSON.stringify(parsed, null, "\t"));
 	return normalizedPath;
 }
 
 /**
- * pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders) falls
- * back to echoing the raw config string when the env var it names isn't set:
- * `process.env[config] || config`. models.json's custom providers (azure-foundry, deepseek,
- * mistral, custom) configure "apiKey" as an env var name (e.g. "MISTRAL_API_KEY"), so once
- * store/proxy mode scrubs that var from process.env after migrating the real key to the
- * secret store, getApiKeyAndHeaders reports `ok: true, apiKey: "MISTRAL_API_KEY"` — the
- * literal env var name, not a real key. And a `$`-prefixed value (e.g. "$MISTRAL_API_KEY")
- * makes resolveConfigValue throw outright once the var is scrubbed, instead of echoing.
+ * pi-coding-agent's resolveConfigValue() (used by ModelRuntime.getAuth) only treats a
+ * `$`-prefixed value as an env reference; a bare value like "MISTRAL_API_KEY" — the shape
+ * models.json's custom providers (azure-foundry, deepseek, mistral, custom) use — is a plain
+ * literal, resolved and returned as-is regardless of process.env. normalizeModelsJsonApiKeys
+ * (applied to the file handed to ModelRuntime.create()) rewrites that bare name to "$NAME"
+ * whenever the named env var is actually set at boot, so normal env-backed installs never hit
+ * this. But store/proxy secrets mode deliberately keeps that env var out of process.env at
+ * boot (the real key lives in the secret store instead), so normalization leaves the field
+ * untouched and getAuth() reports `apiKey: "MISTRAL_API_KEY"` — the literal field value, not a
+ * real key. A `$`-prefixed value (e.g. "$MISTRAL_API_KEY") behaves differently once its env var
+ * is missing: resolveConfigValueOrThrow() throws instead of echoing.
  *
- * pi-coding-agent's AgentSession also calls ModelRegistry.getApiKeyAndHeaders() directly in
- * several internal paths (manual/auto compaction, branch-summary) instead of going through a
- * getApiKey() callback — so a fallback registered only on the Agent's getApiKey() option never
- * runs for those paths and they throw/silently no-op once a models.json provider's env var is
- * scrubbed from process.env (#242). Wrap the registry method itself so every caller — ours and
- * pi-coding-agent's internal ones — gets the same secret-store fallback, instead of chasing
- * each new bypassing call site individually.
+ * ModelRuntime.getAuth() is the single choke point every LLM call goes through — including
+ * pi-coding-agent's internal paths (manual/auto compaction, branch-summary) that call it
+ * directly instead of going through the Agent's getApiKey() callback (#242's original bug:
+ * a fallback registered only on getApiKey() never ran for those paths). Wrap the runtime
+ * method itself so every caller — ours and pi-coding-agent's internal ones — gets the same
+ * secret-store fallback, instead of chasing each new bypassing call site individually.
  *
  * hasConfiguredAuth() has the identical bypass: it resolves the configured apiKey directly
- * against process.env with no secret-store awareness, and it runs *earlier* than
- * getApiKeyAndHeaders() in AgentSession's message-send pre-flight check — so once a
- * models.json key is scrubbed, every turn fails before #242's fix is ever reached (#248).
- * It's also called synchronously (getAvailable/getModels' model filter, setModel(), the
- * scoped-models filter, the /model command, and session-restore in sdk.js/model-resolver.js
- * all call it without awaiting), so unlike getApiKeyAndHeaders above, its fallback can't
- * consult a broker over the network — only the synchronous, locally-backed SecretStore
- * (store mode) and process.env are checked. Broker mode keeps relying on
- * getApiKeyAndHeaders()'s async fallback for the actual key; hasConfiguredAuth() here is
- * only the pre-flight "is something configured" gate.
+ * against process.env with no secret-store awareness, and it runs *earlier* than getAuth() in
+ * AgentSession's message-send pre-flight check — so once a models.json key is scrubbed, every
+ * turn fails before the getAuth() fix above is ever reached (#248). It's also called
+ * synchronously (getAvailable/getModels' model filter, setModel(), the scoped-models filter,
+ * the /model command, and session-restore in sdk.js/model-resolver.js all call it without
+ * awaiting), so unlike getAuth() above, its fallback can't consult a broker over the network —
+ * only the synchronous, locally-backed SecretStore (store mode) and process.env are checked.
+ * Broker mode keeps relying on getAuth()'s async fallback for the actual key;
+ * hasConfiguredAuth() here is only the pre-flight "is something configured" gate.
  */
-export function applySecretStoreApiKeyFallback(modelRegistry: ModelRegistry, workspaceModelsJsonPath: string): void {
+export function applySecretStoreApiKeyFallback(modelRuntime: ModelRuntime, workspaceModelsJsonPath: string): void {
 	const configuredApiKeysByProvider = ((): Record<string, string | undefined> => {
 		if (!existsSync(workspaceModelsJsonPath)) return {};
 		try {
@@ -579,41 +609,59 @@ export function applySecretStoreApiKeyFallback(modelRegistry: ModelRegistry, wor
 		}
 	})();
 
+	type GetAuthResult = Awaited<ReturnType<ModelRuntime["getAuth"]>>;
+
 	const resolveApiKeyWithSecretFallback = async (
-		providerName: string,
-		auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>,
+		providerId: string,
+		auth: GetAuthResult,
 	): Promise<string | undefined> => {
-		const configuredApiKeyField = configuredApiKeysByProvider[providerName];
-		const isUnresolvedEchoedConfig =
-			auth.ok && Boolean(configuredApiKeyField) && auth.apiKey === configuredApiKeyField;
-		if (auth.ok && auth.apiKey && !isUnresolvedEchoedConfig) return auth.apiKey;
+		const configuredApiKeyField = configuredApiKeysByProvider[providerId];
+		const isUnresolvedLiteralConfig =
+			Boolean(auth?.auth.apiKey) && Boolean(configuredApiKeyField) && auth?.auth.apiKey === configuredApiKeyField;
+		if (auth?.auth.apiKey && !isUnresolvedLiteralConfig) return auth.auth.apiKey;
 		// Secrets provider (store/broker in store/proxy modes; env-backed
 		// otherwise) — this is what keeps the LLM key working once it no longer
 		// lives in .env/process.env.
-		const brokered = await getSecretProvider().get(`${providerName.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`);
+		const brokered = await getSecretProvider().get(`${providerId.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`);
 		if (brokered) return brokered;
 		// Fallback env var: ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, etc. (models.json's
 		// per-provider "apiKey" field, handled above, is checked first — that's how
 		// providers with a non-standard env var name like AZURE_FOUNDRY_KEY work.)
-		return process.env[`${providerName.toUpperCase().replace(/-/g, "_")}_API_KEY`];
+		return process.env[`${providerId.toUpperCase().replace(/-/g, "_")}_API_KEY`];
 	};
 
-	const originalGetApiKeyAndHeaders = modelRegistry.getApiKeyAndHeaders.bind(modelRegistry);
-	modelRegistry.getApiKeyAndHeaders = async (forModel) => {
-		const auth = await originalGetApiKeyAndHeaders(forModel);
-		const resolved = await resolveApiKeyWithSecretFallback(forModel.provider, auth);
-		if (resolved) return { ok: true, apiKey: resolved, headers: auth.ok ? auth.headers : undefined };
-		return auth;
+	const originalGetAuth = modelRuntime.getAuth.bind(modelRuntime);
+	const wrappedGetAuth = async (
+		providerOrModel: string | { provider: string },
+		overrides?: ModelRuntimeAuthOverrides,
+	): Promise<GetAuthResult> => {
+		const providerId = typeof providerOrModel === "string" ? providerOrModel : providerOrModel.provider;
+		let auth: GetAuthResult;
+		let thrown: unknown;
+		try {
+			auth = await originalGetAuth(providerOrModel as string, overrides);
+		} catch (err) {
+			auth = undefined;
+			thrown = err;
+		}
+		const resolved = await resolveApiKeyWithSecretFallback(providerId, auth);
+		if (!resolved) {
+			if (thrown) throw thrown;
+			return auth;
+		}
+		if (auth?.auth.apiKey === resolved) return auth;
+		return { ...(auth ?? { auth: {} }), auth: { ...(auth?.auth ?? {}), apiKey: resolved } };
 	};
+	modelRuntime.getAuth = wrappedGetAuth as ModelRuntime["getAuth"];
 
-	const originalHasConfiguredAuth = modelRegistry.hasConfiguredAuth.bind(modelRegistry);
-	modelRegistry.hasConfiguredAuth = (forModel) => {
-		if (originalHasConfiguredAuth(forModel)) return true;
+	const originalHasConfiguredAuth = modelRuntime.hasConfiguredAuth.bind(modelRuntime);
+	modelRuntime.hasConfiguredAuth = (providerId: string) => {
+		if (originalHasConfiguredAuth(providerId)) return true;
 		if (secretsMode() === "store") {
-			const storeKey = `${forModel.provider.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`;
+			const storeKey = `${providerId.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`;
 			if (SecretStore.open()?.get(storeKey) !== undefined) return true;
 		}
-		const envKey = `${forModel.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+		const envKey = `${providerId.toUpperCase().replace(/-/g, "_")}_API_KEY`;
 		return process.env[envKey] !== undefined;
 	};
 }
@@ -629,40 +677,25 @@ function createRunner(
 	provider: string,
 	modelId: string,
 	workingDir: string,
+	modelRuntime: ModelRuntime,
 ): AgentRunner {
 	const executor = createExecutor(sandboxConfig, channelId);
 	const workspaceDir = workingDir;
 	const workspacePath = executor.getWorkspacePath(workspaceDir);
 
-	// Create AuthStorage and ModelRegistry early so we can resolve custom providers.
-	// models.json from the workspace is passed so Foundry/custom providers are loaded.
-	// Auth stored outside workspace so agent can't access it.
-	const authStorage = AuthStorage.create(join(homedir(), ".pi", "iris", "auth.json"));
-	const workspaceModelsJson = join(workspaceDir, "models.json");
-	const registryModelsJson = existsSync(workspaceModelsJson)
-		? normalizeModelsJsonApiKeys(workspaceModelsJson, channelDir)
-		: undefined;
-	const modelRegistry = ModelRegistry.create(authStorage, registryModelsJson);
-
-	// Resolve model from registry (handles built-in providers and custom providers from models.json).
-	// Fall back to getModel() for built-in-only providers if registry doesn't find it.
-	// Resolved before tool creation below so the read tool knows whether this model
-	// accepts image input.
+	// Resolve model from the shared ModelRuntime (built-ins + custom providers
+	// from the workspace models.json). Resolved before tool creation below so the
+	// read tool knows whether this model accepts image input.
 	const model = (() => {
-		const found = modelRegistry.find(provider, modelId);
+		const found = modelRuntime.getModel(provider, modelId);
 		if (found) {
-			log.logInfo(`[${channelId}] Using model from registry: ${provider}/${modelId}`);
+			log.logInfo(`[${channelId}] Using model from runtime: ${provider}/${modelId}`);
 			return found;
 		}
-		log.logWarning(`[${channelId}] Model ${provider}/${modelId} not in registry, trying built-in getModel()`);
-		try {
-			return getModel(provider as Parameters<typeof getModel>[0], modelId as Parameters<typeof getModel>[1]);
-		} catch {
-			throw new Error(
-				`Model '${provider}/${modelId}' not found in registry or built-ins. ` +
-					`Check models.json at ${workspaceModelsJson} or use a known provider.`,
-			);
-		}
+		throw new Error(
+			`Model '${provider}/${modelId}' not found. ` +
+				`Check models.json at ${join(workspaceDir, "models.json")} or use a known provider.`,
+		);
 	})();
 
 	// Create tools — read needs to know up front whether the active model accepts
@@ -677,19 +710,15 @@ function createRunner(
 		channelDir,
 	});
 
-	// See applySecretStoreApiKeyFallback's doc comment for why this wraps the registry
-	// method itself instead of only feeding the getApiKey() callback below (#242).
-	applySecretStoreApiKeyFallback(modelRegistry, workspaceModelsJson);
-
-	// getApiKey: ModelRegistry (wrapped above) handles env var lookup, auth storage, and
-	// secret-store fallback for any provider.
-	const getApiKey = async (): Promise<string> => {
-		const auth = await modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok && auth.apiKey) return auth.apiKey;
-		throw new Error(
-			`No API key found for provider '${provider}'. ` +
-				`Set ${provider.toUpperCase().replace(/-/g, "_")}_API_KEY env var or configure auth.`,
-		);
+	// getApiKey: delegates to the shared ModelRuntime's auth resolution — the same
+	// wrapped getAuth() (see applySecretStoreApiKeyFallback, applied once when the
+	// runtime was created) that pi-coding-agent's internal compaction/branch-summary
+	// calls use directly. Delegating here instead of duplicating the secret-store
+	// lookup keeps this a single source of truth and avoids an extra broker round
+	// trip on every turn when the runtime already resolved a real key.
+	const getApiKey = async (): Promise<string | undefined> => {
+		const auth = await modelRuntime.getAuth(provider);
+		return auth?.auth.apiKey;
 	};
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills
@@ -725,6 +754,28 @@ function createRunner(
 		},
 		convertToLlm,
 		getApiKey,
+		// Mandatory as of pi-agent-core 0.84. Wired through the shared ModelRuntime
+		// (auth.json + models.json resolution happens there) with the same
+		// settings-driven retry/timeout plumbing upstream's SDK uses: provider-level
+		// retries absorb transient blips (429s, mid-stream resets) inside a single
+		// LLM call; the whole-turn retry loop in run() stays the backstop for
+		// failures that escape it.
+		streamFn: async (streamModel, streamContext, streamOptions) => {
+			const providerRetry = settingsManager.getProviderRetrySettings();
+			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
+			// httpIdleTimeoutMs: 0 is the documented "disabled" setting, but SDKs treat
+			// timeout=0 as an immediate timeout, not "no timeout" — match pi-coding-agent's
+			// own reference streamFn and substitute max int32 so "disabled" actually means
+			// disabled instead of failing every stream call immediately.
+			const effectiveIdleTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
+			return modelRuntime.streamSimple(streamModel, streamContext, {
+				...streamOptions,
+				timeoutMs: streamOptions?.timeoutMs ?? providerRetry.timeoutMs ?? effectiveIdleTimeoutMs,
+				websocketConnectTimeoutMs: streamOptions?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
+				maxRetries: streamOptions?.maxRetries ?? providerRetry.maxRetries,
+				maxRetryDelayMs: providerRetry.maxRetryDelayMs,
+			});
+		},
 		// Forwarded to providers that key caching/routing off it (openai-responses'
 		// prompt_cache_key, mistral's x-affinity). Anthropic/Bedrock ignore it — they
 		// cache off cache_control breakpoints instead. Channel id is a stable,
@@ -747,7 +798,11 @@ function createRunner(
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 		getSystemPrompt: () => systemPrompt,
+		// Required as of pi-coding-agent 0.84; the prompt isn't sourced from a
+		// file here, so there is no path to report.
+		getSystemPromptSource: () => undefined,
 		getAppendSystemPrompt: () => [],
+		getAppendSystemPromptSources: () => [],
 		extendResources: () => {},
 		reload: async () => {},
 	};
@@ -760,7 +815,7 @@ function createRunner(
 		sessionManager,
 		settingsManager,
 		cwd: process.cwd(),
-		modelRegistry,
+		modelRuntime,
 		resourceLoader,
 		baseToolsOverride,
 	});

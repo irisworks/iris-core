@@ -21,6 +21,41 @@
   the GitHub Release from `iris-runtime/package.json` + the CHANGELOG entry,
   replacing the manual multi-command sequence in `docs/RELEASING.md`.
 
+### Changed
+
+- Bumped `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, and
+  `@earendil-works/pi-coding-agent` from 0.79.0 to 0.84.2 (they version in
+  lockstep) and migrated the engine wiring to the new API (#215):
+  - Model and auth resolution moved from the removed
+    `AuthStorage`/`ModelRegistry.create()` pair to a single `ModelRuntime`
+    per workspace, created once at engine startup (auth at
+    `~/.pi/iris/auth.json`, custom providers from `<workspace>/models.json`
+    as before). A broken models.json or auth file now fails fast at startup
+    instead of on the first message.
+  - The agent's stream function is now wired through `ModelRuntime.streamSimple`
+    with upstream's settings-driven retry/timeout plumbing: provider-level
+    retries absorb transient blips (429s, mid-stream connection resets) inside
+    a single LLM call instead of failing the whole turn, and hung streams fail
+    fast on an idle timeout rather than waiting out Iris's blunt whole-call
+    timer — including the `httpIdleTimeoutMs: 0` ("disabled") setting, which
+    is now substituted with max int32 like upstream's own reference streamFn
+    does, instead of causing every stream call to fail immediately. The
+    whole-turn retry loop (`IRIS_LLM_MAX_RETRIES` etc.) remains as the
+    backstop; if its `IRIS_LLM_TIMEOUT_SECS` fires while a provider-level
+    retry is backing off, raise it — no code change needed.
+  - `normalizeModelsJsonApiKeys` (the models.json bare-apiKey-to-`$NAME`
+    rewrite) and `applySecretStoreApiKeyFallback` (the secret-store/broker
+    fallback wrapping every auth-resolution call, including pi-coding-agent's
+    internal compaction/branch-summary paths) now target `ModelRuntime`
+    instead of the removed `ModelRegistry`. 0.84's config resolver treats a
+    bare (un-prefixed) `apiKey` value as a literal string rather than an env
+    reference — without the fallback, a custom provider's key would silently
+    resolve to that literal field value in store/proxy secrets mode instead
+    of a real key or a clear error.
+  - Model resolution is registry-only now: an unknown `provider/model`
+    combination errors with a pointer to `models.json` instead of falling
+    back to pi-ai's deprecated built-in catalog lookup.
+
 ## [1.10.1] - 2026-09-01
 
 ### Fixed
