@@ -128,9 +128,28 @@ done
 #   2. whatever the existing install's /iris/.env records — a plain re-run never
 #      silently migrates an env-mode install; pass --secrets-mode=store once to
 #      opt in (import-env is idempotent, so re-runs are safe either way)
-#   3. fresh install → store
+#   3. legacy install with credentials but no recorded mode → env (logged;
+#      only genuinely fresh installs fall through to store)
 if [[ -z "$SECRETS_MODE" && -f "$IRIS_DIR/.env" ]]; then
   SECRETS_MODE=$(grep -m1 '^IRIS_SECRETS_MODE=' "$IRIS_DIR/.env" | cut -d= -f2- || true)
+  # Legacy install (predates the secrets-mode feature): .env records no mode.
+  # If it still holds credentials, keep env mode — silently defaulting to
+  # store would prune those lines and break anything reading .env directly
+  # (e.g. env-mode terraform sub-agents). Same list as SENSITIVE_ENV_VARS in
+  # iris-runtime/src/engine/secret-store.ts.
+  if [[ -z "$SECRETS_MODE" ]]; then
+    for var in AZURE_FOUNDRY_KEY FOUNDRY_E2_KEY DEEPSEEK_API_KEY MISTRAL_API_KEY \
+               CUSTOM_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY AWS_ACCESS_KEY_ID \
+               AWS_SECRET_ACCESS_KEY IRIS_SLACK_APP_TOKEN IRIS_SLACK_BOT_TOKEN \
+               TELEGRAM_BOT_TOKEN GITHUB_TOKEN RESEND_API_KEY PERPLEXITY_API_KEY; do
+      val=$(grep -m1 "^${var}=" "$IRIS_DIR/.env" | cut -d= -f2- || true)
+      if [[ -n "$val" ]]; then
+        SECRETS_MODE="env"
+        log "Legacy env-mode install detected ($var set, no recorded secrets mode) — keeping env mode. Pass --secrets-mode=store to migrate."
+        break
+      fi
+    done
+  fi
 fi
 SECRETS_MODE="${SECRETS_MODE:-store}"
 

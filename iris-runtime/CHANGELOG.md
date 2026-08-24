@@ -65,7 +65,10 @@
   flag or `IRIS_SECRETS_MODE` env var → whatever the existing install's
   `/iris/.env` records (a plain re-run never silently migrates an env-mode
   install; pass `--secrets-mode=store` once to opt in) → `store` for fresh
-  installs. Existing env-mode installs are unaffected until they re-run
+  installs. Pre-broker installs whose `/iris/.env` records no mode but still
+  holds credentials are detected and kept in `env` mode (with a log line)
+  rather than silently migrated; only genuinely fresh installs get `store`.
+  Existing env-mode installs are unaffected until they re-run
   bootstrap with the flag. A failed `import-env` is no longer silent: it dies
   with a message pointing at the env fallback that keeps credentials resolving.
   Docs: `docs/secrets.md` (store-first intro + mode table), `SECURITY.md`,
