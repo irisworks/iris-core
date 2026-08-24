@@ -276,6 +276,7 @@ if (tgBot) transports.push(tgBot);
 // before profiles existed); a bridge-specific prompt is a decision for later.
 const bridge = new BridgeTransport({
 	promptProfile: { ...slackPromptProfile, transportId: "bridge" },
+	workingDir,
 	dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
 });
 transports.push(bridge);
