@@ -56,20 +56,21 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 				output += result.stderr;
 			}
 
-			const totalBytes = Buffer.byteLength(output, "utf-8");
+			// For large JSON output, prefer a schema-aware structural summary over
+			// blind tail truncation so the model still sees keys/shape and sample
+			// values instead of an arbitrarily cut-off blob.
+			const truncation = compressJsonStructure(output) ?? truncateTail(output);
 
-			// Write to temp file if output exceeds limit
-			if (totalBytes > DEFAULT_MAX_BYTES) {
+			// Write to temp file whenever truncation occurred (whether by lines,
+			// bytes, or structural summarization) so the notices below can always
+			// point at the full output.
+			if (truncation.truncated) {
 				tempFilePath = getTempFilePath();
 				tempFileStream = createWriteStream(tempFilePath);
 				tempFileStream.write(output);
 				tempFileStream.end();
 			}
 
-			// For large JSON output, prefer a schema-aware structural summary over
-			// blind tail truncation so the model still sees keys/shape and sample
-			// values instead of an arbitrarily cut-off blob.
-			const truncation = compressJsonStructure(output) ?? truncateTail(output);
 			let outputText = truncation.content || "(no output)";
 
 			// Build details with truncation info

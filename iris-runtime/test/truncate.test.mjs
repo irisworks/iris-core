@@ -552,3 +552,31 @@ test("compressJsonStructure: whitespace-wrapped JSON is still detected", () => {
 test("compressJsonStructure: empty content returns null", () => {
 	assert.equal(compressJsonStructure("", { maxLines: 1, maxBytes: 1 }), null);
 });
+
+test("compressJsonStructure: a real key named _note is preserved, not clobbered by the synthetic note", () => {
+	const obj = { _note: "REAL DATA - do not lose me", padding: "x".repeat(3000) };
+	for (let i = 0; i < 60; i++) obj[`key${i}`] = i;
+	const content = JSON.stringify(obj);
+	const result = compressJsonStructure(content, { maxLines: 5, maxBytes: 1500 });
+	assert.ok(result);
+	const parsed = JSON.parse(result.content);
+	assert.equal(parsed._note, "REAL DATA - do not lose me");
+	assert.match(parsed._note2, /50 of 62/);
+});
+
+test("compressJsonStructure: payload over the hard parse ceiling falls back to truncation (returns null)", () => {
+	// Larger than JSON_PARSE_MAX_BYTES (10MB) but valid JSON - must not be
+	// parsed synchronously; the caller falls back to cheap byte truncation.
+	const content = JSON.stringify({ blob: "x".repeat(11 * 1024 * 1024) });
+	assert.equal(compressJsonStructure(content, { maxLines: 10, maxBytes: 1000 }), null);
+});
+
+test("compressJsonStructure: long strings are cut on code-point boundaries (no lone surrogates)", () => {
+	const emoji = "😀".repeat(300); // each emoji is a surrogate pair (2 code units)
+	const content = JSON.stringify({ text: emoji });
+	const result = compressJsonStructure(content, { maxLines: 10, maxBytes: 1000 });
+	assert.ok(result);
+	const parsed = JSON.parse(result.content);
+	assert.ok(!/[\uD800-\uDBFF](?:$|[^\uDC00-\uDFFF])/.test(parsed.text), "no unpaired high surrogate");
+	assert.match(parsed.text, /\(600 chars total\)$/);
+});

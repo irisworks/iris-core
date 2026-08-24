@@ -171,6 +171,10 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				details = { truncation };
 			} else if (truncation.truncatedBy === "structure") {
 				outputText = `${truncation.content}\n\n[File is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw content. Use bash/jq to query specific values.]`;
+				const summarizedEnd = startLineDisplay + truncation.totalLines - 1;
+				if (summarizedEnd < totalFileLines) {
+					outputText += ` Use offset=${summarizedEnd + 1} to continue past the summarized section.`;
+				}
 				details = { truncation };
 			} else if (truncation.truncated) {
 				// Truncation occurred - build actionable notice

@@ -224,6 +224,20 @@ const JSON_SAMPLE_ITEMS = 3;
 const JSON_SAMPLE_KEYS = 50;
 const JSON_MAX_STRING_LENGTH = 200;
 const JSON_MAX_DEPTH = 6;
+// Hard ceiling on payload size before we attempt a synchronous JSON.parse.
+// Anything larger falls back to cheap byte truncation instead of potentially
+// blocking the event loop parsing a pathological payload.
+const JSON_PARSE_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Cut a string to at most `max` code points without splitting surrogate pairs. */
+function sliceCodePoints(value: string, max: number): string {
+	let out = "";
+	for (const char of value) {
+		if (out.length + char.length > max) break;
+		out += char;
+	}
+	return out;
+}
 
 /**
  * Recursively reduce a parsed JSON value to a compact structural summary:
@@ -235,7 +249,7 @@ const JSON_MAX_DEPTH = 6;
 function summarizeJsonValue(value: unknown, depth: number): unknown {
 	if (typeof value === "string") {
 		return value.length > JSON_MAX_STRING_LENGTH
-			? `${value.slice(0, JSON_MAX_STRING_LENGTH)}… (${value.length} chars total)`
+			? `${sliceCodePoints(value, JSON_MAX_STRING_LENGTH)}… (${value.length} chars total)`
 			: value;
 	}
 
@@ -266,7 +280,14 @@ function summarizeJsonValue(value: unknown, depth: number): unknown {
 		result[key] = summarizeJsonValue(val, depth + 1);
 	}
 	if (entries.length > JSON_SAMPLE_KEYS) {
-		result._note = `showing ${sampleEntries.length} of ${entries.length} keys`;
+		// Avoid clobbering a real key from the source object that happens to be
+		// named "_note" (or "_note2", ...) - keep incrementing until we find a
+		// name that isn't already one of the sampled keys.
+		let noteKey = "_note";
+		for (let i = 2; noteKey in result; i++) {
+			noteKey = `_note${i}`;
+		}
+		result[noteKey] = `showing ${sampleEntries.length} of ${entries.length} keys`;
 	}
 	return result;
 }
@@ -287,6 +308,13 @@ export function compressJsonStructure(content: string, options: TruncationOption
 	const totalLines = content.split("\n").length;
 
 	if (totalLines <= maxLines && totalBytes <= maxBytes) {
+		return null;
+	}
+
+	// Don't attempt to parse pathologically large payloads - a synchronous
+	// JSON.parse of hundreds of MB would block the event loop. Cheap byte
+	// truncation is the right fallback at that scale.
+	if (totalBytes > JSON_PARSE_MAX_BYTES) {
 		return null;
 	}
 
