@@ -27,19 +27,19 @@
   cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`,
   `100.100.100.100`) are refused outright, and destructive commands (`rm -rf /`
   and near-root variants, `mkfs*`, `dd of=/dev/*`, `terraform destroy`,
-  force-pushes to `main`/`master`/`release/*`, writes to `/etc/passwd`/
-  `sudoers*`/`authorized_keys`/`sshd_config`, `systemctl disable|mask
-  iris.service`) are held until the user explicitly confirms them in chat — the
-  model asks, ends its turn, and may re-run the exact same command once after an
-  affirmative human reply in the channel log. Every command appends a JSONL
-  entry (channel, decision, exit code) to `<workspace>/meta/bash-audit.log`
-  (override with `IRIS_BASH_AUDIT_FILE`); the writer only ever appends, never
-  truncates, and `docs/bash-policy.md` documents the root-owned `chattr +a`
-  setup that makes entries survive agent-side erasure attempts.
-  `IRIS_BASH_POLICY=off` disables refusals and confirmation gates as an
-  explicit escape hatch (auditing stays on). The layer is accident-catching,
-  not a security boundary — pattern matching is trivially bypassed by an
-  adversarial model, and docs say exactly that.
+  force-pushes to `main`/`master`/`release/*` including the `+refspec` force
+  syntax, writes to `/etc/passwd`/`sudoers*`/`authorized_keys`/`sshd_config`,
+  `systemctl disable|mask iris.service`) are held until the user explicitly
+  confirms them in chat — the model asks, ends its turn, and may re-run the
+  exact same command once after an affirmative human reply in the channel log.
+  Every command appends a JSONL entry (channel, decision, exit code) to
+  `<workspace>/meta/bash-audit.log` (override with `IRIS_BASH_AUDIT_FILE`);
+  the writer only ever appends, never truncates, and `docs/bash-policy.md`
+  documents the root-owned `chattr +a` setup that makes entries survive
+  agent-side erasure attempts. `IRIS_BASH_POLICY=off` disables refusals and
+  confirmation gates as an explicit escape hatch (auditing stays on). The
+  layer is accident-catching, not a security boundary — pattern matching is
+  trivially bypassed by an adversarial model, and docs say exactly that.
 
 - Structural (schema-aware) compression for large JSON tool output: `bash`,
   `read`, and MCP tool results now emit a compact summary (keys/shape plus a

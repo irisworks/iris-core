@@ -54,7 +54,7 @@ const CONFIRM_MKFS = /\bmkfs(\.\w+)?\b/;
 const CONFIRM_DD_TO_DEVICE = /\bdd\b[^;&|\n]*\bof=\/dev\//;
 const CONFIRM_TERRAFORM_DESTROY = /\bterraform\s+destroy\b/;
 
-const GIT_PUSH_FORCE = /\bgit\s+push\b[^;&|\n]*(--force\b|--force-with-lease\b|\s-f\b)/;
+const GIT_PUSH_FORCE = /\bgit\s+push\b[^;&|\n]*(--force\b|--force-with-lease\b|\s-f\b|\s\+(?=\S))/;
 const PROTECTED_BRANCH = /\b(origin\s+|upstream\s+)?(main|master|release\/[\w.-]+)\b/;
 
 // Sensitive system files paired with something that writes to them — reading
@@ -143,8 +143,9 @@ const AFFIRMATION_RE =
 
 /**
  * Scan <channelDir>/log.jsonl for a non-bot message recorded after `sinceMs`
- * whose text starts with an affirmation. Fails closed: any read/parse error
- * means "no affirmation".
+ * whose text starts with an affirmation. ANY affirming message since the
+ * request counts — a later unrelated reply does not revoke an earlier "yes".
+ * Fails closed: any read/parse error means "no affirmation".
  */
 export function hasHumanAffirmationSince(channelDir: string, sinceMs: number): boolean {
 	try {
@@ -165,7 +166,7 @@ export function hasHumanAffirmationSince(channelDir: string, sinceMs: number): b
 			// timestamps count as "after" so a fast reply isn't missed.
 			if (!Number.isFinite(entryMs) || entryMs < sinceMs) continue;
 			if (entry.isBot) continue;
-			return AFFIRMATION_RE.test(entry.text ?? "");
+			if (AFFIRMATION_RE.test(entry.text ?? "")) return true;
 		}
 		return false;
 	} catch {

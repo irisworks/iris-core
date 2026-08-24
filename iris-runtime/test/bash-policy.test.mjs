@@ -86,6 +86,8 @@ const CONFIRMED = [
 	["force push to main", "git push --force origin main"],
 	["short force flag to master", "git push -f origin master"],
 	["force-with-lease to protected branch", "git push --force-with-lease upstream release/1.0"],
+	["plus-refspec force push to main", "git push origin +main"],
+	["plus-refspec force push to full main ref", "git push origin +refs/heads/main"],
 	["append to /etc/passwd", "echo 'h:x:0:0::/root:/bin/bash' >> /etc/passwd"],
 	["chmod on sudoers", "sudo chmod 777 /etc/sudoers"],
 	["sed -i on sshd_config", "sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config"],
@@ -107,6 +109,7 @@ const CONFIRM_NEAR_MISS_ALLOWED = [
 	["plain rm of a file", "rm old.log"],
 	["recursive rm of a relative dir", "rm -r src/cache"],
 	["force push to a feature branch", "git push --force origin feature-x"],
+	["plus-refspec force push to a feature branch", "git push origin +feature-x"],
 	["normal push to main", "git push origin main"],
 	["reading /etc/passwd is fine", "cat /etc/passwd | wc -l"],
 	["grep on sudoers without write verb", "grep iris /etc/sudoers"],
@@ -227,6 +230,19 @@ test("confirmation: bot messages and non-affirmations don't unlock", () => {
 
 	appendLogEntry(channelDir, { user: "U123", text: "nah skip it", isBot: false });
 	assert.equal(isConfirmedByHuman(channelId, command, channelDir), false);
+	rmSync(channelDir, { recursive: true, force: true });
+});
+
+test("confirmation: an affirming reply counts even if the human keeps chatting after it", () => {
+	const channelDir = makeTempDir("confirm-chatter");
+	const channelId = "tg-confirm-3";
+	const command = "terraform destroy";
+
+	recordConfirmationRequest(channelId, command);
+	appendLogEntry(channelDir, { user: "U123", text: "yes", isBot: false });
+	appendLogEntry(channelDir, { user: "iris", text: "Holding for confirmation.", isBot: true });
+	appendLogEntry(channelDir, { user: "U123", text: "and also check the logs while you are at it", isBot: false });
+	assert.equal(isConfirmedByHuman(channelId, command, channelDir), true, "earlier yes is not revoked by later chatter");
 	rmSync(channelDir, { recursive: true, force: true });
 });
 
