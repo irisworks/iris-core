@@ -280,7 +280,16 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
  * which tells a recovering caller there is nothing to resume.
  */
 function handleJobPoll(res: ServerResponse, url: URL): void {
-	const requestId = decodeURIComponent(url.pathname.slice("/bridge/jobs/".length));
+	// Malformed percent-encoding (e.g. `/bridge/jobs/%zz`) makes decodeURIComponent
+	// throw; escaping the async handler would be an unhandled rejection that takes
+	// the whole sub-agent process down.
+	let requestId: string;
+	try {
+		requestId = decodeURIComponent(url.pathname.slice("/bridge/jobs/".length));
+	} catch {
+		jsonResponse(res, 400, { error: "invalid requestId" });
+		return;
+	}
 	const parsedSince = Number.parseInt(url.searchParams.get("since") ?? "0", 10);
 	const since = Number.isFinite(parsedSince) && parsedSince > 0 ? parsedSince : 0;
 	const path = bridgeJobPath(requestId);
@@ -729,7 +738,10 @@ async function recoverFromJobLog(
 	const path = `/bridge/jobs/${encodeURIComponent(requestId)}`;
 	let lastEventAt = Date.now();
 	while (Date.now() < deadline && Date.now() - lastEventAt < idleTimeoutMs) {
-		await new Promise((r) => setTimeout(r, Math.min(bridgeJobPollMs(), Math.max(deadline - Date.now(), 0)) || bridgeJobPollMs()));
+		// Floor the delay: a misconfigured IRIS_BRIDGE_JOB_POLL_MS=0 must not
+		// turn this into a tight fetch loop for the whole give-up window.
+		const delay = Math.max(50, Math.min(bridgeJobPollMs(), Math.max(deadline - Date.now(), 0)));
+		await new Promise((r) => setTimeout(r, delay));
 		let body: { done?: boolean; events?: BridgeStreamLine[] };
 		try {
 			const res = await fetch(`${bridgeUrl}${path}?since=${progress.seq}`, {

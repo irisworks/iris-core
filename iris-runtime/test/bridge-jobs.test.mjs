@@ -296,6 +296,19 @@ test("job log: a reused conversation key starts a fresh log", { timeout: 10_000 
 	}
 });
 
+test("GET /bridge/jobs/:id answers 400 (not a crash) on malformed percent-encoding", { timeout: 10_000 }, async () => {
+	const port = 19709;
+	const bridge = withBridgeServer(port);
+	try {
+		// decodeURIComponent throws on `%zz`; escaping the async handler would be
+		// an unhandled rejection that kills the sub-agent process.
+		const res = await fetch(`http://127.0.0.1:${port}/bridge/jobs/%zz`);
+		assert.equal(res.status, 400);
+	} finally {
+		bridge.close();
+	}
+});
+
 test("job log: sweep removes logs older than the retention window; 0 disables", { timeout: 10_000 }, async () => {
 	const port = 19707;
 	const bridge = withBridgeServer(port);
