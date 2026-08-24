@@ -279,6 +279,12 @@ Sessions are the backbone of `thread`/`interactive-thread`
 [channel modes](channel-modes.md) and of human-in-the-loop workflows (reset +
 inject-turn let a human take over a conversation seamlessly).
 
+Every turn is durably logged: the injected user message and Iris's final reply
+are both appended to the session's `SESSION-<id>/log.jsonl`, no matter which
+transport served the turn (Slack, Telegram, or a headless bridge/web install).
+This is what `GET /sessions/:id/history` returns and what gets replayed into
+context after a restart.
+
 ### Driving a session from your own application
 
 This API — not the [web UI transport](web-ui.md) — is the integration surface

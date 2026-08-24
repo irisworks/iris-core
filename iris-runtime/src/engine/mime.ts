@@ -11,7 +11,7 @@
 import { fileTypeFromBuffer, fileTypeFromFile } from "file-type";
 
 /** MIME types pi-ai's ImageContent (and every provider module that consumes it) accepts. */
-const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+export const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
 /** Bytes needed for file-type's magic-byte sniffing; matches its own recommended sniff window. */
 export const MIME_SNIFF_BYTES = 4100;
@@ -42,4 +42,16 @@ export async function detectImageMimeTypeFromFile(path: string): Promise<string 
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Detect any file's MIME type from its magic bytes (same sniff window as
+ * detectImageMimeType), with no allowlist. Used to dispatch to a read-handler
+ * (see read-handlers.ts) for non-image formats — e.g. PDF — so the read
+ * tool's text path never dumps raw binary at the model just because a
+ * filename lied about the format or was absent.
+ */
+export async function detectMimeType(buffer: Buffer): Promise<string | undefined> {
+	const fileType = await fileTypeFromBuffer(buffer);
+	return fileType?.mime;
 }

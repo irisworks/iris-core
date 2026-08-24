@@ -8,6 +8,14 @@
   `read`, and MCP tool results now emit a compact summary (keys/shape plus a
   handful of sample values) instead of a blind head/tail byte cut when the
   output is valid JSON over the size limit. (#158)
+- Read handlers: workspace-discovered `read-handlers/<name>/handler.json`
+  shell recipes that map a sniffed MIME type to a text-extraction command,
+  hot-reloading the same way skills do. Core ships one, `pdf-text`
+  (`pdftotext -layout`, `poppler-utils` now installed by `bootstrap.sh`), so
+  the `read` tool extracts a PDF's text layer instead of dumping raw binary
+  at the model — scanned/image-only PDFs have no text layer and read back
+  empty. Overlays add or override handlers by directory name, same rule as
+  skills. See `docs/read-handlers.md`. (#141)
 
 ### Security
 
@@ -28,8 +36,20 @@
   (prototype pollution / NO_PROXY bypass in axios, CRLF injection in
   form-data). `extract-zip` (pulled in by `@mariozechner/pi-coding-agent`)
   has no upstream fix yet — tracked, not resolved.
+- Bumped `ws` (8.20.0 → 8.21.3) and transitive `hono`, `fast-uri`, `ip-address`
+  to their latest patch releases. Split out of the `pi-coding-agent` 0.84.2
+  group bump, which requires `agent.ts` changes for that release's breaking
+  API changes and is tracked separately.
 
 ### Fixed
+
+- `SESSION-` channel turns are now written to the session's `log.jsonl` on
+  every transport. Slack and Telegram already logged them, but turns driven
+  through `POST /sessions/:id/message` on a headless install (Bridge/Web
+  transports) left no trace: `GET /sessions/:id/history` came back empty and
+  restart replay had nothing to restore context from. The user message is now
+  logged by `injectSessionMessage` and the run's final reply as a bot entry,
+  matching the existing Slack/Telegram entry shape. (#217)
 
 - Langfuse tool observations now reach the dashboard. The legacy REST batch
   endpoint (`/api/public/ingestion`) silently rejected `TOOL`-typed events

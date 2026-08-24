@@ -88,6 +88,14 @@ sending the original size as-is. An animated GIF or WebP over those limits
 is sent as-is rather than resized, to avoid silently collapsing it to a
 single still frame.
 
+A PDF attachment is listed in the prompt like any other non-image file; the
+`read` tool then extracts its text layer via the core-shipped `pdf-text`
+[read handler](read-handlers.md) (`pdftotext` from `poppler-utils`, installed
+by `bootstrap.sh`) rather than handing the model raw binary. A scanned or
+image-only PDF has no text layer and reads back empty — there's no OCR
+fallback in core, so a photo of a document should be sent as an image
+instead, or an overlay can add its own OCR-capable handler.
+
 The `openai` provider defaults to `gpt-5.6-luna` (`gpt-5.4-mini` and
 `gpt-5.6-terra` are also available) and uses `pi-ai`'s `openai-responses`
 module, not `openai-completions` — these models 400 on `/v1/chat/completions`

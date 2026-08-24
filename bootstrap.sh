@@ -209,6 +209,11 @@ fi
 
 if ! command -v jq &>/dev/null; then sudo apt-get install -y jq; fi
 
+# poppler-utils' pdftotext backs the core-shipped pdf-text read handler (see
+# docs/read-handlers.md) — scanned/image-only PDFs have no text layer and
+# read back empty.
+if ! command -v pdftotext &>/dev/null; then sudo apt-get install -y poppler-utils; fi
+
 # nginx + certbot are installed in step 5, and only when a public domain
 # (IRIS_BASE_DOMAIN) is configured — the default path serves nothing publicly.
 
@@ -1240,6 +1245,7 @@ mkdir -p "$IRIS_DIR/data"
 ln -sfn "$REPO_DIR/data/MEMORY.md"       "$IRIS_DIR/data/MEMORY.md"
 ln -sfn "$REPO_DIR/data/CONSTITUTION.md" "$IRIS_DIR/data/CONSTITUTION.md"
 ln -sfn "$REPO_DIR/skills"          "$IRIS_DIR/data/skills"
+ln -sfn "$REPO_DIR/read-handlers"   "$IRIS_DIR/data/read-handlers"
 
 # Skill scripts are documented and invoked by other skills as bare commands,
 # but nothing else puts a skill's own directory on PATH — the sandbox executor

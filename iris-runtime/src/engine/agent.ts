@@ -544,7 +544,7 @@ function createRunner(
 	// image input, so it can tell the model an image was skipped instead of
 	// claiming success while pi-ai silently strips the image content downstream.
 	const supportsImageInput = model.input.includes("image");
-	const tools = createIrisTools(executor, { supportsImageInput });
+	const tools = createIrisTools(executor, { supportsImageInput, workspaceDir: workingDir });
 
 	// pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders)
 	// falls back to echoing the raw config string when the env var it names isn't
