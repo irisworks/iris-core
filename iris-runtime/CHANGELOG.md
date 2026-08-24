@@ -4,6 +4,43 @@
 
 ### Added
 
+- Bridge replies now survive a dropped connection or a sub-agent restart
+  mid-request (durable job handle). Alongside the live NDJSON stream, every
+  `status`/`final`/`error` event is appended to
+  `{workingDir}/bridge-jobs/{requestId}.jsonl` with a monotonic `seq`, and the
+  bridge server serves that log back via `GET /bridge/jobs/{requestId}?since={seq}`
+  (events after `seq` plus a `done` flag). When a stream breaks mid-run,
+  `callAgentBridge()` resumes from its last seen `seq` and polls the job log
+  until the reply shows up instead of failing — stream-when-connected,
+  poll-to-recover, both reading the same log. A caller disconnect is not
+  recorded as a failure: the run keeps going and the reply stays recoverable.
+  Finished logs are swept after `IRIS_BRIDGE_JOB_RETENTION_MS` (default 24h);
+  recovery re-polls every `IRIS_BRIDGE_JOB_POLL_MS` (default 2s) and gives up
+  on the overall bridge deadline or `IRIS_BRIDGE_IDLE_TIMEOUT_MS` of silence.
+  What remains unrecoverable by design: if Iris herself restarts mid-request
+  nobody re-issues the poll automatically — the reply stays in the sub-agent's
+  job log for manual fetch until the sweep. See `docs/sub-agents.md`. (#137)
+
+- Bash tool policy layer with a tamper-resistant command audit log (#131).
+  Every bash command is now screened before execution: reads of secret files
+  (`.env`, `secret.key`, `secrets.json.enc`, `agents.json`) and requests to
+  cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`,
+  `100.100.100.100`) are refused outright, and destructive commands (`rm -rf /`
+  and near-root variants, `mkfs*`, `dd of=/dev/*`, `terraform destroy`,
+  force-pushes to `main`/`master`/`release/*`, writes to `/etc/passwd`/
+  `sudoers*`/`authorized_keys`/`sshd_config`, `systemctl disable|mask
+  iris.service`) are held until the user explicitly confirms them in chat — the
+  model asks, ends its turn, and may re-run the exact same command once after an
+  affirmative human reply in the channel log. Every command appends a JSONL
+  entry (channel, decision, exit code) to `<workspace>/meta/bash-audit.log`
+  (override with `IRIS_BASH_AUDIT_FILE`); the writer only ever appends, never
+  truncates, and `docs/bash-policy.md` documents the root-owned `chattr +a`
+  setup that makes entries survive agent-side erasure attempts.
+  `IRIS_BASH_POLICY=off` disables refusals and confirmation gates as an
+  explicit escape hatch (auditing stays on). The layer is accident-catching,
+  not a security boundary — pattern matching is trivially bypassed by an
+  adversarial model, and docs say exactly that.
+
 - Structural (schema-aware) compression for large JSON tool output: `bash`,
   `read`, and MCP tool results now emit a compact summary (keys/shape plus a
   handful of sample values) instead of a blind head/tail byte cut when the
