@@ -91,7 +91,7 @@ variable "image_dependency" {
 }
 
 variable "secrets_mode" {
-  description = "Host secrets mode (IRIS_SECRETS_MODE). With \"env\" (default) the container inherits the whole /iris/.env via --env-file, matching pre-mode behavior. With \"store\" or \"proxy\" the env files are NOT passed: the agent resolves secrets through the parent API's /secret/:name route (per-agent allow-list in agents.json), so unique_api_token must be true and the agent's `secrets` array must list every name it needs — including its LLM key (e.g. ANTHROPIC-API-KEY). See docs/secrets.md."
+  description = "Host secrets mode (IRIS_SECRETS_MODE). With \"env\" (default, kept for backward compatibility) the container inherits the whole /iris/.env via --env-file. With \"store\" or \"proxy\" the env files are NOT passed: the agent resolves secrets through the parent API's /secret/:name route (per-agent allow-list in agents.json), so unique_api_token must be true and the agent's `secrets` array must list every name it needs — including its LLM key (e.g. ANTHROPIC-API-KEY). Set this to match the host: bootstrap.sh defaults fresh hosts to \"store\" (credentials pruned from .env), and an env-mode container pointed at a store-mode host's .env finds no credentials in it. See docs/secrets.md."
   type        = string
   default     = "env"
 

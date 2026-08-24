@@ -55,17 +55,18 @@ When deploying Iris Core:
 - Sub-agents resolve secrets through the internal API (`GET /secrets/:name`)
   and must be allow-listed per secret in `agents.json` — grant each agent only
   the secrets it needs
-- Optional hardened backends: Azure Key Vault (`IRIS_KEY_VAULT`), the bundled
-  credential broker (`IRIS_SECRETS_MODE=store|proxy` — see `docs/secrets.md`),
-  or an external broker (`IRIS_SECRET_BROKER_URL` — Vault, Infisical, or any
-  HTTP service speaking the contract)
-- `env` mode (the default) puts every secret in the runtime's process
-  environment, so any bash tool call the agent runs — `env`, `cat /iris/.env`
-  — can read and echo it. `store` mode moves secrets into an encrypted local
-  file and scrubs them from the process environment after startup; `proxy`
-  mode adds a separate-uid broker daemon so the agent process can't read the
-  key material at all, and secrets marked proxy-only can be *used* (via the
-  injection gateway) but never read as plaintext by anyone
+- Hardened backends: Azure Key Vault (`IRIS_KEY_VAULT`), the bundled
+  credential broker (`IRIS_SECRETS_MODE=store|proxy` — `store` is the default;
+  see `docs/secrets.md`), or an external broker (`IRIS_SECRET_BROKER_URL` —
+  Vault, Infisical, or any HTTP service speaking the contract)
+- Legacy `env` mode (explicit opt-out) puts every secret in the runtime's
+  process environment, so any bash tool call the agent runs — `env`,
+  `cat /iris/.env` — can read and echo it. The default `store` mode moves
+  secrets into an encrypted local file and scrubs them from the process
+  environment after startup; `proxy` mode adds a separate-uid broker daemon so
+  the agent process can't read the key material at all, and secrets marked
+  proxy-only can be *used* (via the injection gateway) but never read as
+  plaintext by anyone
 - Rotate secrets regularly
 - Use separate secrets for preview and prod environments
 - Never ask a user to paste a secret into chat — it lands in the LLM's

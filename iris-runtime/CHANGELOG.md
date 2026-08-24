@@ -56,6 +56,24 @@
 
 ### Security
 
+- `bootstrap.sh` now defaults `IRIS_SECRETS_MODE=store` (#130): fresh installs
+  get the AES-256-GCM encrypted secret store (keygen + `iris-secret import-env
+  /iris/.env --prune`, both idempotent, no new daemon) instead of plaintext
+  credentials in `/iris/.env`, closing the cheapest leak path — one `env` or
+  `cat /iris/.env` tool call used to expose every key to the LLM context,
+  transcripts, and channel logs. Resolution order: explicit `--secrets-mode`
+  flag or `IRIS_SECRETS_MODE` env var → whatever the existing install's
+  `/iris/.env` records (a plain re-run never silently migrates an env-mode
+  install; pass `--secrets-mode=store` once to opt in) → `store` for fresh
+  installs. Pre-broker installs whose `/iris/.env` records no mode but still
+  holds credentials are detected and kept in `env` mode (with a log line)
+  rather than silently migrated; only genuinely fresh installs get `store`.
+  Existing env-mode installs are unaffected until they re-run
+  bootstrap with the flag. A failed `import-env` is no longer silent: it dies
+  with a message pointing at the env fallback that keeps credentials resolving.
+  Docs: `docs/secrets.md` (store-first intro + mode table), `SECURITY.md`,
+  `README.md`, `docs/configuration.md`, `docs/sub-agents.md`,
+  `skills/search-web/search.sh`.
 - Migrated `pi-agent-core`, `pi-ai`, and `pi-coding-agent` from the deprecated
   `@mariozechner` npm scope to `@earendil-works` at 0.79.0, fixing three
   high/moderate advisories with no fix released under the old scope

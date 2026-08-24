@@ -177,9 +177,9 @@ merges them into this `secrets` array. Skip this and the skill fails the
 moment it's invoked (a 403 from `GET /secrets/:name`), not at spawn time —
 the agent looks fully set up until then.
 
-With the host's `IRIS_SECRETS_MODE` set to `store` or `proxy`,
+With the host's `IRIS_SECRETS_MODE` set to `store` (the default) or `proxy`,
 `terraform/modules/agent`'s `secrets_mode` variable (default `"env"`, matching
-today's behavior) stops passing the whole `--env-file /iris/.env` to the
+pre-store behavior) stops passing the whole `--env-file /iris/.env` to the
 container — the agent gets only its identity and an `IRIS_SECRET_BROKER_URL`
 pointing at the parent's API, and resolves everything through the `secrets`
 allow-list above. That means the allow-list must now include **every**
