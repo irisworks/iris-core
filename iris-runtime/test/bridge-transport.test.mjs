@@ -129,3 +129,30 @@ test("BridgeTransport.enqueueEvent runs different channels concurrently", async 
 
 	assert.equal(maxConcurrent, 2, "unrelated channels must not block each other");
 });
+
+// injectSessionMessage shares the SESSION-{id} channel queue with enqueueEvent,
+// so it must honor the same 5-message cap. Checked *before* registerSessionRequest:
+// a full queue must reject immediately (the API handler turns that into a 504)
+// rather than register a promise that hangs until its 90s timeout.
+test("BridgeTransport.injectSessionMessage rejects when the channel queue is full", async () => {
+	let release;
+	const gate = new Promise((r) => (release = r));
+	const transport = new BridgeTransport({
+		promptProfile: { fragments: [] },
+		dispatch: () => gate, // never resolves until `release` — keeps 1 run active + N queued
+	});
+
+	// First event starts processing (shifted out of the queue), the next five fill
+	// the queue to the cap; the seventh enqueueEvent is the overflow sentinel.
+	for (let i = 0; i < 6; i++) {
+		assert.equal(
+			transport.enqueueEvent({ channel: "SESSION-full", user: "test", text: String(i), ts: String(i) }),
+			true,
+			`enqueue ${i} should be accepted`,
+		);
+	}
+	assert.equal(transport.enqueueEvent({ channel: "SESSION-full", user: "test", text: "overflow", ts: "6" }), false);
+
+	await assert.rejects(() => transport.injectSessionMessage("full", "test", "hello"), /queue full/);
+	release();
+});

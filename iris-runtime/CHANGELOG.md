@@ -31,6 +31,11 @@
   `BRIDGE-{id}`/`SESSION-{id}` channel) run one at a time instead of two
   concurrent runs interleaving writes to one `context.jsonl`. (#138)
 
+- `injectSessionMessage` honors the same 5-message-per-channel queue cap as
+  `enqueueEvent`, checked before the response promise is registered: a full
+  queue rejects immediately (the API handler returns 504) instead of hanging
+  until the 90s session timeout. (#138)
+
 ### Docs
 
 - `docs/web-ui.md` states what the web transport is not: the bundled page is a

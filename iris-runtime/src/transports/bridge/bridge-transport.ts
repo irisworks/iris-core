@@ -185,12 +185,21 @@ export class BridgeTransport implements ChannelTransport {
 		text: string,
 		attachments: Array<{ local: string }> = [],
 	): Promise<string> {
-		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
+		// Same 5-message-per-channel convention as enqueueEvent above. Checked
+		// before registerSessionRequest so a full queue fails fast (the HTTP
+		// handler in api.ts maps the rejection to a 504) instead of registering a
+		// promise that hangs until its 90s timeout while queued work waits.
+		const queue = this.getQueue(channelId);
+		if (queue.size() >= 5) {
+			log.logWarning(`[bridge] Session message queue full for ${channelId}, rejecting: ${text.substring(0, 50)}`);
+			throw new Error(`session message queue full for ${channelId}`);
+		}
+		const { registerSessionRequest } = await import("../../engine/sessions.js");
 		const ts = (Date.now() / 1000).toFixed(6);
 		const responsePromise = registerSessionRequest(sessionId, 90_000);
 		const event = { channel: channelId, user, text, ts, attachments };
-		this.getQueue(channelId).enqueue(async () => {
+		queue.enqueue(async () => {
 			await this.dispatch(event, this);
 		});
 		return responsePromise;
