@@ -91,8 +91,10 @@ MCP support is degradation-proof by design:
   subsequent messages, so a crashed stdio server self-heals.
 - Individual tools whose schemas fail validation are dropped with a log
   line; the rest of the server's tools still work.
-- Tool output is truncated with the same line/byte limits as bash output, so
-  a chatty server can't blow the context window.
+- Tool output is capped with the same line/byte limits as bash output, so
+  a chatty server can't blow the context window. JSON output over the limit
+  gets a structural summary (keys/shape and sample values) instead of a
+  blind tail cut; anything else falls back to raw truncation.
 
 ## Verification
 

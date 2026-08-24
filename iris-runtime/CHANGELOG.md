@@ -4,6 +4,10 @@
 
 ### Added
 
+- Structural (schema-aware) compression for large JSON tool output: `bash`,
+  `read`, and MCP tool results now emit a compact summary (keys/shape plus a
+  handful of sample values) instead of a blind head/tail byte cut when the
+  output is valid JSON over the size limit. (#158)
 - Read handlers: workspace-discovered `read-handlers/<name>/handler.json`
   shell recipes that map a sniffed MIME type to a text-extraction command,
   hot-reloading the same way skills do. Core ships one, `pdf-text`
