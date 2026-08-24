@@ -24,6 +24,7 @@
 - `docs/` is the documentation source of truth — it is rendered on the public website, so pages must stand alone (frontmatter title/description, no repo-internal jargon).
 
 ## Repo Guidance
+- Implement new features and PR reviews in a **fresh git worktree** (`git worktree add ../<repo>-<branch> <branch>`), never directly in the live checkout — this VM's `/iris/repo` checkout is what `iris.service` runs from, and skills hot-reload from it, so uncommitted/intermediate edits there go live immediately.
 - Keep `CLAUDE.md` current as the latest repo-level guidance file. When workflows, conventions, or maintenance expectations change, update `CLAUDE.md` with them.
 - Keep `README.md` and `plan.md` aligned with the actual live VM state. When bootstrap, runtime wiring, model defaults, or verification status change, update those docs in the same workstream.
 - Prefer concrete operational facts over aspirational wording in repo docs. Record the exact runtime path, service name, model, and what was verified versus what is still open.
