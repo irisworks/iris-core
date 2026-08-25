@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-08-25
+
 ### Added
 
 - `GET /sessions/:id/stream`: SSE endpoint on the session API that mirrors a
