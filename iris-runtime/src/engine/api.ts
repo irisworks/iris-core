@@ -41,6 +41,9 @@
  *   POST   /sessions/:id/attachments     — upload a file into the session's attachments/ dir
  *                                          raw body + `X-Filename: <name>`, returns { local }
  *   POST   /sessions/:id/stop            — abort the session's in-flight turn
+ *   GET    /sessions/:id/stream          — SSE stream of the session's live thinking/status/
+ *                                          tool/final/file events (see channel-observers.ts);
+ *                                          capped at 8 concurrent connections per session (429)
  *   GET    /sessions/:id/history         — full log.jsonl as JSON array
  *   POST   /sessions/email-inbound       — route inbound email to matching session
  *   POST   /sessions/open                — post to channel, create session, return sessionId + threadTs
@@ -60,6 +63,7 @@ import {
 	type Session,
 } from "./sessions.js";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
+import { registerChannelObserver, unregisterChannelObserver, type ChannelObserver } from "./channel-observers.js";
 // Type-only (erased at build): engine/index.ts imports nothing from here, and
 // handleStop's transport argument must be the same shape the engine expects.
 import type { EngineTransport } from "./index.js";
@@ -313,6 +317,14 @@ export function startApiServer(
 	const eventsDir = join(workingDir, "events");
 	const apiHost = process.env.IRIS_API_HOST ?? "127.0.0.1";
 	const apiToken = process.env.IRIS_API_TOKEN ?? "";
+
+	// Caps concurrent GET /sessions/:id/stream connections per session — each
+	// one holds a socket, a 15s heartbeat timer, and a channel-observers.ts
+	// registration until it disconnects, so an unbounded count (a runaway
+	// reconnect loop, or a caller opening many at once) is a resource-exhaustion
+	// vector rather than a normal usage pattern.
+	const MAX_STREAM_CONNECTIONS_PER_SESSION = 8;
+	const streamConnectionCounts = new Map<string, number>();
 
 	const server = createServer(async (req, res) => {
 		const url = req.url ?? "/";
@@ -837,6 +849,71 @@ export function startApiServer(
 				// The aborted run still resolves the pending POST /message with whatever
 				// text it produced (engine/index.ts), so the caller isn't left hanging.
 				json(res, 200, { status: "ok", wasRunning });
+				return;
+			}
+
+			// ── GET /sessions/:id/stream ────────────────────────────────────────────────────
+			// SSE mirror of the thinking/status/tool/final/file events channel-observers.ts
+			// already publishes for a `SESSION-` turn (#227). Frames are the raw
+			// ChannelObserverEvent shape, one per SSE `event:`/`data:` pair; the connection
+			// stays open until the client disconnects, with no replay or persistence.
+			// Whether a turn mirrors at all is decided once, when it starts
+			// (isChannelObserved in engine/index.ts) — a client must open this stream
+			// before POSTing the message, or it can miss that turn's events entirely.
+			if (method === "GET" && urlParts[0] === "sessions" && urlParts[2] === "stream") {
+				const sessionId = urlParts[1];
+				const sessions = loadSessions(workingDir);
+				if (!sessions.has(sessionId)) {
+					json(res, 404, { error: "session not found" });
+					return;
+				}
+				const channelId = `SESSION-${sessionId}`;
+				const openStreams = streamConnectionCounts.get(channelId) ?? 0;
+				if (openStreams >= MAX_STREAM_CONNECTIONS_PER_SESSION) {
+					json(res, 429, { error: `too many open streams for this session (max ${MAX_STREAM_CONNECTIONS_PER_SESSION})` });
+					return;
+				}
+				streamConnectionCounts.set(channelId, openStreams + 1);
+				res.writeHead(200, {
+					"Content-Type": "text/event-stream",
+					"Cache-Control": "no-cache",
+					"Connection": "keep-alive",
+					"X-Accel-Buffering": "no",
+				});
+				res.write(":ok\n\n");
+
+				const observer: ChannelObserver = {
+					watching: (id) => id === channelId,
+					emit: (_id, event) => {
+						res.write(`event: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
+					},
+				};
+				registerChannelObserver(observer);
+				log.logInfo(`[api] GET /sessions/${sessionId}/stream: connected`);
+
+				// Heartbeat keeps intermediaries (proxies, load balancers) from timing
+				// out an idle connection between events.
+				const heartbeat = setInterval(() => res.write(":ping\n\n"), 15_000);
+
+				let closed = false;
+				const cleanup = () => {
+					if (closed) return;
+					closed = true;
+					clearInterval(heartbeat);
+					unregisterChannelObserver(observer);
+					const remaining = (streamConnectionCounts.get(channelId) ?? 1) - 1;
+					if (remaining <= 0) streamConnectionCounts.delete(channelId);
+					else streamConnectionCounts.set(channelId, remaining);
+					log.logInfo(`[api] GET /sessions/${sessionId}/stream: disconnected`);
+				};
+				// A client can drop the connection with a reset rather than a clean
+				// FIN — without listeners here that surfaces as an unhandled 'error'
+				// event on req/res and would take the whole process down. 'close'
+				// alone is the common path, but 'error' isn't guaranteed to always be
+				// followed by it, so both trigger the same idempotent cleanup.
+				req.on("error", cleanup);
+				res.on("error", cleanup);
+				req.on("close", cleanup);
 				return;
 			}
 

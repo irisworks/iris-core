@@ -30,11 +30,9 @@ Three limits to be explicit about before building on it:
 - **Application developers should not build against this transport.** The
   internal session API (`api.ts`, see [Sub-agents](sub-agents.md)) is the
   integration surface for a program driving Iris: it owns sessions, messages,
-  attachments, stop, and history. The `SESSION-` support documented below is a
-  stopgap that exists only because live streaming has no home on the API yet;
-  a `GET /sessions/:id/stream` endpoint is designed but not yet implemented, and
-  will replace it. Code that watches turns over this WebSocket should expect to
-  migrate.
+  attachments, stop, history, and now streaming — `GET /sessions/:id/stream`
+  emits the same live events as the `SESSION-` support documented below. Code
+  that watches turns over this WebSocket should migrate to that SSE endpoint.
 
 ## Enabling it
 
@@ -138,13 +136,17 @@ browser's visual replay of prior messages is skipped.
 ## API-driven sessions
 
 Turns driven through the internal session API (`POST /sessions/:id/message`)
-run on a `SESSION-<id>` channel, minted by the runtime itself. Connect with
-`GET /ws?thread=SESSION-<id>` to watch one live: the socket receives that
-session's `thinking`/`status`/`tool`/`final`/`file` frames as the turn runs,
-instead of only seeing the reply when the POST returns. `GET
-/files/SESSION-<id>/<filename>` serves files the agent attaches during the
-turn, and `POST /upload?channel=SESSION-<id>` writes into the same
-`attachments/` directory.
+run on a `SESSION-<id>` channel, minted by the runtime itself. An
+out-of-process consumer should prefer
+[`GET /sessions/:id/stream`](sub-agents.md#driving-a-session-from-your-own-application)
+on the session API itself — it needs neither this transport enabled nor its
+password. This transport's own `GET /ws?thread=SESSION-<id>` remains available
+for the same purpose: the socket receives that session's
+`thinking`/`status`/`tool`/`final`/`file` frames as the turn runs, instead of
+only seeing the reply when the POST returns. `GET /files/SESSION-<id>/<filename>`
+serves files the agent attaches during the turn, and
+`POST /upload?channel=SESSION-<id>` writes into the same `attachments/`
+directory.
 
 **The socket is read-only.** The session API owns the turn; a `{"type":
 "message"}` or `{"type": "command"}` frame on a `SESSION-` socket is refused
@@ -193,8 +195,10 @@ it speaks run events, not wire frames — so `engine/` never imports a concrete
 transport. `WebTransport` is one consumer of it, not its owner.
 
 This is an **in-process** API. An out-of-process consumer (your own backend)
-cannot register an observer; it watches over the WebSocket above today, and
-over `GET /sessions/:id/stream` once that lands.
+cannot register an observer; it watches over the WebSocket above, or over
+[`GET /sessions/:id/stream`](sub-agents.md#driving-a-session-from-your-own-application)
+on the session API — prefer the latter, since it needs neither this transport
+enabled nor its password.
 
 Attachments *inbound to* a session travel on the message body: `POST
 /sessions/:id/message` accepts `attachments: [{local}]`, where each `local` is

@@ -288,6 +288,7 @@ The runtime exposes an internal API (default `127.0.0.1:3000`, always on — see
 | `POST /sessions/:id/message` | Inject a message, wait for Iris's response — body `{text, user?, attachments?}` |
 | `POST /sessions/:id/attachments` | Upload a file into the session's `attachments/` dir (raw body + `X-Filename`), returns the `local` handle for the `attachments` field |
 | `POST /sessions/:id/stop` | Abort the session's in-flight turn |
+| `GET /sessions/:id/stream` | Server-sent events: the session's live `thinking`/`status`/`tool`/`final`/`file` events as the turn runs |
 | `GET /sessions/:id/history` | Full message history |
 | `POST /sessions/:id/reset` | Wipe session context |
 | `POST /sessions/:id/inject-turn` | Append a human-agent turn without triggering the LLM |
@@ -330,10 +331,31 @@ web UI's Stop button — all four call the same `engine.handleStop`. The aborted
 run still resolves the pending `message` request with whatever text it had
 produced, so that caller gets a reply rather than waiting out its timeout.
 
-Two things this API does not do yet: stream a turn's progress (the reply
-arrives only when the turn ends — watch the [web UI](web-ui.md) socket
-meanwhile, or wait for `GET /sessions/:id/stream`), and accept attachments by
-URL (it never fetches; you send the bytes or place the file yourself).
+To watch a turn's progress instead of waiting for `message` to return, open
+`GET /sessions/:id/stream` **before** sending the message — it's a
+`text/event-stream` response, one SSE `event:`/`data:` pair per
+`thinking`/`status`/`tool`/`final`/`file` event
+(see [`ChannelObserverEvent`](web-ui.md#watching-a-run-from-inside-the-runtime)),
+staying open until the client disconnects. Capped at 8 concurrent connections
+per session (a 9th gets `429`) — each open stream holds a socket, a heartbeat
+timer, and an observer registration for as long as it's connected:
+
+```bash
+curl -N "$IRIS/sessions/$ID/stream" -H "Authorization: Bearer $IRIS_API_TOKEN" &
+
+curl -X POST "$IRIS/sessions/$ID/message" \
+  -H "Authorization: Bearer $IRIS_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"text": "review this"}'
+```
+
+There's no replay, and no partial visibility either: whether a turn mirrors to
+watchers at all is decided once, at the moment it starts, from whoever is
+already connected then (`engine/index.ts`'s `isChannelObserved` check). A
+client that opens the stream after `POST /sessions/:id/message` has already
+been sent may miss that entire turn's events, not just the events already
+past — connect first, and nothing is persisted for a later reconnect either.
+One thing this API still does not do: accept attachments by URL (it never
+fetches; you send the bytes or place the file yourself).
 
 `IRIS_API_TOKEN` also authorizes secrets management and channel-addressed event
 injection, so it must stay server-side — never ship it to a browser.

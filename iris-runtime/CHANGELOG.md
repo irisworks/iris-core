@@ -4,6 +4,10 @@
 
 ### Added
 
+- `GET /sessions/:id/stream`: SSE endpoint on the session API that mirrors a
+  session's live `thinking`/`status`/`tool`/`final`/`file` events, so an
+  out-of-process caller can watch an API-driven turn without the
+  `WebTransport` WebSocket (#227).
 - `SENSITIVE_ENV_VARS` is now extensible via `meta/secrets-config.json`
   (`extraSensitiveEnvVars` array), merged into the built-in list for both
   `scrubProcessEnv()` and `iris-secret import-env`. Fixes #228.

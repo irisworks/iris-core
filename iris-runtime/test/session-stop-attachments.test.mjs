@@ -295,6 +295,107 @@ test("session message: a malformed attachments field is a 400, not a crash", asy
 });
 
 // ============================================================================
+// GET /sessions/:id/stream
+// ============================================================================
+
+test("session stream: unknown session is a 404", async () => {
+	const workingDir = makeWorkingDir();
+	const base = startServer(19544, workingDir, { transport: makeTransport() });
+
+	const res = await fetch(`${base}/sessions/does-not-exist/stream`, { method: "GET" });
+	assert.equal(res.status, 404);
+});
+
+test("session stream: forwards channel-observers events for the session's channel as SSE frames", async () => {
+	const { publishChannelEvent, isChannelObserved } = await import("../dist/engine/channel-observers.js");
+	const workingDir = makeWorkingDir();
+	const sessionId = seedSession(workingDir);
+	const base = startServer(19545, workingDir, { transport: makeTransport() });
+
+	const res = await fetch(`${base}/sessions/${sessionId}/stream`, { method: "GET" });
+	assert.equal(res.status, 200);
+	assert.equal(res.headers.get("content-type"), "text/event-stream");
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let buffered = "";
+	async function readUntil(marker) {
+		while (!buffered.includes(marker)) {
+			const { value, done } = await reader.read();
+			if (done) throw new Error("stream ended before marker");
+			buffered += decoder.decode(value, { stream: true });
+		}
+	}
+
+	// Registration happens synchronously inside the route handler, but the
+	// fetch() promise can resolve before the server has flushed the initial
+	// ":ok" comment — wait for it so publishChannelEvent below isn't a race.
+	await readUntil(":ok");
+	assert.ok(isChannelObserved(`SESSION-${sessionId}`));
+
+	publishChannelEvent(`SESSION-${sessionId}`, { kind: "thinking" });
+	await readUntil("event: thinking");
+	assert.match(buffered, /event: thinking\ndata: \{"kind":"thinking"\}\n\n/);
+
+	// A different channel's events must not leak into this session's stream.
+	publishChannelEvent("SESSION-someone-else", { kind: "final", text: "not for you" });
+	publishChannelEvent(`SESSION-${sessionId}`, { kind: "final", text: "done" });
+	await readUntil("event: final");
+	assert.doesNotMatch(buffered, /not for you/);
+
+	await reader.cancel();
+
+	// Cancelling the reader closes the connection asynchronously — poll for the
+	// route's `close`-triggered cleanup (unregisterChannelObserver) to land,
+	// so a regression there (e.g. dropped/reordered cleanup) fails this test
+	// instead of only leaking silently.
+	for (let i = 0; i < 50 && isChannelObserved(`SESSION-${sessionId}`); i++) {
+		await new Promise((r) => setTimeout(r, 20));
+	}
+	assert.equal(isChannelObserved(`SESSION-${sessionId}`), false);
+});
+
+test("session stream: caps concurrent connections per session", async () => {
+	const workingDir = makeWorkingDir();
+	const sessionId = seedSession(workingDir);
+	const base = startServer(19546, workingDir, { transport: makeTransport() });
+
+	async function openStream() {
+		const res = await fetch(`${base}/sessions/${sessionId}/stream`, { method: "GET" });
+		const reader = res.body.getReader();
+		// Wait for the ":ok" preamble so the connection is fully registered
+		// before the next one opens — the cap check races an in-flight open
+		// otherwise.
+		await reader.read();
+		return { res, reader };
+	}
+
+	const opened = [];
+	for (let i = 0; i < 8; i++) opened.push(await openStream());
+	for (const { res } of opened) assert.equal(res.status, 200);
+
+	const rejected = await fetch(`${base}/sessions/${sessionId}/stream`, { method: "GET" });
+	assert.equal(rejected.status, 429);
+
+	// Closing one frees a slot for the next connection.
+	await opened[0].reader.cancel();
+	let freed = false;
+	for (let i = 0; i < 50 && !freed; i++) {
+		const res = await fetch(`${base}/sessions/${sessionId}/stream`, { method: "GET" });
+		if (res.status === 200) {
+			freed = true;
+			await res.body.getReader().cancel();
+		} else {
+			assert.equal(res.status, 429);
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	}
+	assert.ok(freed, "expected a slot to free up after closing a connection");
+
+	await Promise.all(opened.slice(1).map(({ reader }) => reader.cancel()));
+});
+
+// ============================================================================
 // validateSessionAttachments — the guard, unit level
 // ============================================================================
 
