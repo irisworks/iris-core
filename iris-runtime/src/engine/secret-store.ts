@@ -55,22 +55,31 @@ export function secretsConfigPath(workingDir: string): string {
  */
 export function loadExtraSensitiveEnvVars(workingDir: string): string[] {
 	const path = secretsConfigPath(workingDir);
-	if (!existsSync(path)) return [];
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch (e) {
+		const err = e as NodeJS.ErrnoException;
+		if (err.code !== "ENOENT") {
+			log.logWarning(`[secrets] cannot read ${path} — ignoring`, err.message);
+		}
+		return [];
+	}
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(readFileSync(path, "utf8"));
+		parsed = JSON.parse(raw);
 	} catch (err) {
 		log.logWarning(`[secrets] ${path} is not valid JSON — ignoring`, err instanceof Error ? err.message : String(err));
 		return [];
 	}
-	const raw = (parsed as { extraSensitiveEnvVars?: unknown })?.extraSensitiveEnvVars;
-	if (raw === undefined) return [];
-	if (!Array.isArray(raw)) {
+	const extras = (parsed as { extraSensitiveEnvVars?: unknown })?.extraSensitiveEnvVars;
+	if (extras === undefined) return [];
+	if (!Array.isArray(extras)) {
 		log.logWarning(`[secrets] ${path}: "extraSensitiveEnvVars" must be an array of strings — ignoring`);
 		return [];
 	}
 	const valid: string[] = [];
-	for (const entry of raw) {
+	for (const entry of extras) {
 		if (typeof entry === "string" && SENSITIVE_ENV_VAR_NAME_RE.test(entry)) {
 			valid.push(entry);
 		} else {

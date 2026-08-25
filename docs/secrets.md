@@ -154,6 +154,13 @@ runtime's process-env scrub honor the merged list:
 The file is optional; a missing or malformed one is treated as no extras
 (logged, never fatal), same as `meta/mcp.json`.
 
+`import-env` and the runtime resolve `meta/secrets-config.json` from
+different sources — `import-env` from `IRIS_STORAGE_ROOT` (default
+`/iris/data`), the runtime from the working-directory argument it was
+started with. `bootstrap.sh` keeps these in sync, but a custom install
+that points the runtime somewhere else must set `IRIS_STORAGE_ROOT` to
+match, or `import-env` will read (or write into) the wrong config.
+
 What stays in `.env`: non-secret config plus the two capability tokens
 (`IRIS_API_TOKEN`, `IRIS_SECRET_BROKER_TOKEN`). Those are what the agent is
 *supposed* to hold — they grant allow-listed reads and gateway use, not the
