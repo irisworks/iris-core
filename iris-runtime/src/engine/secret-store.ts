@@ -13,6 +13,8 @@ import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "path";
 import * as log from "./log.js";
 
+const SENSITIVE_ENV_VAR_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
+
 /** Same safe charset the web transport uses for ids (SAFE_ID in web.ts). */
 export const SECRET_NAME_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -39,6 +41,44 @@ export const SENSITIVE_ENV_VARS = [
 	"RESEND_API_KEY",
 	"PERPLEXITY_API_KEY",
 ] as const;
+
+export function secretsConfigPath(workingDir: string): string {
+	return join(workingDir, "meta", "secrets-config.json");
+}
+
+/**
+ * Reads `extraSensitiveEnvVars` from <workingDir>/meta/secrets-config.json —
+ * the config-driven extension point for installs with secret names outside
+ * the built-in SENSITIVE_ENV_VARS list. Fail-safe like mcp.json: an absent
+ * file returns [], a malformed file or invalid entry is warned about and
+ * skipped, this never throws.
+ */
+export function loadExtraSensitiveEnvVars(workingDir: string): string[] {
+	const path = secretsConfigPath(workingDir);
+	if (!existsSync(path)) return [];
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch (err) {
+		log.logWarning(`[secrets] ${path} is not valid JSON — ignoring`, err instanceof Error ? err.message : String(err));
+		return [];
+	}
+	const raw = (parsed as { extraSensitiveEnvVars?: unknown })?.extraSensitiveEnvVars;
+	if (raw === undefined) return [];
+	if (!Array.isArray(raw)) {
+		log.logWarning(`[secrets] ${path}: "extraSensitiveEnvVars" must be an array of strings — ignoring`);
+		return [];
+	}
+	const valid: string[] = [];
+	for (const entry of raw) {
+		if (typeof entry === "string" && SENSITIVE_ENV_VAR_NAME_RE.test(entry)) {
+			valid.push(entry);
+		} else {
+			log.logWarning(`[secrets] ${path}: skipping invalid entry in "extraSensitiveEnvVars": ${JSON.stringify(entry)}`);
+		}
+	}
+	return valid;
+}
 
 export type SecretsMode = "env" | "store" | "proxy";
 
@@ -233,12 +273,13 @@ export class SecretStore {
 export async function scrubProcessEnv(options: {
 	resolvable: (name: string) => Promise<boolean>;
 	consumed?: string[];
+	extraSensitiveEnvVars?: string[];
 }): Promise<void> {
 	if (secretsMode() === "env") return;
 	const consumed = new Set(options.consumed ?? []);
 	const scrubbed: string[] = [];
 	const retained: string[] = [];
-	for (const envVar of SENSITIVE_ENV_VARS) {
+	for (const envVar of [...SENSITIVE_ENV_VARS, ...(options.extraSensitiveEnvVars ?? [])]) {
 		if (process.env[envVar] === undefined) continue;
 		if (consumed.has(envVar) || (await options.resolvable(envVar.replace(/_/g, "-")))) {
 			delete process.env[envVar];

@@ -141,6 +141,19 @@ known credential vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID
 the store and rewrites `.env` without them. Idempotent; unknown vars are left
 alone, and anything not yet migrated keeps resolving via the env fallback.
 
+That built-in list isn't the full story on installs with secret names it
+doesn't know about (a custom API key, a storage connection string). Add
+`meta/secrets-config.json` (next to `agents.json`) with an
+`extraSensitiveEnvVars` array to extend it — both `import-env` and the
+runtime's process-env scrub honor the merged list:
+
+```json
+{ "extraSensitiveEnvVars": ["AZURE_STORAGE_CONNECTION_STRING", "SEARCHAPI_KEY"] }
+```
+
+The file is optional; a missing or malformed one is treated as no extras
+(logged, never fatal), same as `meta/mcp.json`.
+
 What stays in `.env`: non-secret config plus the two capability tokens
 (`IRIS_API_TOKEN`, `IRIS_SECRET_BROKER_TOKEN`). Those are what the agent is
 *supposed* to hold — they grant allow-listed reads and gateway use, not the

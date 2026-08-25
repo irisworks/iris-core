@@ -9,8 +9,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { SecretStore } from "../dist/engine/secret-store.js";
+import { existsSync, readdirSync, mkdirSync } from "node:fs";
+import { SecretStore, loadExtraSensitiveEnvVars, scrubProcessEnv, secretsConfigPath } from "../dist/engine/secret-store.js";
 import { startApiServer } from "../dist/engine/api.js";
 import { redactKnownSecrets, registerSecretValue } from "../dist/engine/redact.js";
 import { createDrop } from "../dist/engine/secret-drops.js";
@@ -76,6 +76,72 @@ test("store: delete and overwrite preserve createdAt", async () => {
 	assert.equal(store.delete("K"), true);
 	assert.equal(store.delete("K"), false);
 	assert.equal(store.get("K"), undefined);
+});
+
+// ── Extensible sensitive env vars (secrets-config.json) ─────────────────────
+
+test("secrets-config: absent file yields no extras", () => {
+	const dir = mkdtempSync(join(tmpdir(), "iris-secrets-config-test-"));
+	assert.deepEqual(loadExtraSensitiveEnvVars(dir), []);
+});
+
+test("secrets-config: valid entries loaded, invalid entries skipped", () => {
+	const dir = mkdtempSync(join(tmpdir(), "iris-secrets-config-test-"));
+	mkdirSync(join(dir, "meta"), { recursive: true });
+	writeFileSync(
+		secretsConfigPath(dir),
+		JSON.stringify({ extraSensitiveEnvVars: ["AZURE_STORAGE_CONNECTION_STRING", "SEARCHAPI_KEY", "not-a-valid-name", 42] }),
+	);
+	assert.deepEqual(loadExtraSensitiveEnvVars(dir), ["AZURE_STORAGE_CONNECTION_STRING", "SEARCHAPI_KEY"]);
+});
+
+test("secrets-config: malformed JSON and wrong shape fail safe to no extras", () => {
+	const dir = mkdtempSync(join(tmpdir(), "iris-secrets-config-test-"));
+	mkdirSync(join(dir, "meta"), { recursive: true });
+	writeFileSync(secretsConfigPath(dir), "{not json");
+	assert.deepEqual(loadExtraSensitiveEnvVars(dir), []);
+
+	const dir2 = mkdtempSync(join(tmpdir(), "iris-secrets-config-test-"));
+	mkdirSync(join(dir2, "meta"), { recursive: true });
+	writeFileSync(secretsConfigPath(dir2), JSON.stringify({ extraSensitiveEnvVars: "not-an-array" }));
+	assert.deepEqual(loadExtraSensitiveEnvVars(dir2), []);
+});
+
+test("scrubProcessEnv: scrubs extra vars supplied via extraSensitiveEnvVars", async (t) => {
+	process.env.IRIS_SECRETS_MODE = "store";
+	process.env.CUSTOM_EXTRA_SECRET = "should-be-scrubbed";
+	t.after(() => {
+		delete process.env.IRIS_SECRETS_MODE;
+		delete process.env.CUSTOM_EXTRA_SECRET;
+	});
+	await scrubProcessEnv({
+		resolvable: async () => true,
+		extraSensitiveEnvVars: ["CUSTOM_EXTRA_SECRET"],
+	});
+	assert.equal(process.env.CUSTOM_EXTRA_SECRET, undefined);
+});
+
+test("iris-secret import-env: recognizes vars from secrets-config.json alongside the built-in list", async (t) => {
+	const { keyFile, storeFile } = makeStoreDir();
+	const workingDir = mkdtempSync(join(tmpdir(), "iris-secret-cli-test-"));
+	mkdirSync(join(workingDir, "meta"), { recursive: true });
+	writeFileSync(join(workingDir, "meta", "secrets-config.json"), JSON.stringify({ extraSensitiveEnvVars: ["CUSTOM_EXTRA_KEY"] }));
+	const envFile = join(workingDir, ".env");
+	writeFileSync(envFile, "ANTHROPIC_API_KEY=builtin-value\nCUSTOM_EXTRA_KEY=extra-value\nUNRELATED_VAR=kept\n");
+
+	await new Promise((resolve, reject) => {
+		const proc = spawn(process.execPath, [join(import.meta.dirname, "..", "dist", "cli", "iris-secret.js"), "import-env", envFile], {
+			env: { ...process.env, IRIS_SECRET_KEY_FILE: keyFile, IRIS_SECRET_STORE_FILE: storeFile, IRIS_STORAGE_ROOT: workingDir },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		proc.stdout.on("data", (c) => (stdout += c));
+		proc.on("exit", (code) => (code === 0 ? resolve(stdout) : reject(new Error(`exit ${code}: ${stdout}`))));
+	});
+
+	const store = SecretStore.open({ keyFile, storeFile });
+	assert.equal(store.get("ANTHROPIC-API-KEY"), "builtin-value");
+	assert.equal(store.get("CUSTOM-EXTRA-KEY"), "extra-value");
 });
 
 // ── Redaction ──────────────────────────────────────────────────────────────

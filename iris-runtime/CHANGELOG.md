@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `SENSITIVE_ENV_VARS` is now extensible via `meta/secrets-config.json`
+  (`extraSensitiveEnvVars` array), merged into the built-in list for both
+  `scrubProcessEnv()` and `iris-secret import-env`. Fixes #228.
+
 ## [1.8.1] - 2026-08-24
 
 ### Added
