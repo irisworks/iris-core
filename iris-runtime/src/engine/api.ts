@@ -42,7 +42,8 @@
  *                                          raw body + `X-Filename: <name>`, returns { local }
  *   POST   /sessions/:id/stop            — abort the session's in-flight turn
  *   GET    /sessions/:id/stream          — SSE stream of the session's live thinking/status/
- *                                          tool/final/file events (see channel-observers.ts)
+ *                                          tool/final/file events (see channel-observers.ts);
+ *                                          capped at 8 concurrent connections per session (429)
  *   GET    /sessions/:id/history         — full log.jsonl as JSON array
  *   POST   /sessions/email-inbound       — route inbound email to matching session
  *   POST   /sessions/open                — post to channel, create session, return sessionId + threadTs
@@ -316,6 +317,14 @@ export function startApiServer(
 	const eventsDir = join(workingDir, "events");
 	const apiHost = process.env.IRIS_API_HOST ?? "127.0.0.1";
 	const apiToken = process.env.IRIS_API_TOKEN ?? "";
+
+	// Caps concurrent GET /sessions/:id/stream connections per session — each
+	// one holds a socket, a 15s heartbeat timer, and a channel-observers.ts
+	// registration until it disconnects, so an unbounded count (a runaway
+	// reconnect loop, or a caller opening many at once) is a resource-exhaustion
+	// vector rather than a normal usage pattern.
+	const MAX_STREAM_CONNECTIONS_PER_SESSION = 8;
+	const streamConnectionCounts = new Map<string, number>();
 
 	const server = createServer(async (req, res) => {
 		const url = req.url ?? "/";
@@ -859,6 +868,12 @@ export function startApiServer(
 					return;
 				}
 				const channelId = `SESSION-${sessionId}`;
+				const openStreams = streamConnectionCounts.get(channelId) ?? 0;
+				if (openStreams >= MAX_STREAM_CONNECTIONS_PER_SESSION) {
+					json(res, 429, { error: `too many open streams for this session (max ${MAX_STREAM_CONNECTIONS_PER_SESSION})` });
+					return;
+				}
+				streamConnectionCounts.set(channelId, openStreams + 1);
 				res.writeHead(200, {
 					"Content-Type": "text/event-stream",
 					"Cache-Control": "no-cache",
@@ -886,6 +901,9 @@ export function startApiServer(
 					closed = true;
 					clearInterval(heartbeat);
 					unregisterChannelObserver(observer);
+					const remaining = (streamConnectionCounts.get(channelId) ?? 1) - 1;
+					if (remaining <= 0) streamConnectionCounts.delete(channelId);
+					else streamConnectionCounts.set(channelId, remaining);
 					log.logInfo(`[api] GET /sessions/${sessionId}/stream: disconnected`);
 				};
 				// A client can drop the connection with a reset rather than a clean

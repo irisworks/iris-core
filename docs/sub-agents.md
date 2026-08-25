@@ -336,7 +336,9 @@ To watch a turn's progress instead of waiting for `message` to return, open
 `text/event-stream` response, one SSE `event:`/`data:` pair per
 `thinking`/`status`/`tool`/`final`/`file` event
 (see [`ChannelObserverEvent`](web-ui.md#watching-a-run-from-inside-the-runtime)),
-staying open until the client disconnects:
+staying open until the client disconnects. Capped at 8 concurrent connections
+per session (a 9th gets `429`) — each open stream holds a socket, a heartbeat
+timer, and an observer registration for as long as it's connected:
 
 ```bash
 curl -N "$IRIS/sessions/$ID/stream" -H "Authorization: Bearer $IRIS_API_TOKEN" &
