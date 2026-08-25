@@ -346,10 +346,14 @@ curl -X POST "$IRIS/sessions/$ID/message" \
   -d '{"text": "review this"}'
 ```
 
-There's no replay: a client that connects after the turn already started only
-sees events from that point on, and nothing is persisted for a later
-reconnect. One thing this API still does not do: accept attachments by URL (it
-never fetches; you send the bytes or place the file yourself).
+There's no replay, and no partial visibility either: whether a turn mirrors to
+watchers at all is decided once, at the moment it starts, from whoever is
+already connected then (`engine/index.ts`'s `isChannelObserved` check). A
+client that opens the stream after `POST /sessions/:id/message` has already
+been sent may miss that entire turn's events, not just the events already
+past — connect first, and nothing is persisted for a later reconnect either.
+One thing this API still does not do: accept attachments by URL (it never
+fetches; you send the bytes or place the file yourself).
 
 `IRIS_API_TOKEN` also authorizes secrets management and channel-addressed event
 injection, so it must stay server-side — never ship it to a browser.

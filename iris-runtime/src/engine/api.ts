@@ -845,10 +845,12 @@ export function startApiServer(
 
 			// ── GET /sessions/:id/stream ────────────────────────────────────────────────────
 			// SSE mirror of the thinking/status/tool/final/file events channel-observers.ts
-			// already publishes for a `SESSION-` turn — the endpoint docs/web-ui.md calls
-			// "designed but not yet implemented" (#227). Frames are the raw
+			// already publishes for a `SESSION-` turn (#227). Frames are the raw
 			// ChannelObserverEvent shape, one per SSE `event:`/`data:` pair; the connection
 			// stays open until the client disconnects, with no replay or persistence.
+			// Whether a turn mirrors at all is decided once, when it starts
+			// (isChannelObserved in engine/index.ts) — a client must open this stream
+			// before POSTing the message, or it can miss that turn's events entirely.
 			if (method === "GET" && urlParts[0] === "sessions" && urlParts[2] === "stream") {
 				const sessionId = urlParts[1];
 				const sessions = loadSessions(workingDir);
@@ -857,11 +859,6 @@ export function startApiServer(
 					return;
 				}
 				const channelId = `SESSION-${sessionId}`;
-				// A client can drop the connection with a reset rather than a clean
-				// FIN; without a listener that surfaces as an unhandled 'error' event
-				// on req/res and would take the whole process down.
-				req.on("error", () => {});
-				res.on("error", () => {});
 				res.writeHead(200, {
 					"Content-Type": "text/event-stream",
 					"Cache-Control": "no-cache",
@@ -870,9 +867,8 @@ export function startApiServer(
 				});
 				res.write(":ok\n\n");
 
-				let live = true;
 				const observer: ChannelObserver = {
-					watching: (id) => live && id === channelId,
+					watching: (id) => id === channelId,
 					emit: (_id, event) => {
 						res.write(`event: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
 					},
@@ -884,12 +880,22 @@ export function startApiServer(
 				// out an idle connection between events.
 				const heartbeat = setInterval(() => res.write(":ping\n\n"), 15_000);
 
-				req.on("close", () => {
-					live = false;
+				let closed = false;
+				const cleanup = () => {
+					if (closed) return;
+					closed = true;
 					clearInterval(heartbeat);
 					unregisterChannelObserver(observer);
 					log.logInfo(`[api] GET /sessions/${sessionId}/stream: disconnected`);
-				});
+				};
+				// A client can drop the connection with a reset rather than a clean
+				// FIN — without listeners here that surfaces as an unhandled 'error'
+				// event on req/res and would take the whole process down. 'close'
+				// alone is the common path, but 'error' isn't guaranteed to always be
+				// followed by it, so both trigger the same idempotent cleanup.
+				req.on("error", cleanup);
+				res.on("error", cleanup);
+				req.on("close", cleanup);
 				return;
 			}
 
