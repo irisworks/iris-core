@@ -23,9 +23,16 @@
 
 import { readFileSync, writeFileSync } from "fs";
 import { createInterface } from "readline";
-import { SECRET_NAME_RE, SecretStore, SENSITIVE_ENV_VARS } from "../engine/secret-store.js";
+import { loadExtraSensitiveEnvVars, SECRET_NAME_RE, SecretStore, SENSITIVE_ENV_VARS } from "../engine/secret-store.js";
 
 const DEFAULT_KEY_FILE = process.env.IRIS_SECRET_KEY_FILE ?? "/iris/secret.key";
+// Must match the working directory the runtime is started with (the
+// positional arg in iris.service's ExecStart) so import-env and the running
+// service read the same meta/secrets-config.json. bootstrap.sh keeps the two
+// in sync by setting both to `${IRIS_DIR}/data`; a custom install that
+// changes the runtime's working dir without updating this env var too will
+// have import-env and the runtime read different configs.
+const WORKING_DIR = process.env.IRIS_STORAGE_ROOT ?? "/iris/data";
 
 function fail(message: string): never {
 	console.error(`iris-secret: ${message}`);
@@ -213,7 +220,7 @@ switch (command) {
 			fail(`cannot read ${file}`);
 		}
 		const lines = content.split("\n");
-		const sensitive = new Set<string>(SENSITIVE_ENV_VARS);
+		const sensitive = new Set<string>([...SENSITIVE_ENV_VARS, ...loadExtraSensitiveEnvVars(WORKING_DIR)]);
 		const moved: string[] = [];
 		const kept: string[] = [];
 		for (const line of lines) {

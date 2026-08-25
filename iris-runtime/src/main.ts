@@ -12,7 +12,7 @@ import * as log from "./engine/log.js";
 import { shutdownMcp } from "./engine/mcp/index.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./engine/sandbox.js";
 import { getSecretMeta, getSecretProvider } from "./engine/secrets.js";
-import { scrubProcessEnv } from "./engine/secret-store.js";
+import { loadExtraSensitiveEnvVars, scrubProcessEnv } from "./engine/secret-store.js";
 import { type IrisHandler, SlackBot as SlackBotClass, slackPromptProfile } from "./transports/slack/slack.js";
 import { TelegramBot, type IrisTelegramHandler } from "./transports/telegram/telegram.js";
 import { ChannelStore } from "./engine/store.js";
@@ -312,6 +312,7 @@ await scrubProcessEnv({
 		...(slackBot ? ["IRIS_SLACK_APP_TOKEN", "IRIS_SLACK_BOT_TOKEN"] : []),
 		...(tgBot ? ["TELEGRAM_BOT_TOKEN"] : []),
 	],
+	extraSensitiveEnvVars: loadExtraSensitiveEnvVars(workingDir),
 });
 
 // ============================================================================
