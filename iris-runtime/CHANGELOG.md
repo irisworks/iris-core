@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `GET /sessions/:id/stream`: SSE endpoint on the session API that mirrors a
+  session's live `thinking`/`status`/`tool`/`final`/`file` events, so an
+  out-of-process caller can watch an API-driven turn without the
+  `WebTransport` WebSocket (#227).
+
 ## [1.8.1] - 2026-08-24
 
 ### Added
