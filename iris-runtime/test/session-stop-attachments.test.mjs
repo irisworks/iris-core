@@ -295,6 +295,58 @@ test("session message: a malformed attachments field is a 400, not a crash", asy
 });
 
 // ============================================================================
+// GET /sessions/:id/stream
+// ============================================================================
+
+test("session stream: unknown session is a 404", async () => {
+	const workingDir = makeWorkingDir();
+	const base = startServer(19544, workingDir, { transport: makeTransport() });
+
+	const res = await fetch(`${base}/sessions/does-not-exist/stream`, { method: "GET" });
+	assert.equal(res.status, 404);
+});
+
+test("session stream: forwards channel-observers events for the session's channel as SSE frames", async () => {
+	const { publishChannelEvent, isChannelObserved } = await import("../dist/engine/channel-observers.js");
+	const workingDir = makeWorkingDir();
+	const sessionId = seedSession(workingDir);
+	const base = startServer(19545, workingDir, { transport: makeTransport() });
+
+	const res = await fetch(`${base}/sessions/${sessionId}/stream`, { method: "GET" });
+	assert.equal(res.status, 200);
+	assert.equal(res.headers.get("content-type"), "text/event-stream");
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let buffered = "";
+	async function readUntil(marker) {
+		while (!buffered.includes(marker)) {
+			const { value, done } = await reader.read();
+			if (done) throw new Error("stream ended before marker");
+			buffered += decoder.decode(value, { stream: true });
+		}
+	}
+
+	// Registration happens synchronously inside the route handler, but the
+	// fetch() promise can resolve before the server has flushed the initial
+	// ":ok" comment — wait for it so publishChannelEvent below isn't a race.
+	await readUntil(":ok");
+	assert.ok(isChannelObserved(`SESSION-${sessionId}`));
+
+	publishChannelEvent(`SESSION-${sessionId}`, { kind: "thinking" });
+	await readUntil("event: thinking");
+	assert.match(buffered, /event: thinking\ndata: \{"kind":"thinking"\}\n\n/);
+
+	// A different channel's events must not leak into this session's stream.
+	publishChannelEvent("SESSION-someone-else", { kind: "final", text: "not for you" });
+	publishChannelEvent(`SESSION-${sessionId}`, { kind: "final", text: "done" });
+	await readUntil("event: final");
+	assert.doesNotMatch(buffered, /not for you/);
+
+	await reader.cancel();
+});
+
+// ============================================================================
 // validateSessionAttachments — the guard, unit level
 // ============================================================================
 

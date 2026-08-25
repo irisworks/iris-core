@@ -41,6 +41,8 @@
  *   POST   /sessions/:id/attachments     — upload a file into the session's attachments/ dir
  *                                          raw body + `X-Filename: <name>`, returns { local }
  *   POST   /sessions/:id/stop            — abort the session's in-flight turn
+ *   GET    /sessions/:id/stream          — SSE stream of the session's live thinking/status/
+ *                                          tool/final/file events (see channel-observers.ts)
  *   GET    /sessions/:id/history         — full log.jsonl as JSON array
  *   POST   /sessions/email-inbound       — route inbound email to matching session
  *   POST   /sessions/open                — post to channel, create session, return sessionId + threadTs
@@ -60,6 +62,7 @@ import {
 	type Session,
 } from "./sessions.js";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
+import { registerChannelObserver, unregisterChannelObserver, type ChannelObserver } from "./channel-observers.js";
 // Type-only (erased at build): engine/index.ts imports nothing from here, and
 // handleStop's transport argument must be the same shape the engine expects.
 import type { EngineTransport } from "./index.js";
@@ -837,6 +840,56 @@ export function startApiServer(
 				// The aborted run still resolves the pending POST /message with whatever
 				// text it produced (engine/index.ts), so the caller isn't left hanging.
 				json(res, 200, { status: "ok", wasRunning });
+				return;
+			}
+
+			// ── GET /sessions/:id/stream ────────────────────────────────────────────────────
+			// SSE mirror of the thinking/status/tool/final/file events channel-observers.ts
+			// already publishes for a `SESSION-` turn — the endpoint docs/web-ui.md calls
+			// "designed but not yet implemented" (#227). Frames are the raw
+			// ChannelObserverEvent shape, one per SSE `event:`/`data:` pair; the connection
+			// stays open until the client disconnects, with no replay or persistence.
+			if (method === "GET" && urlParts[0] === "sessions" && urlParts[2] === "stream") {
+				const sessionId = urlParts[1];
+				const sessions = loadSessions(workingDir);
+				if (!sessions.has(sessionId)) {
+					json(res, 404, { error: "session not found" });
+					return;
+				}
+				const channelId = `SESSION-${sessionId}`;
+				// A client can drop the connection with a reset rather than a clean
+				// FIN; without a listener that surfaces as an unhandled 'error' event
+				// on req/res and would take the whole process down.
+				req.on("error", () => {});
+				res.on("error", () => {});
+				res.writeHead(200, {
+					"Content-Type": "text/event-stream",
+					"Cache-Control": "no-cache",
+					"Connection": "keep-alive",
+					"X-Accel-Buffering": "no",
+				});
+				res.write(":ok\n\n");
+
+				let live = true;
+				const observer: ChannelObserver = {
+					watching: (id) => live && id === channelId,
+					emit: (_id, event) => {
+						res.write(`event: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`);
+					},
+				};
+				registerChannelObserver(observer);
+				log.logInfo(`[api] GET /sessions/${sessionId}/stream: connected`);
+
+				// Heartbeat keeps intermediaries (proxies, load balancers) from timing
+				// out an idle connection between events.
+				const heartbeat = setInterval(() => res.write(":ping\n\n"), 15_000);
+
+				req.on("close", () => {
+					live = false;
+					clearInterval(heartbeat);
+					unregisterChannelObserver(observer);
+					log.logInfo(`[api] GET /sessions/${sessionId}/stream: disconnected`);
+				});
 				return;
 			}
 
