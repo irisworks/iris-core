@@ -17,6 +17,7 @@ import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 import { loadAgentRegistry, type AgentRegistry } from "./bridge.js";
+import { publishChannelEvent } from "./channel-observers.js";
 import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./langfuse.js";
 import {
 	createIrisSettingsManager,
@@ -840,12 +841,15 @@ function createRunner(
 				const MAX_THINKING = 2900;
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
+					const truncated =
+						thinking.length > MAX_THINKING
+							? thinking.substring(0, MAX_THINKING) + "\n\n_(thinking truncated)_"
+							: thinking;
 					if (runState.verbose) {
-						const truncated =
-							thinking.length > MAX_THINKING
-								? thinking.substring(0, MAX_THINKING) + "\n\n_(thinking truncated)_"
-								: thinking;
 						queue.enqueueMessage(`_${truncated}_`, "thread", "thinking thread", false);
+					}
+					if (thinking.trim()) {
+						publishChannelEvent(channelId, { kind: "thinking", text: truncated });
 					}
 				}
 
