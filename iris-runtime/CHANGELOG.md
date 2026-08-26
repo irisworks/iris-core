@@ -10,6 +10,10 @@
   from the environment. Normal turns fell back to the real key via a guard,
   but compaction and branch-summary called the registry directly and sent
   the literal string, causing a 401 and silently breaking compaction. Fixes #232.
+- Channel-observer `thinking` events now carry the reasoning text alongside
+  the existing typing signal, so `GET /sessions/:id/stream` clients and other
+  `ChannelObserver`s can render the model's thinking instead of a bare
+  indicator. Fixes #235.
 
 ## [1.9.0] - 2026-08-25
 

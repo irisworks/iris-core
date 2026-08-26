@@ -283,18 +283,17 @@ The runtime exposes an internal API (default `127.0.0.1:3000`, always on — see
 | `GET /secrets/:name` (alias `GET /secret/:name`) | Resolve a secret (caller derived from the authenticating token; sub-agents must be allow-listed; 403 for proxy-only/runtime-only secrets — see [Secrets](secrets.md)) |
 | `PUT`/`DELETE /secrets/:name` · `GET /secrets` | Write/delete/list secrets (iris only) |
 | `POST /secret-drops` | Mint a one-time out-of-band submission link (iris only) |
-| `POST /sessions` · `GET /sessions` · `GET/PATCH /sessions/:id` | Session CRUD |
-| `POST /sessions/open` | Post to a channel + create a session in one call |
-| `POST /sessions/:id/message` | Inject a message, wait for Iris's response — body `{text, user?, attachments?}` |
-| `POST /sessions/:id/attachments` | Upload a file into the session's `attachments/` dir (raw body + `X-Filename`), returns the `local` handle for the `attachments` field |
-| `POST /sessions/:id/stop` | Abort the session's in-flight turn |
-| `GET /sessions/:id/stream` | Server-sent events: the session's live `thinking`/`status`/`tool`/`final`/`file` events as the turn runs |
-| `GET /sessions/:id/history` | Full message history |
-| `POST /sessions/:id/reset` | Wipe session context |
-| `POST /sessions/:id/inject-turn` | Append a human-agent turn without triggering the LLM |
-| `POST /sessions/email-inbound` | Route inbound email to its session |
 
-Sessions are the backbone of `thread`/`interactive-thread`
+The same port also serves the **session API** — session CRUD, messaging,
+attachments, SSE streaming, stop/reset — which is the integration surface for
+a program driving Iris (a support tool, a product frontend's own backend, a
+batch job), as opposed to the [web UI transport](web-ui.md), which is a
+reference implementation, not something to build a product against. See
+[Integration & Production Deployment](integration.md) for the full session
+endpoint reference, a worked example, and why that program needs its own
+backend in front of this one.
+
+Sessions are also the backbone of `thread`/`interactive-thread`
 [channel modes](channel-modes.md) and of human-in-the-loop workflows (reset +
 inject-turn let a human take over a conversation seamlessly).
 
@@ -304,61 +303,9 @@ transport served the turn (Slack, Telegram, or a headless bridge/web install).
 This is what `GET /sessions/:id/history` returns and what gets replayed into
 context after a restart.
 
-### Driving a session from your own application
-
-This API — not the [web UI transport](web-ui.md) — is the integration surface
-for a program driving Iris. A typical turn is three calls on this one port,
-under one token:
-
-```bash
-# 1. Stage a file (optional). `local` is a handle, not a path you compose.
-curl -X POST "$IRIS/sessions/$ID/attachments" \
-  -H "Authorization: Bearer $IRIS_API_TOKEN" \
-  -H "X-Filename: report.pdf" --data-binary @report.pdf
-# → {"local": "SESSION-<id>/attachments/1755_report.pdf"}
-
-# 2. Send the message. Blocks until the turn finishes.
-curl -X POST "$IRIS/sessions/$ID/message" \
-  -H "Authorization: Bearer $IRIS_API_TOKEN" -H "Content-Type: application/json" \
-  -d '{"text": "review this", "attachments": [{"local": "SESSION-<id>/attachments/1755_report.pdf"}]}'
-
-# 3. Abort it from another request if it runs too long.
-curl -X POST "$IRIS/sessions/$ID/stop" -H "Authorization: Bearer $IRIS_API_TOKEN"
-```
-
-`stop` is the API's counterpart to Telegram's `/stop`, Slack's `stop`, and the
-web UI's Stop button — all four call the same `engine.handleStop`. The aborted
-run still resolves the pending `message` request with whatever text it had
-produced, so that caller gets a reply rather than waiting out its timeout.
-
-To watch a turn's progress instead of waiting for `message` to return, open
-`GET /sessions/:id/stream` **before** sending the message — it's a
-`text/event-stream` response, one SSE `event:`/`data:` pair per
-`thinking`/`status`/`tool`/`final`/`file` event
-(see [`ChannelObserverEvent`](web-ui.md#watching-a-run-from-inside-the-runtime)),
-staying open until the client disconnects. Capped at 8 concurrent connections
-per session (a 9th gets `429`) — each open stream holds a socket, a heartbeat
-timer, and an observer registration for as long as it's connected:
-
-```bash
-curl -N "$IRIS/sessions/$ID/stream" -H "Authorization: Bearer $IRIS_API_TOKEN" &
-
-curl -X POST "$IRIS/sessions/$ID/message" \
-  -H "Authorization: Bearer $IRIS_API_TOKEN" -H "Content-Type: application/json" \
-  -d '{"text": "review this"}'
-```
-
-There's no replay, and no partial visibility either: whether a turn mirrors to
-watchers at all is decided once, at the moment it starts, from whoever is
-already connected then (`engine/index.ts`'s `isChannelObserved` check). A
-client that opens the stream after `POST /sessions/:id/message` has already
-been sent may miss that entire turn's events, not just the events already
-past — connect first, and nothing is persisted for a later reconnect either.
-One thing this API still does not do: accept attachments by URL (it never
-fetches; you send the bytes or place the file yourself).
-
-`IRIS_API_TOKEN` also authorizes secrets management and channel-addressed event
-injection, so it must stay server-side — never ship it to a browser.
+See [Integration & Production Deployment](integration.md#driving-a-session-from-your-own-application)
+for how to drive a session from your own application — sending messages,
+watching progress over SSE, and staging attachments.
 
 ## Scheduled events
 

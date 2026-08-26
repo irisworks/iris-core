@@ -4,6 +4,7 @@
 		"index",
 		"SETUP",
 		"configuration",
+		"integration",
 		"channel-modes",
 		"web-ui",
 		"writing-a-transport",

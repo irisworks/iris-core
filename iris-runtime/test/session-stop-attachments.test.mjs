@@ -337,6 +337,12 @@ test("session stream: forwards channel-observers events for the session's channe
 	await readUntil("event: thinking");
 	assert.match(buffered, /event: thinking\ndata: \{"kind":"thinking"\}\n\n/);
 
+	// The reasoning text (added once the assistant message finishes) passes
+	// through the SSE frame verbatim; the earlier typing-only frame has none.
+	publishChannelEvent(`SESSION-${sessionId}`, { kind: "thinking", text: "considering the options" });
+	await readUntil("considering the options");
+	assert.match(buffered, /event: thinking\ndata: \{"kind":"thinking","text":"considering the options"\}\n\n/);
+
 	// A different channel's events must not leak into this session's stream.
 	publishChannelEvent("SESSION-someone-else", { kind: "final", text: "not for you" });
 	publishChannelEvent(`SESSION-${sessionId}`, { kind: "final", text: "done" });

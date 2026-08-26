@@ -27,12 +27,17 @@ Three limits to be explicit about before building on it:
   secret with no accounts, roles, or per-user isolation. Anything user-facing
   needs your own authentication in front of it; never hand end users the web
   password directly.
-- **Application developers should not build against this transport.** The
-  internal session API (`api.ts`, see [Sub-agents](sub-agents.md)) is the
-  integration surface for a program driving Iris: it owns sessions, messages,
-  attachments, stop, history, and now streaming — `GET /sessions/:id/stream`
-  emits the same live events as the `SESSION-` support documented below. Code
-  that watches turns over this WebSocket should migrate to that SSE endpoint.
+- **Application developers should not build against this transport.** It is a
+  *reference implementation* of one way to consume Iris's session events, not
+  the thing to integrate with. The session API (`api.ts`) — documented in
+  [Integration & Production Deployment](integration.md) — is the integration
+  surface for a program driving Iris: it owns sessions, messages, attachments,
+  stop, history, and streaming (`GET /sessions/:id/stream`, which emits the
+  same live events as the `SESSION-` support documented below). Code that
+  watches turns over this WebSocket should migrate to that SSE endpoint. A
+  production frontend also needs its own backend in front of either surface —
+  see [Integration & Production Deployment](integration.md#why-you-need-a-backend-for-your-frontend)
+  for why.
 
 ## Enabling it
 
@@ -179,6 +184,9 @@ registerChannelObserver({
   watching: (channelId) => myWatchers.has(channelId),
   emit: (channelId, event) => {
     // event.kind: "thinking" | "status" | "tool" | "final" | "file"
+    // "thinking" carries an optional `text` with the reasoning content once
+    // the assistant message finishes — the earlier "thinking started" frame
+    // (fired from setTyping()) has none.
     myWatchers.get(channelId)?.send(event);
   },
 });
