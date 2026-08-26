@@ -1,0 +1,3 @@
+# Fingerprints for confirmed false positives (test fixtures, doc placeholders).
+# Format: <commit>:<file>:<rule>:<line> — see https://github.com/gitleaks/gitleaks#gitleaksignore
+9015f6be58d303d7302f31c32c95e83718c7f329:iris-runtime/test/models-json-normalize.test.mjs:generic-api-key:57
