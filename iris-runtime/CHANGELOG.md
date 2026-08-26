@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Custom-provider `apiKey` values in `models.json` configured as a bare env
+  var name (e.g. `"MY_KEY"` instead of `"$MY_KEY"`) were echoed back
+  literally by `ModelRegistry.getApiKeyAndHeaders()` instead of resolving
+  from the environment. Normal turns fell back to the real key via a guard,
+  but compaction and branch-summary called the registry directly and sent
+  the literal string, causing a 401 and silently breaking compaction. Fixes #232.
+
 ## [1.9.0] - 2026-08-25
 
 ### Added
