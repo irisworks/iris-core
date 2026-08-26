@@ -30,6 +30,8 @@ import {
 	type UserInfo,
 } from "../../transport/types.js";
 
+const SESSION_TIMEOUT_MS = Number(process.env.IRIS_SESSION_TIMEOUT_MS) || 90_000;
+
 export interface BridgeTransportOptions {
 	/** Prompt fragments for bridge runs (currently the Slack fragments, status quo) */
 	promptProfile: TransportPromptProfile;
@@ -181,7 +183,7 @@ export class BridgeTransport implements ChannelTransport {
 		// Same 5-message-per-channel convention as enqueueEvent above. Checked
 		// before registerSessionRequest so a full queue fails fast (the HTTP
 		// handler in api.ts maps the rejection to a 504) instead of registering a
-		// promise that hangs until its 90s timeout while queued work waits.
+		// promise that hangs until SESSION_TIMEOUT_MS while queued work waits.
 		const queue = this.getQueue(channelId);
 		if (queue.isFull()) {
 			log.logWarning(`[bridge] Session message queue full for ${channelId}, rejecting: ${text.substring(0, 50)}`);
@@ -202,7 +204,7 @@ export class BridgeTransport implements ChannelTransport {
 			isBot: false,
 		});
 
-		const responsePromise = registerSessionRequest(sessionId, 90_000);
+		const responsePromise = registerSessionRequest(sessionId, SESSION_TIMEOUT_MS);
 		const event = { channel: channelId, user, text, ts, attachments };
 		queue.enqueue(async () => {
 			await this.dispatch(event, this);
