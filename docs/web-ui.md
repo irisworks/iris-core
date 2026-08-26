@@ -184,6 +184,9 @@ registerChannelObserver({
   watching: (channelId) => myWatchers.has(channelId),
   emit: (channelId, event) => {
     // event.kind: "thinking" | "status" | "tool" | "final" | "file"
+    // "thinking" carries an optional `text` with the reasoning content once
+    // the assistant message finishes — the earlier "thinking started" frame
+    // (fired from setTyping()) has none.
     myWatchers.get(channelId)?.send(event);
   },
 });

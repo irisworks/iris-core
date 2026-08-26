@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Channel-observer `thinking` events now carry the reasoning text alongside
+  the existing typing signal, so `GET /sessions/:id/stream` clients and other
+  `ChannelObserver`s can render the model's thinking instead of a bare
+  indicator. Fixes #235.
+
 ## [1.9.0] - 2026-08-25
 
 ### Added

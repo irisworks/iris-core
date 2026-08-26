@@ -20,7 +20,7 @@ import type { MessageContext, ToolEvent } from "../transport/types.js";
 
 /** A run event worth mirroring to a passive watcher of the same channel. */
 export type ChannelObserverEvent =
-	| { kind: "thinking" }
+	| { kind: "thinking"; text?: string }
 	| { kind: "status"; label: string }
 	| { kind: "tool"; event: ToolEvent }
 	| { kind: "final"; text: string }
