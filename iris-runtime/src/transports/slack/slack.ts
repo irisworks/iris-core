@@ -17,7 +17,7 @@ import {
 	type RelayConfig,
 	type ResolvedChannelConfig,
 } from "../../engine/dispatch-config.js";
-import { loadSessions, registerSessionRequest } from "../../engine/sessions.js";
+import { envMs, loadSessions, registerSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, type Attachment, type ChannelStore } from "../../engine/store.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
@@ -507,7 +507,7 @@ export class SlackBot implements ChannelTransport {
 			isBot: false,
 		});
 
-		const responsePromise = registerSessionRequest(sessionId, 600_000);
+		const responsePromise = registerSessionRequest(sessionId, envMs("IRIS_SESSION_TIMEOUT_MS", 600_000));
 
 		const slackEvent: SlackEvent = {
 			type: "mention",
