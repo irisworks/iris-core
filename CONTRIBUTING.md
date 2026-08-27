@@ -57,6 +57,13 @@ For end-to-end testing of `bootstrap.sh` or install-path changes, use a clean
 Ubuntu 22.04 VM: `bash bootstrap.sh --setup --no-keyvault` (see
 [docs/SETUP.md](docs/SETUP.md) for all install paths).
 
+Enable the repo's git hooks (runs `gitleaks` on staged changes before each
+commit, same scanner CI runs on the full history):
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
 ### Coding Standards
 
 **Shell Scripts:**

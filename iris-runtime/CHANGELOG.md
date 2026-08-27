@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/hooks/pre-commit`: opt-in git hook that runs `gitleaks` on staged
+  changes before each commit, mirroring the CI secret scan locally. Enable
+  with `git config core.hooksPath scripts/hooks`.
+
 ### Fixed
 
 - Channel-observer `thinking` events now carry the reasoning text alongside
