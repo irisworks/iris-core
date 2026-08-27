@@ -9,7 +9,10 @@
   literally by `ModelRegistry.getApiKeyAndHeaders()` instead of resolving
   from the environment. Normal turns fell back to the real key via a guard,
   but compaction and branch-summary called the registry directly and sent
-  the literal string, causing a 401 and silently breaking compaction. Fixes #232.
+  the literal string, causing a 401 and silently breaking compaction. The
+  fix now also creates the channel directory before writing the normalized
+  `models.json`, since a fresh channel's first `/compact`/`/reset` can reach
+  it before the directory otherwise exists. Fixes #232.
 - Channel-observer `thinking` events now carry the reasoning text alongside
   the existing typing signal, so `GET /sessions/:id/stream` clients and other
   `ChannelObserver`s can render the model's thinking instead of a bare

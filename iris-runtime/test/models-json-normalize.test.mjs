@@ -71,3 +71,20 @@ test("normalizeModelsJsonApiKeys returns the original path when there are no pro
 
 	assert.equal(resultPath, modelsJson);
 });
+
+test("normalizeModelsJsonApiKeys creates channelDir when it doesn't exist yet", () => {
+	// Regression for a fresh channel's first interaction (e.g. /compact on a brand-new
+	// channel): createRunner() calls this before run()'s mkdir(channelDir) has ever run.
+	const parent = makeTmpDir();
+	const channelDir = join(parent, "brand-new-channel");
+	const modelsJson = join(parent, "models.json");
+	writeFileSync(
+		modelsJson,
+		JSON.stringify({ providers: { custom: { apiKey: "MY_PROVIDER_API_KEY" } } }),
+	);
+
+	const resultPath = normalizeModelsJsonApiKeys(modelsJson, channelDir);
+
+	const written = JSON.parse(readFileSync(resultPath, "utf8"));
+	assert.equal(written.providers.custom.apiKey, "$MY_PROVIDER_API_KEY");
+});

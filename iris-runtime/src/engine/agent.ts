@@ -12,7 +12,7 @@ import {
 	SessionManager,
 	type Skill,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
@@ -520,6 +520,7 @@ export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: strin
 		}
 	}
 	if (!changed) return sourcePath;
+	mkdirSync(channelDir, { recursive: true });
 	const normalizedPath = join(channelDir, ".models-normalized.json");
 	writeFileSync(normalizedPath, JSON.stringify(parsed, null, "\t"));
 	return normalizedPath;
