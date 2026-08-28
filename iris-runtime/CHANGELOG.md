@@ -7,6 +7,9 @@
 - `IRIS_SESSION_TIMEOUT_MS` env var to configure how long `POST
   /sessions/:id/message` waits for a reply before returning a 504, across all
   transports (Bridge/Web/Slack/Telegram; defaults unchanged per transport).
+- `scripts/hooks/pre-commit`: opt-in git hook that runs `gitleaks` on staged
+  changes before each commit, mirroring the CI secret scan locally. Enable
+  with `git config core.hooksPath scripts/hooks`.
 
 ### Fixed
 

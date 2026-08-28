@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Pre-commit hook: run gitleaks against staged changes."""
+import shutil
+import subprocess
+import sys
+import tempfile
+import os
+import platform
+import tarfile
+import urllib.request
+
+GITLEAKS_VERSION = "8.30.1"
+
+
+def find_or_fetch_gitleaks():
+    binary = shutil.which("gitleaks")
+    if binary:
+        return binary
+
+    cache_dir = os.path.expanduser("~/.cache/iris-core-hooks")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached = os.path.join(cache_dir, f"gitleaks-{GITLEAKS_VERSION}")
+    if os.path.isfile(cached) and os.access(cached, os.X_OK):
+        return cached
+
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    arch = "x64" if machine in ("x86_64", "amd64") else "arm64"
+    os_name = "linux" if system == "linux" else "darwin"
+    url = (
+        f"https://github.com/gitleaks/gitleaks/releases/download/"
+        f"v{GITLEAKS_VERSION}/gitleaks_{GITLEAKS_VERSION}_{os_name}_{arch}.tar.gz"
+    )
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = os.path.join(tmp, "gitleaks.tar.gz")
+            urllib.request.urlretrieve(url, archive_path)
+            with tarfile.open(archive_path) as tar:
+                tar.extract("gitleaks", tmp)
+            shutil.move(os.path.join(tmp, "gitleaks"), cached)
+            os.chmod(cached, 0o755)
+        return cached
+    except Exception as exc:
+        print(f"pre-commit: could not fetch gitleaks ({exc}); skipping secret scan", file=sys.stderr)
+        return None
+
+
+def main():
+    gitleaks = find_or_fetch_gitleaks()
+    if not gitleaks:
+        return 0
+
+    toplevel = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    result = subprocess.run(
+        [gitleaks, "protect", "--staged", "--no-banner", "--redact"],
+        cwd=toplevel,
+    )
+    if result.returncode != 0:
+        print("pre-commit: gitleaks found potential secrets in staged changes; commit blocked", file=sys.stderr)
+        return result.returncode
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

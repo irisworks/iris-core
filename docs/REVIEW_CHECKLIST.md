@@ -132,7 +132,9 @@ above instead:
 - **Secret scanning** — `gitleaks` runs on every PR against full git history;
   don't manually grep for committed secrets, but do still apply the "secrets
   never land in a log" invariant above, which gitleaks can't see (it's about
-  runtime behavior, not committed content).
+  runtime behavior, not committed content). Contributors can also catch leaks
+  before they're committed via `scripts/hooks/pre-commit`
+  (`git config core.hooksPath scripts/hooks`).
 - **Static analysis** — `.github/workflows/codeql.yml` runs CodeQL on every PR
   and push to `main`, plus a weekly schedule (catches newly-added query-pack
   rules against code no PR touched). Scheduled runs have no originating PR, so
