@@ -314,7 +314,8 @@ function handleJobPoll(res: ServerResponse, url: URL): void {
 			if (line.type === "final" || line.type === "error") done = true;
 		}
 	} catch (err) {
-		jsonResponse(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		log.logWarning(`[bridge] Failed to read job log for ${requestId}: ${err instanceof Error ? err.message : String(err)}`);
+		jsonResponse(res, 500, { error: "failed to read job log" });
 		return;
 	}
 	jsonResponse(res, 200, { requestId, done, events });
