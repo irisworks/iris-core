@@ -158,6 +158,17 @@ interface PendingSessionRequest {
 const pendingRequests = new Map<string, PendingSessionRequest>();
 
 /**
+ * Parse a millisecond env var, falling back when unset, non-numeric, or
+ * negative. Honors an explicit `0` (unlike `Number(x) || fallback`).
+ */
+export function envMs(name: string, fallback: number): number {
+	const raw = process.env[name];
+	if (!raw) return fallback;
+	const parsed = parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/**
  * Register a pending response for a session message injection.
  * Returns a promise that resolves with the agent's response text.
  */

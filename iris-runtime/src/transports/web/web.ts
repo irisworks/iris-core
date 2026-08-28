@@ -342,7 +342,7 @@ export class WebTransport implements ChannelTransport {
 		text: string,
 		attachments: Array<{ local: string }> = [],
 	): Promise<string> {
-		const { registerSessionRequest } = await import("../../engine/sessions.js");
+		const { registerSessionRequest, envMs } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
 		const ts = (Date.now() / 1000).toFixed(6);
 
@@ -358,7 +358,7 @@ export class WebTransport implements ChannelTransport {
 			isBot: false,
 		});
 
-		const responsePromise = registerSessionRequest(sessionId, 90_000);
+		const responsePromise = registerSessionRequest(sessionId, envMs("IRIS_SESSION_TIMEOUT_MS", 90_000));
 		this.dispatch({ channel: channelId, user, text, ts, attachments }, this);
 		return responsePromise;
 	}
