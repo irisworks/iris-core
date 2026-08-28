@@ -12,7 +12,7 @@ import {
 	SessionManager,
 	type Skill,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
@@ -494,6 +494,45 @@ export function getOrCreateRunner(
 	return runner;
 }
 
+// pi-coding-agent's ModelRegistry only migrates a bare "MY_KEY" apiKey value to a
+// resolvable "$MY_KEY" env reference for providers added via registerProvider();
+// providers loaded from a models.json file skip that migration, so
+// getApiKeyAndHeaders() resolves the raw string as a literal and echoes it back
+// verbatim — even when the named env var is set. Every consumer of that registry
+// is affected, including AgentSession.compact() and branch-summary, which (unlike
+// normal turns) don't go through iris-core's isUnresolvedEchoedConfig guard below.
+// Fix it at the source instead: rewrite bare legacy-style apiKey values to "$NAME"
+// before the file reaches ModelRegistry, so resolution is correct for every caller.
+// Only rewrite when the named env var is actually set — an apiKey that merely looks
+// like one (e.g. a literal all-caps key) but has no matching env var is left as-is,
+// so this migration can't turn a previously-working literal key into a 401.
+const LEGACY_ENV_VAR_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
+
+export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: string): string {
+	let parsed: { providers?: Record<string, { apiKey?: string }> };
+	try {
+		parsed = JSON.parse(readFileSync(sourcePath, "utf8"));
+	} catch {
+		return sourcePath;
+	}
+	let changed = false;
+	for (const providerConfig of Object.values(parsed.providers ?? {})) {
+		if (
+			providerConfig.apiKey &&
+			LEGACY_ENV_VAR_NAME_RE.test(providerConfig.apiKey) &&
+			process.env[providerConfig.apiKey] !== undefined
+		) {
+			providerConfig.apiKey = `$${providerConfig.apiKey}`;
+			changed = true;
+		}
+	}
+	if (!changed) return sourcePath;
+	mkdirSync(channelDir, { recursive: true });
+	const normalizedPath = join(channelDir, ".models-normalized.json");
+	writeFileSync(normalizedPath, JSON.stringify(parsed, null, "\t"));
+	return normalizedPath;
+}
+
 /**
  * Create a new AgentRunner for a channel.
  * Sets up the session and subscribes to events once.
@@ -515,10 +554,10 @@ function createRunner(
 	// Auth stored outside workspace so agent can't access it.
 	const authStorage = AuthStorage.create(join(homedir(), ".pi", "iris", "auth.json"));
 	const workspaceModelsJson = join(workspaceDir, "models.json");
-	const modelRegistry = ModelRegistry.create(
-		authStorage,
-		existsSync(workspaceModelsJson) ? workspaceModelsJson : undefined,
-	);
+	const registryModelsJson = existsSync(workspaceModelsJson)
+		? normalizeModelsJsonApiKeys(workspaceModelsJson, channelDir)
+		: undefined;
+	const modelRegistry = ModelRegistry.create(authStorage, registryModelsJson);
 
 	// Resolve model from registry (handles built-in providers and custom providers from models.json).
 	// Fall back to getModel() for built-in-only providers if registry doesn't find it.
