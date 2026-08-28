@@ -12,7 +12,10 @@
   the literal string, causing a 401 and silently breaking compaction. The
   fix now also creates the channel directory before writing the normalized
   `models.json`, since a fresh channel's first `/compact`/`/reset` can reach
-  it before the directory otherwise exists. Fixes #232.
+  it before the directory otherwise exists, and only rewrites an all-caps
+  `apiKey` when a matching env var is actually set, so a literal key that
+  merely looks like an env-var name is never turned into an unresolvable
+  reference. Fixes #232.
 - Channel-observer `thinking` events now carry the reasoning text alongside
   the existing typing signal, so `GET /sessions/:id/stream` clients and other
   `ChannelObserver`s can render the model's thinking instead of a bare

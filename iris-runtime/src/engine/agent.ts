@@ -503,6 +503,9 @@ export function getOrCreateRunner(
 // normal turns) don't go through iris-core's isUnresolvedEchoedConfig guard below.
 // Fix it at the source instead: rewrite bare legacy-style apiKey values to "$NAME"
 // before the file reaches ModelRegistry, so resolution is correct for every caller.
+// Only rewrite when the named env var is actually set — an apiKey that merely looks
+// like one (e.g. a literal all-caps key) but has no matching env var is left as-is,
+// so this migration can't turn a previously-working literal key into a 401.
 const LEGACY_ENV_VAR_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 
 export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: string): string {
@@ -514,7 +517,11 @@ export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: strin
 	}
 	let changed = false;
 	for (const providerConfig of Object.values(parsed.providers ?? {})) {
-		if (providerConfig.apiKey && LEGACY_ENV_VAR_NAME_RE.test(providerConfig.apiKey)) {
+		if (
+			providerConfig.apiKey &&
+			LEGACY_ENV_VAR_NAME_RE.test(providerConfig.apiKey) &&
+			process.env[providerConfig.apiKey] !== undefined
+		) {
 			providerConfig.apiKey = `$${providerConfig.apiKey}`;
 			changed = true;
 		}
