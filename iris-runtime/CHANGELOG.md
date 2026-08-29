@@ -29,6 +29,10 @@
   the existing typing signal, so `GET /sessions/:id/stream` clients and other
   `ChannelObserver`s can render the model's thinking instead of a bare
   indicator. Fixes #235.
+- `GET /bridge/jobs/:requestId` no longer leaks the raw error message (and
+  implicit file path/stack info) when the durable job log fails to read;
+  the detail is logged server-side and a generic message is returned
+  instead.
 
 ## [1.9.0] - 2026-08-25
 
