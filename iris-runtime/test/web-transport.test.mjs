@@ -375,23 +375,23 @@ test("web transport: a path-traversal thread id is rejected before the WS handsh
 });
 
 test("web transport: IRIS_WEBUI_HOST overrides the default loopback-only bind", async () => {
-	const port = 19411;
+	const port = 19412;
 	const workingDir = makeWorkingDir();
+	const originalHost = process.env.IRIS_WEBUI_HOST;
 	process.env.IRIS_WEBUI_HOST = "0.0.0.0";
 	const transport = new WebTransport({ port, workingDir, dispatch: () => {}, commands: makeCommands() });
 	try {
 		transport.start();
 		closers.push(() => transport.stop());
 
-		// 0.0.0.0 listens on every interface, so loopback still reaches it.
-		const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=t11`);
-		const opened = await new Promise((resolve) => {
-			ws.on("open", () => resolve(true));
-			ws.on("unexpected-response", () => resolve(false));
+		const server = transport.server;
+		const address = await new Promise((resolve, reject) => {
+			server.once("listening", () => resolve(server.address()));
+			server.once("error", reject);
 		});
-		assert.equal(opened, true);
-		ws.close();
+		assert.equal(address.address, "0.0.0.0");
 	} finally {
-		delete process.env.IRIS_WEBUI_HOST;
+		if (originalHost === undefined) delete process.env.IRIS_WEBUI_HOST;
+		else process.env.IRIS_WEBUI_HOST = originalHost;
 	}
 });
