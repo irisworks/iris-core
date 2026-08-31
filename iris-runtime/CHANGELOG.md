@@ -10,6 +10,9 @@
 - `scripts/hooks/pre-commit`: opt-in git hook that runs `gitleaks` on staged
   changes before each commit, mirroring the CI secret scan locally. Enable
   with `git config core.hooksPath scripts/hooks`.
+- `IRIS_WEBUI_HOST` env var lets `WebTransport` bind beyond loopback, matching
+  the `IRIS_API_HOST` pattern (including a warning if widened without
+  `IRIS_WEBUI_PASSWORD` set). Fixes #239.
 
 ### Fixed
 
