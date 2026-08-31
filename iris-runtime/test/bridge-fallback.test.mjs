@@ -55,7 +55,11 @@ async function inFlightRequest(port, requestId) {
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ text: "do the thing", user: "test", requestId }),
 	}).then((r) => r.json());
-	await new Promise((r) => setTimeout(r, 50));
+	// Server startup and request scheduling vary under a parallel test run. Wait
+	// for the observable condition rather than assuming 50ms is enough.
+	for (let attempt = 0; attempt < 100 && !hasPendingBridgeRequest(requestId); attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
 	return { promise };
 }
 

@@ -21,6 +21,7 @@ env vars.
 | `IRIS_ENV` | `prod` | `preview` \| `prod` |
 | `IRIS_API_PORT` / `IRIS_API_HOST` | `3000` / `127.0.0.1` | Internal HTTP API bind (always on) |
 | `IRIS_API_TOKEN` | — | When set, API requires `Authorization: Bearer <token>` (except `/health`) |
+| `IRIS_SESSION_TIMEOUT_MS` | `90000` (Bridge/Web) / `600000` (Slack/Telegram) | How long `POST /sessions/:id/message` waits for a reply before returning a 504. Overrides the origin channel's default wait, whichever transport it is |
 | `IRIS_BRIDGE_PORT` / `IRIS_BRIDGE_HOST` | — / `127.0.0.1` | Sub-agent bridge server (sub-agents only) |
 | `IRIS_BRIDGE_IDLE_TIMEOUT_MS` / `IRIS_BRIDGE_MAX_MS` | `180000` / `600000` | Bridge request lifetime: no-progress deadline, and hard ceiling ([Sub-agents](sub-agents.md)) |
 | `IRIS_BRIDGE_HEARTBEAT_MS` / `IRIS_BRIDGE_LEGACY_TIMEOUT_MS` | `15000` / `240000` | Streaming keepalive cadence; ceiling for non-streaming bridge requests |

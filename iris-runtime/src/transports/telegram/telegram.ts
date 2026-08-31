@@ -4,7 +4,7 @@ import * as log from "../../engine/log.js";
 import { ChannelQueue } from "../../engine/channel-queue.js";
 import { callAgentBridge, loadAgentRegistry, parseAgentMention, throttleStatus } from "../../engine/bridge.js";
 import { parseVerboseCommand } from "../../engine/dispatch.js";
-import { registerSessionRequest, resolveSessionRequest } from "../../engine/sessions.js";
+import { envMs, registerSessionRequest, resolveSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, resolveChannelPath, type Attachment } from "../../engine/store.js";
 import { TelegramClaimManager } from "./telegram-claim.js";
 import type { ChannelState } from "../../engine/index.js";
@@ -670,7 +670,7 @@ export class TelegramBot implements ChannelTransport {
 			isBot: false,
 		});
 
-		const responsePromise = registerSessionRequest(sessionId, 600_000);
+		const responsePromise = registerSessionRequest(sessionId, envMs("IRIS_SESSION_TIMEOUT_MS", 600_000));
 		const event: TelegramEvent = {
 			type: "message",
 			channel: channelId,

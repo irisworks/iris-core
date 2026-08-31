@@ -4,12 +4,27 @@
 
 ### Added
 
+- `IRIS_SESSION_TIMEOUT_MS` env var to configure how long `POST
+  /sessions/:id/message` waits for a reply before returning a 504, across all
+  transports (Bridge/Web/Slack/Telegram; defaults unchanged per transport).
 - `scripts/hooks/pre-commit`: opt-in git hook that runs `gitleaks` on staged
   changes before each commit, mirroring the CI secret scan locally. Enable
   with `git config core.hooksPath scripts/hooks`.
 
 ### Fixed
 
+- Custom-provider `apiKey` values in `models.json` configured as a bare env
+  var name (e.g. `"MY_KEY"` instead of `"$MY_KEY"`) were echoed back
+  literally by `ModelRegistry.getApiKeyAndHeaders()` instead of resolving
+  from the environment. Normal turns fell back to the real key via a guard,
+  but compaction and branch-summary called the registry directly and sent
+  the literal string, causing a 401 and silently breaking compaction. The
+  fix now also creates the channel directory before writing the normalized
+  `models.json`, since a fresh channel's first `/compact`/`/reset` can reach
+  it before the directory otherwise exists, and only rewrites an all-caps
+  `apiKey` when a matching env var is actually set, so a literal key that
+  merely looks like an env-var name is never turned into an unresolvable
+  reference. Fixes #232.
 - Channel-observer `thinking` events now carry the reasoning text alongside
   the existing typing signal, so `GET /sessions/:id/stream` clients and other
   `ChannelObserver`s can render the model's thinking instead of a bare
@@ -21,6 +36,10 @@
   directly, bypassing the secret-store fallback in our `getApiKey()` callback.
   The fallback now wraps `ModelRegistry.getApiKeyAndHeaders()` itself, so every
   caller gets it. Fixes #242.
+- `GET /bridge/jobs/:requestId` no longer leaks the raw error message (and
+  implicit file path/stack info) when the durable job log fails to read;
+  the detail is logged server-side and a generic message is returned
+  instead.
 
 ## [1.9.0] - 2026-08-25
 
