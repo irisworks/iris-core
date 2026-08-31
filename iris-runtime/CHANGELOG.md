@@ -8,6 +8,13 @@
   changes before each commit, mirroring the CI secret scan locally. Enable
   with `git config core.hooksPath scripts/hooks`.
 
+### Changed
+
+- `bash`, `read`, and MCP tool output now share a single `truncateForToolOutput`
+  helper (`engine/tools/truncate.ts`) for the JSON-structural-summary-vs-head/tail
+  truncation decision, instead of each call site duplicating the same
+  `compressJsonStructure(x) ?? truncateHead/Tail(x)` logic. Fixes #221.
+
 ### Fixed
 
 - Channel-observer `thinking` events now carry the reasoning text alongside

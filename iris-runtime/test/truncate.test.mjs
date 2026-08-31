@@ -13,6 +13,7 @@ import {
 	truncateHead,
 	truncateTail,
 	compressJsonStructure,
+	truncateForToolOutput,
 	DEFAULT_MAX_LINES,
 	DEFAULT_MAX_BYTES,
 } from "../dist/engine/tools/truncate.js";
@@ -579,4 +580,44 @@ test("compressJsonStructure: long strings are cut on code-point boundaries (no l
 	const parsed = JSON.parse(result.content);
 	assert.ok(!/[\uD800-\uDBFF](?:$|[^\uDC00-\uDFFF])/.test(parsed.text), "no unpaired high surrogate");
 	assert.match(parsed.text, /\(600 chars total\)$/);
+});
+
+// ---------------------------------------------------------------------------
+// truncateForToolOutput
+// ---------------------------------------------------------------------------
+
+test("truncateForToolOutput: content under limits is unchanged and shouldPersistFull is false", () => {
+	const content = "line1\nline2";
+	const result = truncateForToolOutput(content, { direction: "head", maxLines: 10, maxBytes: 1000 });
+	assert.equal(result.truncated, false);
+	assert.equal(result.shouldPersistFull, false);
+	assert.equal(result.content, content);
+});
+
+test("truncateForToolOutput: JSON over limits prefers structural summary regardless of direction", () => {
+	const items = Array.from({ length: 1000 }, (_, i) => i);
+	const content = JSON.stringify(items);
+	const head = truncateForToolOutput(content, { direction: "head", maxLines: 10, maxBytes: 100 });
+	const tail = truncateForToolOutput(content, { direction: "tail", maxLines: 10, maxBytes: 100 });
+	assert.equal(head.truncatedBy, "structure");
+	assert.equal(tail.truncatedBy, "structure");
+	assert.equal(head.shouldPersistFull, true);
+	assert.equal(tail.shouldPersistFull, true);
+});
+
+test("truncateForToolOutput: non-JSON content falls back to truncateHead/truncateTail per direction", () => {
+	const content = "l1\nl2\nl3\nl4\nl5";
+	const head = truncateForToolOutput(content, { direction: "head", maxLines: 2, maxBytes: 1000 });
+	const tail = truncateForToolOutput(content, { direction: "tail", maxLines: 2, maxBytes: 1000 });
+	assert.equal(head.content, "l1\nl2");
+	assert.equal(tail.content, "l4\nl5");
+	assert.equal(head.shouldPersistFull, true);
+	assert.equal(tail.shouldPersistFull, true);
+});
+
+test("truncateForToolOutput: jsonCompression:false skips structural summary even for JSON content", () => {
+	const items = Array.from({ length: 1000 }, (_, i) => i);
+	const content = JSON.stringify(items);
+	const result = truncateForToolOutput(content, { direction: "head", jsonCompression: false, maxLines: 10, maxBytes: 100 });
+	assert.notEqual(result.truncatedBy, "structure");
 });

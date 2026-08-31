@@ -13,14 +13,7 @@ import {
 	recordConfirmationRequest,
 	resolveAuditLogPath,
 } from "./bash-policy.js";
-import {
-	compressJsonStructure,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-	type TruncationResult,
-	truncateTail,
-} from "./truncate.js";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateForToolOutput, type TruncationResult } from "./truncate.js";
 
 /**
  * Generate a unique temp file path for bash output
@@ -119,12 +112,12 @@ export function createBashTool(executor: Executor, policy?: BashPolicyOptions): 
 			// For large JSON output, prefer a schema-aware structural summary over
 			// blind tail truncation so the model still sees keys/shape and sample
 			// values instead of an arbitrarily cut-off blob.
-			const truncation = compressJsonStructure(output) ?? truncateTail(output);
+			const truncation = truncateForToolOutput(output, { direction: "tail" });
 
 			// Write to temp file whenever truncation occurred (whether by lines,
 			// bytes, or structural summarization) so the notices below can always
 			// point at the full output.
-			if (truncation.truncated) {
+			if (truncation.shouldPersistFull) {
 				tempFilePath = getTempFilePath();
 				tempFileStream = createWriteStream(tempFilePath);
 				tempFileStream.write(output);
