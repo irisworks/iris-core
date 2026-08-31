@@ -14,6 +14,13 @@
   the existing typing signal, so `GET /sessions/:id/stream` clients and other
   `ChannelObserver`s can render the model's thinking instead of a bare
   indicator. Fixes #235.
+- `models.json`-loaded providers (e.g. Foundry) with a `$`-prefixed `apiKey`
+  env var reference failed once `IRIS_SECRETS_MODE=store` scrubbed that var
+  from `process.env` — `pi-coding-agent`'s `AgentSession` resolves auth for
+  compaction and branch-summary by calling `ModelRegistry.getApiKeyAndHeaders()`
+  directly, bypassing the secret-store fallback in our `getApiKey()` callback.
+  The fallback now wraps `ModelRegistry.getApiKeyAndHeaders()` itself, so every
+  caller gets it. Fixes #242.
 
 ## [1.9.0] - 2026-08-25
 
