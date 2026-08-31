@@ -14,6 +14,9 @@
   the existing typing signal, so `GET /sessions/:id/stream` clients and other
   `ChannelObserver`s can render the model's thinking instead of a bare
   indicator. Fixes #235.
+- `test/bridge-fallback.test.mjs`: replaced a fixed 50ms sleep with a poll on
+  `hasPendingBridgeRequest()` before asserting a request is pending, fixing
+  load-flakiness under the full test suite. Fixes #224.
 
 ## [1.9.0] - 2026-08-25
 

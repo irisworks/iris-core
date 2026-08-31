@@ -48,6 +48,11 @@ function makeEngineHarness(workingDir, run) {
  * POST /bridge and leave it in flight; returns once the server has registered
  * the pending request. Wrapped in an object deliberately — returning the promise
  * bare from an async function would chain it and wait out the whole request.
+ *
+ * Polls hasPendingBridgeRequest() rather than sleeping a fixed delay: under
+ * CPU contention (full suite run) a flat 50ms sleep can elapse before the
+ * server has actually registered the request, making the assertion that
+ * follows flaky (issue #224).
  */
 async function inFlightRequest(port, requestId) {
 	const promise = fetch(`http://127.0.0.1:${port}/bridge`, {
@@ -55,7 +60,13 @@ async function inFlightRequest(port, requestId) {
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ text: "do the thing", user: "test", requestId }),
 	}).then((r) => r.json());
-	await new Promise((r) => setTimeout(r, 50));
+	const deadline = Date.now() + 5000;
+	while (!hasPendingBridgeRequest(requestId)) {
+		if (Date.now() > deadline) {
+			throw new Error(`timed out waiting for bridge request ${requestId} to register as pending`);
+		}
+		await new Promise((r) => setTimeout(r, 5));
+	}
 	return { promise };
 }
 
