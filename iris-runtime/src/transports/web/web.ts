@@ -178,8 +178,14 @@ export class WebTransport implements ChannelTransport {
 			wss.handleUpgrade(req, socket, head, (ws) => this.handleConnection(ws, req));
 		});
 
-		server.listen(this.port, "127.0.0.1", () => {
-			log.logInfo(`[web] Web UI listening on http://127.0.0.1:${this.port}`);
+		const webuiHost = process.env.IRIS_WEBUI_HOST ?? "127.0.0.1";
+		if (webuiHost !== "127.0.0.1" && webuiHost !== "localhost" && !this.password) {
+			log.logWarning(
+				`[web] IRIS_WEBUI_HOST=${webuiHost} exposes the web UI beyond loopback without IRIS_WEBUI_PASSWORD — anyone who can reach port ${this.port} gets an unauthenticated chat session. Set IRIS_WEBUI_PASSWORD.`,
+			);
+		}
+		server.listen(this.port, webuiHost, () => {
+			log.logInfo(`[web] Web UI listening on http://${webuiHost}:${this.port}`);
 		});
 		server.on("error", (err) => log.logWarning("[web] server error", err.message));
 
