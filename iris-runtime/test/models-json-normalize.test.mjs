@@ -78,7 +78,7 @@ test("normalizeModelsJsonApiKeys leaves a literal (non env-var-shaped) apiKey un
 	const modelsJson = join(dir, "models.json");
 	writeFileSync(
 		modelsJson,
-		JSON.stringify({ providers: { custom: { apiKey: "sk-live-abc123" } } }),
+		JSON.stringify({ providers: { custom: { apiKey: "literal-api-key-value" } } }),
 	);
 
 	const resultPath = normalizeModelsJsonApiKeys(modelsJson, dir);

@@ -44,12 +44,17 @@ Three limits to be explicit about before building on it:
 ```bash
 IRIS_WEBUI_PORT=8081
 IRIS_WEBUI_PASSWORD=<a-shared-secret>   # optional but recommended
+IRIS_WEBUI_HOST=0.0.0.0                 # optional; widens the bind beyond loopback
 ```
 
 Presence of `IRIS_WEBUI_PORT` enables the transport; it's off by default so
 Slack/Telegram-only installs pay nothing for it. The server binds to
-`127.0.0.1` — expose it externally with the `serve-public` skill (its nginx
-config already handles the `Upgrade`/`Connection` headers WebSocket needs).
+`127.0.0.1` by default — expose it externally with the `serve-public` skill
+(its nginx config already handles the `Upgrade`/`Connection` headers WebSocket
+needs), or set `IRIS_WEBUI_HOST` if a consumer needs to reach it directly
+(e.g. from another container). Widening the bind without also setting
+`IRIS_WEBUI_PASSWORD` logs a warning, since the web UI has no auth gate by
+default.
 
 `IRIS_WEBUI_PASSWORD` gates access with a single shared secret — this is a
 door lock, not RBAC. There are no user accounts or roles; multi-user auth

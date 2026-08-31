@@ -10,6 +10,9 @@
 - `scripts/hooks/pre-commit`: opt-in git hook that runs `gitleaks` on staged
   changes before each commit, mirroring the CI secret scan locally. Enable
   with `git config core.hooksPath scripts/hooks`.
+- `IRIS_WEBUI_HOST` env var lets `WebTransport` bind beyond loopback, matching
+  the `IRIS_API_HOST` pattern (including a warning if widened without
+  `IRIS_WEBUI_PASSWORD` set). Fixes #239.
 
 ### Fixed
 
@@ -32,6 +35,13 @@
 - `test/bridge-fallback.test.mjs`: replaced a fixed 50ms sleep with a poll on
   `hasPendingBridgeRequest()` before asserting a request is pending, fixing
   load-flakiness under the full test suite. Fixes #224.
+- `models.json`-loaded providers (e.g. Foundry) with a `$`-prefixed `apiKey`
+  env var reference failed once `IRIS_SECRETS_MODE=store` scrubbed that var
+  from `process.env` — `pi-coding-agent`'s `AgentSession` resolves auth for
+  compaction and branch-summary by calling `ModelRegistry.getApiKeyAndHeaders()`
+  directly, bypassing the secret-store fallback in our `getApiKey()` callback.
+  The fallback now wraps `ModelRegistry.getApiKeyAndHeaders()` itself, so every
+  caller gets it. Fixes #242.
 - `GET /bridge/jobs/:requestId` no longer leaks the raw error message (and
   implicit file path/stack info) when the durable job log fails to read;
   the detail is logged server-side and a generic message is returned

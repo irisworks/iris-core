@@ -534,6 +534,67 @@ export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: strin
 }
 
 /**
+ * pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders) falls
+ * back to echoing the raw config string when the env var it names isn't set:
+ * `process.env[config] || config`. models.json's custom providers (azure-foundry, deepseek,
+ * mistral, custom) configure "apiKey" as an env var name (e.g. "MISTRAL_API_KEY"), so once
+ * store/proxy mode scrubs that var from process.env after migrating the real key to the
+ * secret store, getApiKeyAndHeaders reports `ok: true, apiKey: "MISTRAL_API_KEY"` — the
+ * literal env var name, not a real key. And a `$`-prefixed value (e.g. "$MISTRAL_API_KEY")
+ * makes resolveConfigValue throw outright once the var is scrubbed, instead of echoing.
+ *
+ * pi-coding-agent's AgentSession also calls ModelRegistry.getApiKeyAndHeaders() directly in
+ * several internal paths (manual/auto compaction, branch-summary) instead of going through a
+ * getApiKey() callback — so a fallback registered only on the Agent's getApiKey() option never
+ * runs for those paths and they throw/silently no-op once a models.json provider's env var is
+ * scrubbed from process.env (#242). Wrap the registry method itself so every caller — ours and
+ * pi-coding-agent's internal ones — gets the same secret-store fallback, instead of chasing
+ * each new bypassing call site individually.
+ */
+export function applySecretStoreApiKeyFallback(modelRegistry: ModelRegistry, workspaceModelsJsonPath: string): void {
+	const configuredApiKeysByProvider = ((): Record<string, string | undefined> => {
+		if (!existsSync(workspaceModelsJsonPath)) return {};
+		try {
+			const parsed = JSON.parse(readFileSync(workspaceModelsJsonPath, "utf8")) as {
+				providers?: Record<string, { apiKey?: string }>;
+			};
+			return Object.fromEntries(
+				Object.entries(parsed.providers ?? {}).map(([name, config]) => [name, config.apiKey]),
+			);
+		} catch {
+			return {};
+		}
+	})();
+
+	const resolveApiKeyWithSecretFallback = async (
+		providerName: string,
+		auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>,
+	): Promise<string | undefined> => {
+		const configuredApiKeyField = configuredApiKeysByProvider[providerName];
+		const isUnresolvedEchoedConfig =
+			auth.ok && Boolean(configuredApiKeyField) && auth.apiKey === configuredApiKeyField;
+		if (auth.ok && auth.apiKey && !isUnresolvedEchoedConfig) return auth.apiKey;
+		// Secrets provider (store/broker in store/proxy modes; env-backed
+		// otherwise) — this is what keeps the LLM key working once it no longer
+		// lives in .env/process.env.
+		const brokered = await getSecretProvider().get(`${providerName.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`);
+		if (brokered) return brokered;
+		// Fallback env var: ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, etc. (models.json's
+		// per-provider "apiKey" field, handled above, is checked first — that's how
+		// providers with a non-standard env var name like AZURE_FOUNDRY_KEY work.)
+		return process.env[`${providerName.toUpperCase().replace(/-/g, "_")}_API_KEY`];
+	};
+
+	const originalGetApiKeyAndHeaders = modelRegistry.getApiKeyAndHeaders.bind(modelRegistry);
+	modelRegistry.getApiKeyAndHeaders = async (forModel) => {
+		const auth = await originalGetApiKeyAndHeaders(forModel);
+		const resolved = await resolveApiKeyWithSecretFallback(forModel.provider, auth);
+		if (resolved) return { ok: true, apiKey: resolved, headers: auth.ok ? auth.headers : undefined };
+		return auth;
+	};
+}
+
+/**
  * Create a new AgentRunner for a channel.
  * Sets up the session and subscribes to events once.
  */
@@ -592,43 +653,15 @@ function createRunner(
 		channelDir,
 	});
 
-	// pi-coding-agent's resolveConfigValue() (used by ModelRegistry.getApiKeyAndHeaders)
-	// falls back to echoing the raw config string when the env var it names isn't
-	// set: `process.env[config] || config`. models.json's custom providers (azure-foundry,
-	// deepseek, mistral, custom) configure "apiKey" as an env var name (e.g.
-	// "MISTRAL_API_KEY"), so once store/proxy mode scrubs that var from process.env
-	// after migrating the real key to the secret store, getApiKeyAndHeaders reports
-	// `ok: true, apiKey: "MISTRAL_API_KEY"` — the literal env var name, not a real
-	// key — and our broker fallback below never runs. Detect that specific echo so
-	// we treat it as unresolved instead of sending the env var's own name as the key.
-	const configuredApiKeyField = ((): string | undefined => {
-		if (!existsSync(workspaceModelsJson)) return undefined;
-		try {
-			const parsed = JSON.parse(readFileSync(workspaceModelsJson, "utf8")) as {
-				providers?: Record<string, { apiKey?: string }>;
-			};
-			return parsed.providers?.[provider]?.apiKey;
-		} catch {
-			return undefined;
-		}
-	})();
+	// See applySecretStoreApiKeyFallback's doc comment for why this wraps the registry
+	// method itself instead of only feeding the getApiKey() callback below (#242).
+	applySecretStoreApiKeyFallback(modelRegistry, workspaceModelsJson);
 
-	// getApiKey: ModelRegistry handles env var lookup + auth storage for any provider
+	// getApiKey: ModelRegistry (wrapped above) handles env var lookup, auth storage, and
+	// secret-store fallback for any provider.
 	const getApiKey = async (): Promise<string> => {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
-		const isUnresolvedEchoedConfig =
-			auth.ok && Boolean(configuredApiKeyField) && auth.apiKey === configuredApiKeyField;
-		if (auth.ok && auth.apiKey && !isUnresolvedEchoedConfig) return auth.apiKey;
-		// Secrets provider (store/broker in store/proxy modes; env-backed
-		// otherwise) — this is what keeps the LLM key working once it no longer
-		// lives in .env/process.env.
-		const brokered = await getSecretProvider().get(`${provider.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`);
-		if (brokered) return brokered;
-		// Fallback env var: ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, etc. (models.json's
-		// per-provider "apiKey" field, handled above, is checked first — that's how
-		// providers with a non-standard env var name like AZURE_FOUNDRY_KEY work.)
-		const envFallback = process.env[`${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`];
-		if (envFallback) return envFallback;
+		if (auth.ok && auth.apiKey) return auth.apiKey;
 		throw new Error(
 			`No API key found for provider '${provider}'. ` +
 				`Set ${provider.toUpperCase().replace(/-/g, "_")}_API_KEY env var or configure auth.`,
