@@ -14,7 +14,7 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import AjvModule from "ajv";
 import { createHash } from "crypto";
-import { compressJsonStructure, truncateTail } from "../tools/truncate.js";
+import { truncateForToolOutput } from "../tools/truncate.js";
 import type { McpServerConfig } from "./config.js";
 
 // ajv ships CJS with a default-exported class; under Node16 ESM interop the
@@ -101,7 +101,7 @@ export function mapMcpContent(blocks: McpContentBlock[] | undefined): (TextConte
 		// Many MCP servers return JSON payloads (API responses, query results).
 		// Prefer a schema-aware structural summary over blind tail truncation so
 		// the model still sees keys/shape and sample values.
-		content.unshift({ type: "text", text: (compressJsonStructure(joined) ?? truncateTail(joined)).content });
+		content.unshift({ type: "text", text: truncateForToolOutput(joined, { direction: "tail" }).content });
 	}
 	if (content.length === 0) {
 		content.push({ type: "text", text: "(empty result)" });

@@ -5,14 +5,7 @@ import type { Executor } from "../sandbox.js";
 import { resizeImageIfNeededAsync } from "../image-resize.js";
 import { detectImageMimeType, detectMimeType, MIME_SNIFF_BYTES } from "../mime.js";
 import { loadReadHandlerRegistry, renderHandlerCommand } from "../read-handlers.js";
-import {
-	compressJsonStructure,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-	type TruncationResult,
-	truncateHead,
-} from "./truncate.js";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateForToolOutput, type TruncationResult } from "./truncate.js";
 
 /**
  * Sniff a file's type from its magic bytes, not its filename — a mislabeled
@@ -111,7 +104,10 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				// Handler output is model context just like ordinary text reads. Keep
 				// the same limits here: a text-heavy PDF must not bypass the 50KB /
 				// 2,000-line guard merely because it was extracted by pdftotext.
-				const truncation = truncateHead(handlerSelectedContent);
+				// jsonCompression is off here (unlike the plain-text path below) since
+				// handler output isn't expected to be raw JSON - revisit if a handler
+				// that emits JSON is added (see issue #221).
+				const truncation = truncateForToolOutput(handlerSelectedContent, { direction: "head", jsonCompression: false });
 				let outputText = truncation.content;
 				if (truncation.firstLineExceedsLimit) {
 					outputText = `[Read-handler "${handler.name}" output starts with a ${formatSize(Buffer.byteLength(handlerSelectedContent.split("\n")[0], "utf-8"))} line, exceeding the ${formatSize(DEFAULT_MAX_BYTES)} limit.]`;
@@ -216,7 +212,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 			// values instead of an arbitrarily cut-off blob. Falls back to normal
 			// line/byte truncation when the content isn't (fully) valid JSON - e.g.
 			// an offset/limit slice of a file that cuts JSON mid-structure.
-			const truncation = compressJsonStructure(selectedContent) ?? truncateHead(selectedContent);
+			const truncation = truncateForToolOutput(selectedContent, { direction: "head" });
 
 			let outputText: string;
 			let details: ReadToolDetails | undefined;

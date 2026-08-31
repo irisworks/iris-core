@@ -14,6 +14,13 @@
   the `IRIS_API_HOST` pattern (including a warning if widened without
   `IRIS_WEBUI_PASSWORD` set). Fixes #239.
 
+### Changed
+
+- `bash`, `read`, and MCP tool output now share a single `truncateForToolOutput`
+  helper (`engine/tools/truncate.ts`) for the JSON-structural-summary-vs-head/tail
+  truncation decision, instead of each call site duplicating the same
+  `compressJsonStructure(x) ?? truncateHead/Tail(x)` logic. Fixes #221.
+
 ### Fixed
 
 - Custom-provider `apiKey` values in `models.json` configured as a bare env

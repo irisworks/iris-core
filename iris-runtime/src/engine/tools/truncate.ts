@@ -358,6 +358,40 @@ export function compressJsonStructure(content: string, options: TruncationOption
 	};
 }
 
+export interface ToolOutputTruncation extends TruncationResult {
+	/**
+	 * True when truncation occurred and the full, untruncated content should
+	 * be persisted somewhere the model can retrieve it (e.g. a temp file).
+	 * Currently just mirrors `truncated`, but callers should key off this
+	 * field rather than re-deriving their own persistence gate - that
+	 * divergence (a byte-only gate disagreeing with what the truncation
+	 * helper actually decided) previously produced a "Full output: undefined"
+	 * bug in the bash tool.
+	 */
+	shouldPersistFull: boolean;
+}
+
+export interface ToolOutputTruncationOptions extends TruncationOptions {
+	/** Which raw truncation to fall back to when JSON structural compression doesn't apply. */
+	direction: "head" | "tail";
+	/** Set to false to skip the JSON structural-summary attempt and always use raw head/tail truncation. Default: true. */
+	jsonCompression?: boolean;
+}
+
+/**
+ * Shared truncation-decision logic for tool output: try a JSON structural
+ * summary first, falling back to raw head/tail truncation. Consolidates the
+ * `compressJsonStructure(x) ?? truncateHead(x)` (or `truncateTail`) pattern
+ * that was previously copy-pasted across call sites, so a future new
+ * `truncatedBy` mode or persistence rule can't drift between them.
+ */
+export function truncateForToolOutput(content: string, options: ToolOutputTruncationOptions): ToolOutputTruncation {
+	const { direction, jsonCompression = true, ...truncationOptions } = options;
+	const structural = jsonCompression ? compressJsonStructure(content, truncationOptions) : null;
+	const result = structural ?? (direction === "head" ? truncateHead(content, truncationOptions) : truncateTail(content, truncationOptions));
+	return { ...result, shouldPersistFull: result.truncated };
+}
+
 /**
  * Truncate a string to fit within a byte limit (from the end).
  * Handles multi-byte UTF-8 characters correctly.
