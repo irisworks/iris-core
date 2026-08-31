@@ -32,6 +32,9 @@
   the existing typing signal, so `GET /sessions/:id/stream` clients and other
   `ChannelObserver`s can render the model's thinking instead of a bare
   indicator. Fixes #235.
+- `test/bridge-fallback.test.mjs`: replaced a fixed 50ms sleep with a poll on
+  `hasPendingBridgeRequest()` before asserting a request is pending, fixing
+  load-flakiness under the full test suite. Fixes #224.
 - `models.json`-loaded providers (e.g. Foundry) with a `$`-prefixed `apiKey`
   env var reference failed once `IRIS_SECRETS_MODE=store` scrubbed that var
   from `process.env` — `pi-coding-agent`'s `AgentSession` resolves auth for
