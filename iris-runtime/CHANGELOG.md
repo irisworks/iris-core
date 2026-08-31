@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-08-31
+
 ### Added
 
 - `IRIS_SESSION_TIMEOUT_MS` env var to configure how long `POST
