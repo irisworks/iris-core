@@ -26,6 +26,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSyn
 import { join } from "path";
 import { randomBytes } from "crypto";
 import * as log from "./log.js";
+import { envMs } from "./sessions.js";
 
 // ============================================================================
 // Pending request registry (module-level, shared with slack.ts via this module)
@@ -314,17 +315,11 @@ function handleJobPoll(res: ServerResponse, url: URL): void {
 			if (line.type === "final" || line.type === "error") done = true;
 		}
 	} catch (err) {
-		jsonResponse(res, 500, { error: err instanceof Error ? err.message : String(err) });
+		log.logWarning(`[bridge] Failed to read job log for ${requestId}: ${err instanceof Error ? err.message : String(err)}`);
+		jsonResponse(res, 500, { error: "failed to read job log" });
 		return;
 	}
 	jsonResponse(res, 200, { requestId, done, events });
-}
-
-function envMs(name: string, fallback: number): number {
-	const raw = process.env[name];
-	if (!raw) return fallback;
-	const parsed = parseInt(raw, 10);
-	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 /** Longest a status line may be before it's truncated on the way out. */

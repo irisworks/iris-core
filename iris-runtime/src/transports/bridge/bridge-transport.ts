@@ -181,13 +181,13 @@ export class BridgeTransport implements ChannelTransport {
 		// Same 5-message-per-channel convention as enqueueEvent above. Checked
 		// before registerSessionRequest so a full queue fails fast (the HTTP
 		// handler in api.ts maps the rejection to a 504) instead of registering a
-		// promise that hangs until its 90s timeout while queued work waits.
+		// promise that hangs until IRIS_SESSION_TIMEOUT_MS while queued work waits.
 		const queue = this.getQueue(channelId);
 		if (queue.isFull()) {
 			log.logWarning(`[bridge] Session message queue full for ${channelId}, rejecting: ${text.substring(0, 50)}`);
 			throw new Error(`session message queue full for ${channelId}`);
 		}
-		const { registerSessionRequest } = await import("../../engine/sessions.js");
+		const { registerSessionRequest, envMs } = await import("../../engine/sessions.js");
 		const ts = (Date.now() / 1000).toFixed(6);
 
 		// Log user message to session directory (#217), mirroring Slack/Telegram.
@@ -202,7 +202,7 @@ export class BridgeTransport implements ChannelTransport {
 			isBot: false,
 		});
 
-		const responsePromise = registerSessionRequest(sessionId, 90_000);
+		const responsePromise = registerSessionRequest(sessionId, envMs("IRIS_SESSION_TIMEOUT_MS", 90_000));
 		const event = { channel: channelId, user, text, ts, attachments };
 		queue.enqueue(async () => {
 			await this.dispatch(event, this);
