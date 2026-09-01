@@ -12,6 +12,9 @@
   the `--mode=docker` Terraform flow, which also appends the agent's own LLM
   key when the module's `secrets_mode` is `store`/`proxy` — instead of
   reading `SKILL.md` frontmatter by hand. Closes #125.
+- `scripts/cut-release.sh`: signs and pushes the release tag and publishes
+  the GitHub Release from `iris-runtime/package.json` + the CHANGELOG entry,
+  replacing the manual multi-command sequence in `docs/RELEASING.md`.
 
 ## [1.10.1] - 2026-09-01
 

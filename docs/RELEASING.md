@@ -41,7 +41,15 @@ update.
 
 1. Ensure CI is green on `main` (build + smoke).
 2. Bump `iris-runtime/package.json` version; finalize CHANGELOG entry.
-3. `git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` — the `-s` signs
+3. Run `bash scripts/cut-release.sh` to do steps 3-4 below in one shot: it
+   reads the version from `package.json`, signs and pushes the tag, and
+   publishes the GitHub Release with that version's CHANGELOG section as
+   notes. It refuses to run on a dirty tree, off `main`, or if the
+   CHANGELOG section is empty.
+
+   Equivalent manual steps, if you need to do it by hand:
+
+   `git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z` — the `-s` signs
    the tag with the key listed under [Signing key](#signing-key). Don't drop
    the `-s`: `install.sh` treats any `v*` tag as a release and aborts if it
    isn't signed by the published key.
