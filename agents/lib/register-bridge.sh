@@ -105,9 +105,13 @@ case "$cmd" in
       SKILL_FILE="${dir%/}/SKILL.md"
       [[ -f "$SKILL_FILE" ]] || continue
       # Only look inside the frontmatter block (between the first two `---` lines).
-      LINE=$(awk '/^---$/{c++; next} c==1' "$SKILL_FILE" | grep -E '^secrets:' | head -1)
+      LINE=$(awk '/^---$/{c++; next} c==1' "$SKILL_FILE" | { grep -E '^secrets:' || true; } | head -1)
       [[ -z "$LINE" ]] && continue
-      INNER=$(sed -E 's/^secrets:[[:space:]]*\[(.*)\][[:space:]]*$/\1/' <<< "$LINE")
+      # Only the single-line bracket form (`secrets: [A, B]`) is supported —
+      # skip anything else (e.g. a multi-line YAML list) rather than treating
+      # the unmatched "secrets:" text itself as a bogus secret name.
+      [[ "$LINE" =~ ^secrets:[[:space:]]*\[(.*)\][[:space:]]*$ ]] || continue
+      INNER="${BASH_REMATCH[1]}"
       IFS=',' read -ra RAW <<< "$INNER"
       for n in "${RAW[@]}"; do
         n="$(echo "$n" | xargs)"
