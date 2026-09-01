@@ -163,6 +163,38 @@ export async function createEngine(config: EngineConfig): Promise<Engine> {
 		async handleEvent(event: TransportEvent, transport: EngineTransport, isEvent?: boolean): Promise<void> {
 			const state = getState(event.channel);
 
+			// A scheduled event created with `--as-task` (skills/schedule) carries
+			// runAsTask through EventsWatcher (engine/events.ts). Route it through
+			// the isolated `task` machinery instead of a full turn: only the task's
+			// final text is posted, and this channel's own context.jsonl never
+			// grows on each firing (issue #253). Gated on IRIS_TASKS_ENABLED here
+			// (not baked into the event) so flipping the flag off is enough to
+			// return every such event to today's full-turn behavior.
+			if (event.runAsTask) {
+				if (process.env.IRIS_TASKS_ENABLED === "true") {
+					log.logInfo(`[${event.channel}] Running scheduled event as task: ${event.text.substring(0, 50)}`);
+					state.running = true;
+					try {
+						const label = event.text.length > 60 ? `${event.text.slice(0, 57)}...` : event.text;
+						const resultText = await state.runner.runTask(event.text, label);
+						if (resultText.trim() && resultText.trim() !== "[SILENT]") {
+							await transport.postMessage(event.channel, resultText);
+						}
+					} catch (err) {
+						const errMsg = err instanceof Error ? err.message : String(err);
+						log.logWarning(`[${event.channel}] Scheduled task failed`, errMsg);
+						await transport.postMessage(event.channel, `_Error: ${errMsg}_`);
+					} finally {
+						state.running = false;
+					}
+					return;
+				}
+				log.logWarning(
+					`[${event.channel}] runAsTask event fired but IRIS_TASKS_ENABLED is not set — falling back to a normal turn`,
+					event.text.substring(0, 80),
+				);
+			}
+
 			// Start run
 			state.running = true;
 			state.stopRequested = false;
