@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `ModelRegistry.hasConfiguredAuth()` had the same `process.env`-only bypass
+  as #242's `getApiKeyAndHeaders()`, and ran earlier in the message-send
+  pre-flight check — so every turn (not just compaction/branch-summary)
+  failed once a `models.json` provider's `apiKey` env var was scrubbed by
+  `IRIS_SECRETS_MODE=store`. `applySecretStoreApiKeyFallback` now wraps
+  `hasConfiguredAuth` too, checking the secret store (store mode) and
+  `process.env` synchronously since its callers never `await` it. Fixes #248.
+
 ## [1.10.0] - 2026-08-31
 
 ### Added

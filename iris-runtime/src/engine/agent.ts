@@ -32,6 +32,7 @@ import { detectImageMimeTypeFromFile } from "./mime.js";
 import { getMcpManager, type McpStatusSummary } from "./mcp/index.js";
 import { createExecutor, releaseExecutor, type SandboxConfig } from "./sandbox.js";
 import { getSecretProvider } from "./secrets.js";
+import { SecretStore, secretsMode } from "./secret-store.js";
 import {
 	getPromptProfile,
 	type ChannelInfo,
@@ -550,6 +551,18 @@ export function normalizeModelsJsonApiKeys(sourcePath: string, channelDir: strin
  * scrubbed from process.env (#242). Wrap the registry method itself so every caller — ours and
  * pi-coding-agent's internal ones — gets the same secret-store fallback, instead of chasing
  * each new bypassing call site individually.
+ *
+ * hasConfiguredAuth() has the identical bypass: it resolves the configured apiKey directly
+ * against process.env with no secret-store awareness, and it runs *earlier* than
+ * getApiKeyAndHeaders() in AgentSession's message-send pre-flight check — so once a
+ * models.json key is scrubbed, every turn fails before #242's fix is ever reached (#248).
+ * It's also called synchronously (getAvailable/getModels' model filter, setModel(), the
+ * scoped-models filter, the /model command, and session-restore in sdk.js/model-resolver.js
+ * all call it without awaiting), so unlike getApiKeyAndHeaders above, its fallback can't
+ * consult a broker over the network — only the synchronous, locally-backed SecretStore
+ * (store mode) and process.env are checked. Broker mode keeps relying on
+ * getApiKeyAndHeaders()'s async fallback for the actual key; hasConfiguredAuth() here is
+ * only the pre-flight "is something configured" gate.
  */
 export function applySecretStoreApiKeyFallback(modelRegistry: ModelRegistry, workspaceModelsJsonPath: string): void {
 	const configuredApiKeysByProvider = ((): Record<string, string | undefined> => {
@@ -591,6 +604,17 @@ export function applySecretStoreApiKeyFallback(modelRegistry: ModelRegistry, wor
 		const resolved = await resolveApiKeyWithSecretFallback(forModel.provider, auth);
 		if (resolved) return { ok: true, apiKey: resolved, headers: auth.ok ? auth.headers : undefined };
 		return auth;
+	};
+
+	const originalHasConfiguredAuth = modelRegistry.hasConfiguredAuth.bind(modelRegistry);
+	modelRegistry.hasConfiguredAuth = (forModel) => {
+		if (originalHasConfiguredAuth(forModel)) return true;
+		if (secretsMode() === "store") {
+			const storeKey = `${forModel.provider.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`;
+			if (SecretStore.open()?.get(storeKey) !== undefined) return true;
+		}
+		const envKey = `${forModel.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+		return process.env[envKey] !== undefined;
 	};
 }
 
