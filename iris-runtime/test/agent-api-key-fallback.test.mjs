@@ -12,7 +12,16 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { applySecretStoreApiKeyFallback } from "../dist/engine/agent.js";
+import { SecretStore } from "../dist/engine/secret-store.js";
+
+function makeStoreDir() {
+	const dir = mkdtempSync(join(tmpdir(), "iris-agent-api-key-store-"));
+	const keyFile = join(dir, "secret.key");
+	writeFileSync(keyFile, randomBytes(32).toString("hex"));
+	return { keyFile, storeFile: join(dir, "secrets.json.enc") };
+}
 
 function makeModelsJson(providers) {
 	const dir = mkdtempSync(join(tmpdir(), "iris-agent-api-key-"));
@@ -21,8 +30,8 @@ function makeModelsJson(providers) {
 	return modelsJsonPath;
 }
 
-function fakeRegistry(result) {
-	return { getApiKeyAndHeaders: async () => result };
+function fakeRegistry(result, { hasConfiguredAuth = () => false } = {}) {
+	return { getApiKeyAndHeaders: async () => result, hasConfiguredAuth };
 }
 
 test("applySecretStoreApiKeyFallback falls back to the env-backed secret store when a $-prefixed apiKey throws", async () => {
@@ -72,4 +81,65 @@ test("applySecretStoreApiKeyFallback returns the original failure when no fallba
 	delete process.env.FOUNDRY_E2_API_KEY;
 	const result = await registry.getApiKeyAndHeaders({ provider: "foundry-e2", id: "gpt" });
 	assert.equal(result.ok, false);
+});
+
+// Regression coverage for #248: hasConfiguredAuth() is a separate, synchronous
+// method with the same process.env-only bypass, called earlier in the
+// message-send path than getApiKeyAndHeaders() — so it must get the same
+// secret-store fallback, applied by wrapping it here too.
+
+test("applySecretStoreApiKeyFallback wraps hasConfiguredAuth to check the store in store mode", async (t) => {
+	const { keyFile, storeFile } = makeStoreDir();
+	process.env.IRIS_SECRETS_MODE = "store";
+	process.env.IRIS_SECRET_KEY_FILE = keyFile;
+	process.env.IRIS_SECRET_STORE_FILE = storeFile;
+	t.after(() => {
+		delete process.env.IRIS_SECRETS_MODE;
+		delete process.env.IRIS_SECRET_KEY_FILE;
+		delete process.env.IRIS_SECRET_STORE_FILE;
+	});
+
+	SecretStore.open().set("FOUNDRY-E2-API-KEY", "real-secret-value");
+
+	const modelsJsonPath = makeModelsJson({ "foundry-e2": { apiKey: "$FOUNDRY_E2_API_KEY" } });
+	const registry = fakeRegistry(
+		{ ok: false, error: 'Missing required env var "FOUNDRY_E2_API_KEY"' },
+		{ hasConfiguredAuth: () => false },
+	);
+	applySecretStoreApiKeyFallback(registry, modelsJsonPath);
+
+	assert.equal(registry.hasConfiguredAuth({ provider: "foundry-e2", id: "gpt" }), true);
+});
+
+test("applySecretStoreApiKeyFallback wraps hasConfiguredAuth to fall back to a plain env var", async () => {
+	const modelsJsonPath = makeModelsJson({ mistral: { apiKey: "MISTRAL_API_KEY" } });
+	const registry = fakeRegistry({ ok: true, apiKey: "MISTRAL_API_KEY" }, { hasConfiguredAuth: () => false });
+	applySecretStoreApiKeyFallback(registry, modelsJsonPath);
+
+	process.env.MISTRAL_API_KEY = "real-mistral-key";
+	try {
+		assert.equal(registry.hasConfiguredAuth({ provider: "mistral", id: "large" }), true);
+	} finally {
+		delete process.env.MISTRAL_API_KEY;
+	}
+});
+
+test("applySecretStoreApiKeyFallback leaves hasConfiguredAuth false when nothing resolves", async () => {
+	const modelsJsonPath = makeModelsJson({ "foundry-e2": { apiKey: "$FOUNDRY_E2_API_KEY" } });
+	const registry = fakeRegistry(
+		{ ok: false, error: 'Missing required env var "FOUNDRY_E2_API_KEY"' },
+		{ hasConfiguredAuth: () => false },
+	);
+	applySecretStoreApiKeyFallback(registry, modelsJsonPath);
+
+	delete process.env.FOUNDRY_E2_API_KEY;
+	assert.equal(registry.hasConfiguredAuth({ provider: "foundry-e2", id: "gpt" }), false);
+});
+
+test("applySecretStoreApiKeyFallback passes through hasConfiguredAuth true untouched", async () => {
+	const modelsJsonPath = makeModelsJson({ custom: { apiKey: "$CUSTOM_API_KEY" } });
+	const registry = fakeRegistry({ ok: true, apiKey: "sk-already-resolved" }, { hasConfiguredAuth: () => true });
+	applySecretStoreApiKeyFallback(registry, modelsJsonPath);
+
+	assert.equal(registry.hasConfiguredAuth({ provider: "custom", id: "model" }), true);
 });
