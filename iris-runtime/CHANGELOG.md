@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/cut-release.sh`: signs and pushes the release tag and publishes
+  the GitHub Release from `iris-runtime/package.json` + the CHANGELOG entry,
+  replacing the manual multi-command sequence in `docs/RELEASING.md`.
+
 ## [1.10.1] - 2026-09-01
 
 ### Fixed
