@@ -191,11 +191,34 @@ The image build (`npm run build && docker build`) now runs at most once
 across all docker-mode agents — see `terraform/main.tf`'s
 `null_resource.iris_runtime_image` — instead of once per agent.
 
+**Deciding secrets works the same way as the default flow, but what to do
+with the result depends on the module's `secrets_mode` variable.** Collect
+the CSV the same way:
+```bash
+SECRETS_CSV=$(agents/lib/register-bridge.sh collect-secrets agents/<name>/skills/*)
+agents/lib/register-bridge.sh check-secrets "$SECRETS_CSV"
+```
+- `secrets_mode = "env"` (the module's default): the container gets the whole
+  `/iris/.env` via `--env-file`, so every skill secret is already present —
+  `$SECRETS_CSV` still gets passed to `register` in Step 4 below (for
+  `agents.json` bookkeeping) but nothing else needs to change.
+- `secrets_mode = "store"` or `"proxy"`: the container gets **no** env file at
+  all — it resolves everything through the parent API's `secrets` allow-list
+  instead (`docs/sub-agents.md`). That allow-list must include **every**
+  secret the agent needs, not just skill secrets — append the agent's own LLM
+  key (e.g. `ANTHROPIC-API-KEY`) to `$SECRETS_CSV` before Step 4, and also set
+  `unique_api_token = true` on the module block (a Terraform precondition
+  enforces this pairing).
+
 ### Step 4 (docker) — Patch it into the bridge
 
-Same `agents/lib/register-bridge.sh register` call as the default flow
-(mode-agnostic). Pass the module's `api_token` output as the 4th arg if
-`unique_api_token = true` was set.
+```bash
+agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>" "<api_token output>" "$SECRETS_CSV"
+```
+Same call as the default flow (mode-agnostic) — pass the module's `api_token`
+output as the 4th arg if `unique_api_token = true` was set, and `$SECRETS_CSV`
+from Step 3 above (with the LLM key appended, for store/proxy mode) as the
+5th.
 
 ### Step 5 (docker) — Verify
 

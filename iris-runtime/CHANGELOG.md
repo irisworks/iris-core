@@ -8,8 +8,10 @@
   `check-secrets <secrets_csv>`: deterministically union a skill's declared
   `secrets:` frontmatter across every skill attached to a new sub-agent, and
   proactively warn (without blocking spawn) about any that don't resolve yet.
-  `spawn-agent` now calls these instead of reading `SKILL.md` frontmatter by
-  hand. Closes #125.
+  `spawn-agent` now calls these — in both the default service-mode flow and
+  the `--mode=docker` Terraform flow, which also appends the agent's own LLM
+  key when the module's `secrets_mode` is `store`/`proxy` — instead of
+  reading `SKILL.md` frontmatter by hand. Closes #125.
 
 ## [1.10.1] - 2026-09-01
 
