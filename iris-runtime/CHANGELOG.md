@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-09-01
+
 ### Fixed
 
 - `ModelRegistry.hasConfiguredAuth()` had the same `process.env`-only bypass
