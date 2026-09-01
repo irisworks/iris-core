@@ -170,12 +170,16 @@ the resolution backends.
 **Deciding the allow-list is `spawn-agent`'s job, not a manual afterthought.**
 A skill's `SKILL.md` frontmatter may declare `secrets: [NAME, ...]` — the
 secret names its script actually resolves (see [Skills](skills.md)). When
-`spawn-agent` attaches a skill to a new agent, it collects every attached
-skill's `secrets:` entries and passes them to
-`agents/lib/register-bridge.sh register`'s `secrets_csv` argument, which
-merges them into this `secrets` array. Skip this and the skill fails the
-moment it's invoked (a 403 from `GET /secrets/:name`), not at spawn time —
-the agent looks fully set up until then.
+`spawn-agent` attaches a skill to a new agent, `agents/lib/register-bridge.sh
+collect-secrets <skill-dir>...` unions every attached skill's `secrets:`
+entries into a comma-separated list, which is passed straight to
+`agents/lib/register-bridge.sh register`'s `secrets_csv` argument and merged
+into this `secrets` array — no manual frontmatter reading involved.
+`register-bridge.sh check-secrets <secrets_csv>` then proactively resolves
+each name via `get-secret` and warns (without blocking the spawn) about any
+that aren't configured yet. Skip collecting a skill's secrets entirely and it
+fails the moment it's invoked (a 403 from `GET /secrets/:name`), not at spawn
+time — the agent looks fully set up until then.
 
 With the host's `IRIS_SECRETS_MODE` set to `store` (the default) or `proxy`,
 `terraform/modules/agent`'s `secrets_mode` variable (default `"env"`, matching

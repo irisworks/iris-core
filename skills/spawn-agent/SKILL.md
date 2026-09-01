@@ -93,23 +93,38 @@ getting.** If `--with-skill=<name>` scaffolded a skill (or a starter skill was
 copied by hand) whose `SKILL.md` frontmatter declares a `secrets:` list — e.g.
 `search-web`'s `secrets: [PERPLEXITY-API-KEY]` — that secret must reach this
 agent or the skill fails at the exact moment it's invoked, not at spawn time.
-Don't guess or skip this: read every attached skill's frontmatter and collect
-its `secrets:` entries. For each one, in an env-mode install, resolve it from
+Collect this deterministically, don't read frontmatter by hand:
+```bash
+SECRETS_CSV=$(agents/lib/register-bridge.sh collect-secrets agents/<name>/skills/*)
+```
+This unions every `secrets:` entry across all skills scaffolded into
+`agents/<name>/skills/` and prints them as a comma-separated list (empty if
+none declare any). Then check each one actually resolves *now*, before the
+agent goes live with a skill it can't use yet:
+```bash
+agents/lib/register-bridge.sh check-secrets "$SECRETS_CSV"
+```
+This warns (doesn't block) about any name that doesn't resolve via
+`get-secret` in the current install — surface those warnings to the user so
+they know to configure it, but keep going; a missing secret means that one
+skill fails when invoked, not that the whole agent is broken.
+
+For each collected secret, in an env-mode install, resolve it from
 `/iris/.env` and add it to `agents/<name>/bootstrap.sh` as its own literal
 `Environment=` line — the same pattern the template already uses for the LLM
 key, never `EnvironmentFile=/iris/.env` (see the template's own warning for
 why). In a store/proxy-mode install, skip the literal env var and instead pass
-it through the `secrets` allow-list in the next step — the agent resolves it
-itself via `get-secret`/the internal broker route, credential-store agnostic
-either way.
+`$SECRETS_CSV` through to `register-bridge.sh register` in the next step — the
+agent resolves it itself via `get-secret`/the internal broker route,
+credential-store agnostic either way.
 
 ### Step 4 — Patch it into the bridge (always, unconditional)
 
 ```bash
-agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>" "" "<SECRET-A,SECRET-B>"
+agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>" "" "$SECRETS_CSV"
 ```
-The 5th argument is the comma-separated `secrets` allow-list from the step
-above (omit or leave empty if no attached skill declares any) — it's what lets
+The 5th argument is `$SECRETS_CSV` from the step above (empty string if no
+attached skill declares any) — it's what lets
 this agent's own `get-secret` calls resolve them at all; without it, `GET
 /secrets/:name` 403s regardless of which backend (store, proxy, external
 broker, Key Vault) the install uses. This writes/merges the entry into

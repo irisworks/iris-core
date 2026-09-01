@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `agents/lib/register-bridge.sh collect-secrets <skill-dir>...` and
+  `check-secrets <secrets_csv>`: deterministically union a skill's declared
+  `secrets:` frontmatter across every skill attached to a new sub-agent, and
+  proactively warn (without blocking spawn) about any that don't resolve yet.
+  `spawn-agent` now calls these instead of reading `SKILL.md` frontmatter by
+  hand. Closes #125.
+
 ## [1.10.1] - 2026-09-01
 
 ### Fixed
