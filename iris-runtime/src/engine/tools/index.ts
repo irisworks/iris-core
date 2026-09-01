@@ -3,6 +3,7 @@ import type { Executor } from "../sandbox.js";
 import { attachTool } from "./attach.js";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
+import { createReadFullTool } from "./read-full.js";
 import { createReadTool } from "./read.js";
 import { createWriteTool } from "./write.js";
 
@@ -33,9 +34,10 @@ export function createIrisTools(executor: Executor, options: IrisToolsOptions): 
 			: undefined;
 	return [
 		createReadTool(executor, options),
-		createBashTool(executor, bashPolicy),
+		createBashTool(executor, bashPolicy, options.channelDir),
 		createEditTool(executor),
 		createWriteTool(executor),
 		attachTool,
+		createReadFullTool({ channelDir: options.channelDir }),
 	];
 }

@@ -1,7 +1,3 @@
-import { randomBytes } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Executor } from "../sandbox.js";
@@ -13,15 +9,8 @@ import {
 	recordConfirmationRequest,
 	resolveAuditLogPath,
 } from "./bash-policy.js";
+import { persistFullOutput } from "./full-output-store.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateForToolOutput, type TruncationResult } from "./truncate.js";
-
-/**
- * Generate a unique temp file path for bash output
- */
-function getTempFilePath(): string {
-	const id = randomBytes(8).toString("hex");
-	return join(tmpdir(), `iris-bash-${id}.log`);
-}
 
 const bashSchema = Type.Object({
 	label: Type.String({ description: "Brief description of what this command does (shown to user)" }),
@@ -31,7 +20,7 @@ const bashSchema = Type.Object({
 
 interface BashToolDetails {
 	truncation?: TruncationResult;
-	fullOutputPath?: string;
+	fullOutputId?: string;
 }
 
 export interface BashPolicyOptions {
@@ -46,13 +35,18 @@ const CONFIRM_MESSAGE =
 	"and end your turn. Only if the user replies with an explicit approval (yes/approve) may you re-run " +
 	"the exact same command in your next turn.";
 
-export function createBashTool(executor: Executor, policy?: BashPolicyOptions): AgentTool<typeof bashSchema> {
+export function createBashTool(executor: Executor, policy?: BashPolicyOptions, channelDir?: string): AgentTool<typeof bashSchema> {
 	const auditLogPath = policy ? resolveAuditLogPath(policy.workspaceDir) : undefined;
+	// Full-output persistence (#159) is independent of the bash-policy gate
+	// (which requires both channelId AND channelDir): a caller that supplies
+	// channelDir without channelId still gets output persisted where
+	// read_full can find it, instead of silently falling back to tmpdir.
+	const persistDir = channelDir ?? policy?.channelDir;
 
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved and retrievable with read_full(id). Optionally provide a timeout in seconds.`,
 		parameters: bashSchema,
 		execute: async (
 			_toolCallId: string,
@@ -90,10 +84,6 @@ export function createBashTool(executor: Executor, policy?: BashPolicyOptions): 
 				}
 			}
 
-			// Track output for potential temp file writing
-			let tempFilePath: string | undefined;
-			let tempFileStream: ReturnType<typeof createWriteStream> | undefined;
-
 			let result;
 			try {
 				result = await executor.exec(command, { timeout, signal });
@@ -114,15 +104,10 @@ export function createBashTool(executor: Executor, policy?: BashPolicyOptions): 
 			// values instead of an arbitrarily cut-off blob.
 			const truncation = truncateForToolOutput(output, { direction: "tail" });
 
-			// Write to temp file whenever truncation occurred (whether by lines,
-			// bytes, or structural summarization) so the notices below can always
-			// point at the full output.
-			if (truncation.shouldPersistFull) {
-				tempFilePath = getTempFilePath();
-				tempFileStream = createWriteStream(tempFilePath);
-				tempFileStream.write(output);
-				tempFileStream.end();
-			}
+			// Persist the full output whenever truncation occurred (whether by
+			// lines, bytes, or structural summarization) so the notices below can
+			// always point at a way to retrieve it (#159).
+			const fullOutputId = truncation.shouldPersistFull ? persistFullOutput(persistDir, output) : undefined;
 
 			let outputText = truncation.content || "(no output)";
 
@@ -132,25 +117,27 @@ export function createBashTool(executor: Executor, policy?: BashPolicyOptions): 
 			if (truncation.truncated) {
 				details = {
 					truncation,
-					fullOutputPath: tempFilePath,
+					fullOutputId,
 				};
 
+				const fullOutputNotice = `Full output saved, use read_full("${fullOutputId}") to see the rest`;
+
 				if (truncation.truncatedBy === "structure") {
-					outputText += `\n\n[Output is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw output. Full output: ${tempFilePath}]`;
+					outputText += `\n\n[Output is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw output. ${fullOutputNotice}]`;
 				} else if (truncation.lastLinePartial) {
 					// Edge case: last line alone > 50KB
 					const endLine = truncation.totalLines;
 					const lastLineSize = formatSize(Buffer.byteLength(output.split("\n").pop() || "", "utf-8"));
-					outputText += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${tempFilePath}]`;
+					outputText += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). ${fullOutputNotice}]`;
 				} else {
 					// Build actionable notice
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
 					const endLine = truncation.totalLines;
 
 					if (truncation.truncatedBy === "lines") {
-						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${tempFilePath}]`;
+						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. ${fullOutputNotice}]`;
 					} else {
-						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${tempFilePath}]`;
+						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). ${fullOutputNotice}]`;
 					}
 				}
 			}
