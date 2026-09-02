@@ -70,7 +70,7 @@ test("read_full: single-line content with no newlines (e.g. compact JSON) still 
 		const first = await tool.execute("call-1", { label: "x", id });
 		assert.ok(first.content[0].text.startsWith('[{"id":0,'), "must be raw JSON content, not a structural summary");
 		assert.ok(!first.content[0].text.includes("_arrayLength"));
-		assert.match(first.content[0].text, /Use offset=\d+ to continue/);
+		assert.match(first.content[0].text, /Use offset=\d+ \(byte offset\) to continue/);
 	} finally {
 		rmSync(channelDir, { recursive: true, force: true });
 	}

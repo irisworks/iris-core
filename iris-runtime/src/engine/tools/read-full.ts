@@ -6,7 +6,12 @@ import { DEFAULT_MAX_BYTES, formatSize } from "./truncate.js";
 const readFullSchema = Type.Object({
 	label: Type.String({ description: "Brief description of why you're retrieving this output (shown to user)" }),
 	id: Type.String({ description: "The id from a 'Full output saved' notice on a previous truncated tool result" }),
-	offset: Type.Optional(Type.Number({ description: "Byte offset to resume from, as given by a previous 'Use offset=N to continue' notice" })),
+	offset: Type.Optional(
+		Type.Number({
+			description:
+				"Byte offset to resume from, as given by this tool's own 'Use offset=N (byte offset) to continue' notice. Not the line-number offset from read's truncation notices.",
+		}),
+	),
 });
 
 export interface ReadFullToolOptions {
@@ -48,7 +53,7 @@ export function createReadFullTool(options: ReadFullToolOptions): AgentTool<type
 			const { text, endByte } = sliceUtf8Bytes(content, startByte, DEFAULT_MAX_BYTES);
 			let outputText = text;
 			if (endByte < totalBytes) {
-				outputText += `\n\n[Showing ${formatSize(endByte - startByte)} of ${formatSize(totalBytes)} (${DEFAULT_MAX_BYTES / 1024}KB chunk limit). Use offset=${endByte} to continue]`;
+				outputText += `\n\n[Showing ${formatSize(endByte - startByte)} of ${formatSize(totalBytes)} (${DEFAULT_MAX_BYTES / 1024}KB chunk limit). Use offset=${endByte} (byte offset) to continue]`;
 			}
 
 			return { content: [{ type: "text" as const, text: outputText }], details: undefined };

@@ -14,14 +14,21 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { envMs } from "../sessions.js";
-import { safeJoin } from "../store.js";
+import { safeJoin, sweepDirByAge } from "../store.js";
 
 const STORE_DIR_NAME = "tool-output";
 const ID_PATTERN = /^[0-9a-f]{16}$/;
+
+// Sweeping is a synchronous readdir + stat-per-entry walk, so it's throttled
+// to run at most once per directory per interval rather than on every
+// persist - a long session can call persistFullOutput() many times in a row,
+// and re-walking the (growing) store dir each time would add up.
+const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+const lastSweptAt = new Map<string, number>();
 
 function retentionMs(): number {
 	return envMs("IRIS_FULL_OUTPUT_RETENTION_MS", 24 * 60 * 60 * 1000);
@@ -31,24 +38,13 @@ function storeDir(channelDir: string | undefined): string {
 	return join(channelDir ?? tmpdir(), STORE_DIR_NAME);
 }
 
-/** Delete stored entries older than the retention window. Never throws. */
+/** Delete stored entries older than the retention window, at most once per SWEEP_INTERVAL_MS per dir. */
 function sweep(dir: string): void {
-	const cutoff = Date.now() - retentionMs();
-	let entries: string[];
-	try {
-		entries = readdirSync(dir);
-	} catch {
-		return;
-	}
-	for (const entry of entries) {
-		if (!entry.endsWith(".txt")) continue;
-		const path = join(dir, entry);
-		try {
-			if (statSync(path).mtimeMs < cutoff) rmSync(path);
-		} catch {
-			// Raced a delete or a permission hiccup - leave it for the next sweep.
-		}
-	}
+	const now = Date.now();
+	const last = lastSweptAt.get(dir);
+	if (last !== undefined && now - last < SWEEP_INTERVAL_MS) return;
+	lastSweptAt.set(dir, now);
+	sweepDirByAge(dir, ".txt", retentionMs());
 }
 
 /**

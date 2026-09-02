@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "fs";
 import { appendFile, writeFile } from "fs/promises";
 import { join, resolve, sep } from "path";
 import * as log from "./log.js";
@@ -21,6 +21,36 @@ export function safeJoin(baseDir: string, ...segments: string[]): string | undef
 	const target = resolve(base, ...segments);
 	if (target !== base && !target.startsWith(base + sep)) return undefined;
 	return target;
+}
+
+/**
+ * Delete files with `extension` under `dir` whose mtime is older than
+ * `retentionMs`. Never throws - a missing dir or a raced delete just means
+ * nothing to sweep. Shared by bridge.ts's job-log retention and
+ * full-output-store.ts's tool-output retention.
+ */
+export function sweepDirByAge(dir: string, extension: string, retentionMs: number): number {
+	let removed = 0;
+	let entries: string[];
+	try {
+		entries = readdirSync(dir);
+	} catch {
+		return 0;
+	}
+	const cutoff = Date.now() - retentionMs;
+	for (const entry of entries) {
+		if (!entry.endsWith(extension)) continue;
+		const path = join(dir, entry);
+		try {
+			if (statSync(path).mtimeMs < cutoff) {
+				rmSync(path);
+				removed++;
+			}
+		} catch {
+			// Raced a delete or a permission hiccup — leave it for the next sweep.
+		}
+	}
+	return removed;
 }
 
 export interface Attachment {

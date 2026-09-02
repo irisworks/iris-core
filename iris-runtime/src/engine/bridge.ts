@@ -22,11 +22,12 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import * as log from "./log.js";
 import { envMs } from "./sessions.js";
+import { sweepDirByAge } from "./store.js";
 
 // ============================================================================
 // Pending request registry (module-level, shared with slack.ts via this module)
@@ -155,27 +156,7 @@ function resetJobLog(requestId: string): void {
  */
 export function sweepBridgeJobLogs(retentionMs: number = jobRetentionMs()): number {
 	if (!jobLogDir || retentionMs === 0) return 0;
-	let removed = 0;
-	let entries: string[];
-	try {
-		entries = readdirSync(jobLogDir);
-	} catch {
-		return 0;
-	}
-	const cutoff = Date.now() - retentionMs;
-	for (const entry of entries) {
-		if (!entry.endsWith(".jsonl")) continue;
-		const path = join(jobLogDir, entry);
-		try {
-			if (statSync(path).mtimeMs < cutoff) {
-				rmSync(path);
-				removed++;
-			}
-		} catch {
-			// Raced a delete or a permission hiccup — leave it for the next sweep.
-		}
-	}
-	return removed;
+	return sweepDirByAge(jobLogDir, ".jsonl", retentionMs);
 }
 
 /** Settle a pending request: unregister it, stop its timers, hand it to `finish`. */

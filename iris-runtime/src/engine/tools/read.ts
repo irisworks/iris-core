@@ -231,7 +231,7 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				outputText = `${truncation.content}\n\n[File is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw content. Full output saved, use read_full("${fullOutputId}") to see the rest, or bash/jq to query specific values.]`;
 				const summarizedEnd = startLineDisplay + truncation.totalLines - 1;
 				if (summarizedEnd < totalFileLines) {
-					outputText += ` Use offset=${summarizedEnd + 1} to continue past the summarized section.`;
+					outputText += ` Use read's offset=${summarizedEnd + 1} (line number, not read_full's byte offset) to continue past the summarized section.`;
 				}
 				details = { truncation };
 			} else if (truncation.truncated) {

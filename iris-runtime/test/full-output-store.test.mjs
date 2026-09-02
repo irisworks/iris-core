@@ -3,7 +3,7 @@
 // Requires `npm run build` first (tests import ../dist/*.js).
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, statSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -81,8 +81,14 @@ test("full-output-store: re-persisting identical content refreshes its retention
 test("full-output-store: sweeps entries older than the retention window on next write", () => {
 	const channelDir = makeChannelDir();
 	try {
-		const staleId = persistFullOutput(channelDir, "stale");
-		const stalePath = join(channelDir, "tool-output", `${staleId}.txt`);
+		// Plant the stale entry directly rather than via persistFullOutput: the
+		// sweep is throttled to once per store dir per interval, so a prior
+		// persistFullOutput call against this same (fresh, never-swept) dir would
+		// consume that dir's "next write" sweep before the entry aged out.
+		const dir = join(channelDir, "tool-output");
+		mkdirSync(dir, { recursive: true });
+		const stalePath = join(dir, "aaaaaaaaaaaaaaaa.txt");
+		writeFileSync(stalePath, "stale");
 		const oldTime = new Date(Date.now() - 48 * 60 * 60 * 1000);
 		utimesSync(stalePath, oldTime, oldTime);
 
