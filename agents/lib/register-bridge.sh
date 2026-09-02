@@ -84,7 +84,7 @@ case "$cmd" in
 
     SECRETS_JSON="[]"
     if [[ -n "$SECRETS_CSV" ]]; then
-      SECRETS_JSON=$(jq -R -c 'split(",")' <<< "$SECRETS_CSV")
+      SECRETS_JSON=$(jq -R -c 'split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))' <<< "$SECRETS_CSV")
     fi
 
     jq --arg name "$NAME" --arg url "$URL" --arg desc "$DESC" \
@@ -107,6 +107,7 @@ case "$cmd" in
       # Only look inside the frontmatter block (between the first two `---` lines).
       LINE=$(awk '/^---$/{c++; next} c==1' "$SKILL_FILE" | { grep -E '^secrets:' || true; } | head -1)
       [[ -z "$LINE" ]] && continue
+      LINE=$(sed -E 's/[[:space:]]+#.*$//' <<< "$LINE")
       # Only the single-line bracket form (`secrets: [A, B]`) is supported —
       # skip anything else (e.g. a multi-line YAML list) rather than treating
       # the unmatched "secrets:" text itself as a bogus secret name.

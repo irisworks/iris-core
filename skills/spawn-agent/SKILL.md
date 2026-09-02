@@ -206,7 +206,15 @@ agents/lib/register-bridge.sh check-secrets "$SECRETS_CSV"
   all — it resolves everything through the parent API's `secrets` allow-list
   instead (`docs/sub-agents.md`). That allow-list must include **every**
   secret the agent needs, not just skill secrets — append the agent's own LLM
-  key (e.g. `ANTHROPIC-API-KEY`) to `$SECRETS_CSV` before Step 4, and also set
+  key (e.g. `ANTHROPIC-API-KEY`) to `$SECRETS_CSV` before Step 4 without
+  introducing an empty CSV entry:
+  ```bash
+  if [[ -n "$SECRETS_CSV" ]]; then
+    SECRETS_CSV+=","
+  fi
+  SECRETS_CSV+="ANTHROPIC-API-KEY"
+  ```
+  Also set
   `unique_api_token = true` on the module block (a Terraform precondition
   enforces this pairing).
 
