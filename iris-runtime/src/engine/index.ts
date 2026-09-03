@@ -8,7 +8,7 @@
 // interface lands.
 // ============================================================================
 
-import { getOrCreateRunner, type AgentRunner } from "./agent.js";
+import { getModelRuntime, getOrCreateRunner, type AgentRunner } from "./agent.js";
 import { isChannelObserved, mirrorContextToObservers } from "./channel-observers.js";
 import * as log from "./log.js";
 import type { SandboxConfig } from "./sandbox.js";
@@ -55,8 +55,13 @@ export interface Engine {
 	handleVerboseCommand(channelId: string, transport: EngineTransport, action: "on" | "off" | "status"): Promise<void>;
 }
 
-export function createEngine(config: EngineConfig): Engine {
+export async function createEngine(config: EngineConfig): Promise<Engine> {
 	const { workingDir, sandbox, provider, model, botToken } = config;
+	// One shared ModelRuntime for the whole process (pi-coding-agent >= 0.84
+	// requires it and its creation is async). Created up front so per-channel
+	// runner creation below stays synchronous; a broken auth.json/models.json
+	// fails fast here instead of on the first message.
+	const modelRuntime = await getModelRuntime(workingDir);
 	const channelStates = new Map<string, ChannelState>();
 
 	function getState(channelId: string): ChannelState {
@@ -65,7 +70,7 @@ export function createEngine(config: EngineConfig): Engine {
 			const channelDir = resolveChannelDir(workingDir, channelId);
 			state = {
 				running: false,
-				runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model, workingDir),
+				runner: getOrCreateRunner(sandbox, channelId, channelDir, provider, model, workingDir, modelRuntime),
 				store: new ChannelStore({ workingDir, botToken: botToken as string }),
 				stopRequested: false,
 			};

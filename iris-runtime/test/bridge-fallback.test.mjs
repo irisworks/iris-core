@@ -32,8 +32,8 @@ function tempWorkspace() {
  * `run` stands in for the agent runner. A run that only calls respond() — never
  * replaceMessage/postMessage — is exactly the shape that used to lose its reply.
  */
-function makeEngineHarness(workingDir, run) {
-	const engine = createEngine({ workingDir, sandbox: {}, provider: "test", model: "test" });
+async function makeEngineHarness(workingDir, run) {
+	const engine = await createEngine({ workingDir, sandbox: {}, provider: "test", model: "test" });
 	const transport = new BridgeTransport({ promptProfile: { fragments: [] }, workingDir, dispatch: () => {} });
 	const seed = (channelId) => engine.channelStates.set(channelId, {
 		running: false,
@@ -91,7 +91,7 @@ test("engine: a run that never posts still resolves the pending bridge request f
 		const { promise: responsePromise } = await inFlightRequest(19621, "fallback1");
 		assert.ok(hasPendingBridgeRequest("fallback1"), "request should be pending before the run");
 
-		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
+		const { engine, transport, seed } = await makeEngineHarness(workingDir, async (ctx) => {
 			await ctx.respond("_→ running bash_", false);
 			await ctx.respond("the answer");
 			return { stopReason: "end" };
@@ -109,7 +109,7 @@ test("engine: a run that throws resolves the bridge request with the error, inst
 	await withBridge(19622, async (workingDir) => {
 		const { promise: responsePromise } = await inFlightRequest(19622, "fallback2");
 
-		const { engine, transport, seed } = makeEngineHarness(workingDir, async () => {
+		const { engine, transport, seed } = await makeEngineHarness(workingDir, async () => {
 			throw new Error("model exploded");
 		});
 		seed("BRIDGE-fallback2");
@@ -123,7 +123,7 @@ test("engine: a silent run resolves with a placeholder rather than an empty repl
 	await withBridge(19623, async (workingDir) => {
 		const { promise: responsePromise } = await inFlightRequest(19623, "fallback3");
 
-		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
+		const { engine, transport, seed } = await makeEngineHarness(workingDir, async (ctx) => {
 			await ctx.respond("_→ running bash_", false);
 			return { stopReason: "end" };
 		});
@@ -138,7 +138,7 @@ test("engine: the fallback does not overwrite a reply the transport already deli
 	await withBridge(19624, async (workingDir) => {
 		const { promise: responsePromise } = await inFlightRequest(19624, "fallback4");
 
-		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
+		const { engine, transport, seed } = await makeEngineHarness(workingDir, async (ctx) => {
 			await ctx.respond("_→ running bash_", false);
 			// Stand in for the transport's replaceMessage on the final answer.
 			resolveBridgeRequest("fallback4", "the real reply");
@@ -163,7 +163,7 @@ test("engine: an answer whose every line is wrapped in emphasis survives the fal
 	await withBridge(19625, async (workingDir) => {
 		const { promise: responsePromise } = await inFlightRequest(19625, "fallback5");
 
-		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
+		const { engine, transport, seed } = await makeEngineHarness(workingDir, async (ctx) => {
 			await ctx.respond("_→ running bash_", false);
 			await ctx.respond("_Moby Dick_ was written by _Melville_");
 			return { stopReason: "end" };
@@ -179,7 +179,7 @@ test("engine: tool errors and compaction notices are excluded, the answer is not
 	await withBridge(19626, async (workingDir) => {
 		const { promise: responsePromise } = await inFlightRequest(19626, "fallback6");
 
-		const { engine, transport, seed } = makeEngineHarness(workingDir, async (ctx) => {
+		const { engine, transport, seed } = await makeEngineHarness(workingDir, async (ctx) => {
 			await ctx.respond("_→ reading file_", false);
 			await ctx.respond("_Error: exit code 1_", false);
 			await ctx.respond("_Compacting context..._", false);

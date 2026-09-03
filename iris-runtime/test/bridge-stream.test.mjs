@@ -627,7 +627,7 @@ test("engine: ctx.setStatus on a BRIDGE- channel is forwarded to the pending req
 		const collected = drain(lines);
 		await new Promise((r) => setTimeout(r, 30));
 
-		const engine = createEngine({ workingDir: bridge.workingDir, sandbox: {}, provider: "t", model: "t" });
+		const engine = await createEngine({ workingDir: bridge.workingDir, sandbox: {}, provider: "t", model: "t" });
 		const transport = {
 			stopCommandHint: "stop",
 			postMessage: async () => "1",
