@@ -28,6 +28,9 @@ export interface OneShotEvent {
 	channelId: string;
 	text: string;
 	at: string; // ISO 8601 with timezone offset
+	/** Fire through the `task` machinery instead of a full channel turn (issue
+	 * #253) — gated on IRIS_TASKS_ENABLED at fire time, see execute() below. */
+	runAsTask?: boolean;
 }
 
 export interface PeriodicEvent {
@@ -36,6 +39,9 @@ export interface PeriodicEvent {
 	text: string;
 	schedule: string; // cron syntax
 	timezone: string; // IANA timezone
+	/** Fire through the `task` machinery instead of a full channel turn (issue
+	 * #253) — gated on IRIS_TASKS_ENABLED at fire time, see execute() below. */
+	runAsTask?: boolean;
 }
 
 export type IrisEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
@@ -241,7 +247,13 @@ export class EventsWatcher {
 				if (!data.at) {
 					throw new Error(`Missing 'at' field for one-shot event in ${filename}`);
 				}
-				return { type: "one-shot", channelId: data.channelId, text: data.text, at: data.at };
+				return {
+					type: "one-shot",
+					channelId: data.channelId,
+					text: data.text,
+					at: data.at,
+					runAsTask: data.runAsTask === true,
+				};
 
 			case "periodic":
 				if (!data.schedule) {
@@ -256,6 +268,7 @@ export class EventsWatcher {
 					text: data.text,
 					schedule: data.schedule,
 					timezone: data.timezone,
+					runAsTask: data.runAsTask === true,
 				};
 
 			default:
@@ -340,13 +353,16 @@ export class EventsWatcher {
 
 		const message = `[EVENT:${filename}:${event.type}:${scheduleInfo}] ${event.text}`;
 
-		// Create synthetic event (mention-shaped, routed by channel id)
+		// Create synthetic event (mention-shaped, routed by channel id). ImmediateEvent
+		// has no runAsTask field; one-shot/periodic carry it through when set — the
+		// engine (engine/index.ts) checks IRIS_TASKS_ENABLED before honoring it.
 		const syntheticEvent = {
 			type: "mention" as const,
 			channel: event.channelId,
 			user: "EVENT",
 			text: message,
 			ts: Date.now().toString(),
+			runAsTask: event.type !== "immediate" ? event.runAsTask : undefined,
 		};
 
 		// Enqueue for processing

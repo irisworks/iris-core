@@ -31,8 +31,9 @@ npm-debug.log*
 __pycache__/
 *.pyc
 
-# Claude Code local config
+# Coding agents local config
 .claude/settings.local.json
+.ai/
 
 # OS
 .DS_Store
@@ -49,3 +50,4 @@ data/**/log.jsonl.*
 # Agent runtime data
 agents/*/preview/
 agents/*/prod/
+

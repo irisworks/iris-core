@@ -5,9 +5,12 @@ import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createReadFullTool } from "./read-full.js";
 import { createReadTool } from "./read.js";
+import { createTaskTool, isTasksEnabled, type TaskRunnerOptions } from "./task.js";
 import { createWriteTool } from "./write.js";
 
 export { setUploadFunction } from "./attach.js";
+export { getTaskMaxMs, isTasksEnabled, runIsolatedTask } from "./task.js";
+export type { TaskRunnerOptions } from "./task.js";
 
 export interface IrisToolsOptions {
 	/** Whether the active model's provider accepts image input. When false, the
@@ -21,6 +24,11 @@ export interface IrisToolsOptions {
 	 * log (#131). Optional so tests and headless callers can omit it. */
 	channelId?: string;
 	channelDir?: string;
+	/** Wires up the `task` tool (issue #253) when IRIS_TASKS_ENABLED is "true".
+	 * Optional so tests and headless callers can omit it — with no `task`
+	 * option, or with the flag unset/false, the returned tool array is
+	 * byte-for-byte the same as before `task` existed. */
+	task?: Omit<TaskRunnerOptions, "tools">;
 }
 
 export function createIrisTools(executor: Executor, options: IrisToolsOptions): AgentTool<any>[] {
@@ -32,7 +40,7 @@ export function createIrisTools(executor: Executor, options: IrisToolsOptions): 
 					workspaceDir: options.workspaceDir,
 				}
 			: undefined;
-	return [
+	const baseTools: AgentTool<any>[] = [
 		createReadTool(executor, options),
 		createBashTool(executor, bashPolicy, options.channelDir),
 		createEditTool(executor),
@@ -40,4 +48,14 @@ export function createIrisTools(executor: Executor, options: IrisToolsOptions): 
 		attachTool,
 		createReadFullTool({ channelDir: options.channelDir }),
 	];
+
+	if (!options.task || !isTasksEnabled()) {
+		return baseTools;
+	}
+
+	// The inner task agent gets Iris's own tool array minus `task` itself —
+	// omitted structurally (baseTools has no `task` entry yet), not via a
+	// runtime recursion guard, so a task-spawning-a-task fork bomb can't happen.
+	const taskTool = createTaskTool({ ...options.task, tools: baseTools });
+	return [...baseTools, taskTool];
 }

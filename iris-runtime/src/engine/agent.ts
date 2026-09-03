@@ -8,6 +8,7 @@ import {
 	loadSkillsFromDir,
 	ModelRuntime,
 	type ModelRuntimeAuthOverrides,
+	parseFrontmatter,
 	type ResourceLoader,
 	SessionManager,
 	type Skill,
@@ -41,7 +42,8 @@ import {
 	type UserInfo,
 } from "../transport/types.js";
 import { resolveChannelPath, type ChannelStore } from "./store.js";
-import { createIrisTools, setUploadFunction } from "./tools/index.js";
+import { createIrisTools, getTaskMaxMs, setUploadFunction } from "./tools/index.js";
+import { runIsolatedTask, type TaskRunnerOptions } from "./tools/task.js";
 
 // Model is now configurable via getOrCreateRunner() — no longer hardcoded here.
 
@@ -64,6 +66,15 @@ export interface AgentRunner {
 	compact(): Promise<{ tokensBefore: number } | null>;
 	/** Wipe all message history so the next prompt starts with a blank slate */
 	reset(): void;
+	/**
+	 * Run one isolated, fresh-context task to completion (issue #253) using
+	 * this channel's own executor/model/tools, and return only the inner
+	 * agent's final text — never touches this channel's own session/context
+	 * file. Available regardless of IRIS_TASKS_ENABLED; callers (the `task`
+	 * tool itself, and scheduled `runAsTask` events) are responsible for
+	 * checking the flag before calling this.
+	 */
+	runTask(prompt: string, label?: string): Promise<string>;
 }
 
 // Shared model/auth runtime (pi-coding-agent >= 0.84), one per workspace
@@ -164,8 +175,33 @@ function getMemory(channelDir: string, workingDir: string): string {
 	return parts.join("\n\n");
 }
 
-function loadIrisSkills(channelDir: string, workspacePath: string, workingDir: string): Skill[] {
-	const skillMap = new Map<string, Skill>();
+/** A Skill (from pi-coding-agent's loader, which only parses name/description/
+ * disable-model-invocation through) plus the `run-as-task` frontmatter flag
+ * that loader drops — read separately below so Iris's own system prompt can
+ * annotate task-marked skills (issue #253 part 2). */
+export type IrisSkill = Skill & { runAsTask?: boolean };
+
+/**
+ * pi-coding-agent's loadSkillFromFile only carries name/description/
+ * disable-model-invocation out of a SKILL.md's frontmatter into the Skill
+ * object it returns — any other frontmatter field (like `run-as-task`) is
+ * parsed by parseFrontmatter internally but never surfaces. Read it back out
+ * ourselves rather than patching the vendored package. Must run against the
+ * skill's real on-disk (host) path — call this BEFORE loadIrisSkills below
+ * translates filePath to a container path for the system prompt.
+ */
+function readSkillRunAsTaskFlag(hostFilePath: string): boolean {
+	try {
+		const raw = readFileSync(hostFilePath, "utf-8");
+		const { frontmatter } = parseFrontmatter<{ "run-as-task"?: boolean }>(raw);
+		return frontmatter["run-as-task"] === true;
+	} catch {
+		return false;
+	}
+}
+
+function loadIrisSkills(channelDir: string, workspacePath: string, workingDir: string): IrisSkill[] {
+	const skillMap = new Map<string, IrisSkill>();
 
 	// channelDir is the host path (e.g., /Users/.../data/telegram/tg-XXX)
 	// hostWorkspacePath is the workspace root on host
@@ -183,21 +219,39 @@ function loadIrisSkills(channelDir: string, workspacePath: string, workingDir: s
 	// Load workspace-level skills (global)
 	const workspaceSkillsDir = join(hostWorkspacePath, "skills");
 	for (const skill of loadSkillsFromDir({ dir: workspaceSkillsDir, source: "workspace" }).skills) {
+		const irisSkill: IrisSkill = skill;
+		irisSkill.runAsTask = readSkillRunAsTaskFlag(skill.filePath);
 		// Translate paths to container paths for system prompt
 		skill.filePath = translatePath(skill.filePath);
 		skill.baseDir = translatePath(skill.baseDir);
-		skillMap.set(skill.name, skill);
+		skillMap.set(skill.name, irisSkill);
 	}
 
 	// Load channel-specific skills (override workspace skills on collision)
 	const channelSkillsDir = join(channelDir, "skills");
 	for (const skill of loadSkillsFromDir({ dir: channelSkillsDir, source: "channel" }).skills) {
+		const irisSkill: IrisSkill = skill;
+		irisSkill.runAsTask = readSkillRunAsTaskFlag(skill.filePath);
 		skill.filePath = translatePath(skill.filePath);
 		skill.baseDir = translatePath(skill.baseDir);
-		skillMap.set(skill.name, skill);
+		skillMap.set(skill.name, irisSkill);
 	}
 
 	return Array.from(skillMap.values());
+}
+
+/**
+ * formatSkillsForPrompt (pi-coding-agent) renders name/description/location
+ * only. Skills marked `run-as-task: true` (read separately above, since the
+ * vendored loader drops that field) get " — runs as a task" appended to their
+ * description before formatting — the doubly-cued advisory annotation the
+ * task-primitive design relies on (docs/plans/2026-08-05-task-primitive-design.md).
+ */
+function formatSkillsForIrisPrompt(skills: IrisSkill[]): string {
+	const annotated = skills.map((skill) =>
+		skill.runAsTask ? { ...skill, description: `${skill.description} — runs as a task` } : skill,
+	);
+	return formatSkillsForPrompt(annotated);
 }
 
 export function buildSystemPrompt(
@@ -207,7 +261,7 @@ export function buildSystemPrompt(
 	sandboxConfig: SandboxConfig,
 	channels: ChannelInfo[],
 	users: UserInfo[],
-	skills: Skill[],
+	skills: IrisSkill[],
 	agents: AgentRegistry = {},
 	profile: TransportPromptProfile,
 ): string {
@@ -273,7 +327,7 @@ Scripts are in: {baseDir}/
 \`name\` and \`description\` are required. Use \`{baseDir}\` as placeholder for the skill's directory path.
 
 ### Available Skills
-${skills.length > 0 ? formatSkillsForPrompt(skills) : "(no skills installed yet)"}
+${skills.length > 0 ? formatSkillsForIrisPrompt(skills) : "(no skills installed yet)"}
 
 ## Sub-Agents
 ${Object.keys(agents).length > 0
@@ -698,28 +752,88 @@ function createRunner(
 		);
 	})();
 
-	// Create tools — read needs to know up front whether the active model accepts
-	// image input, so it can tell the model an image was skipped instead of
-	// claiming success while pi-ai silently strips the image content downstream.
-	// channelId/channelDir enable the bash policy layer + command audit log (#131).
-	const supportsImageInput = model.input.includes("image");
-	const tools = createIrisTools(executor, {
-		supportsImageInput,
-		workspaceDir: workingDir,
-		channelId,
-		channelDir,
-	});
-
 	// getApiKey: delegates to the shared ModelRuntime's auth resolution — the same
 	// wrapped getAuth() (see applySecretStoreApiKeyFallback, applied once when the
 	// runtime was created) that pi-coding-agent's internal compaction/branch-summary
 	// calls use directly. Delegating here instead of duplicating the secret-store
 	// lookup keeps this a single source of truth and avoids an extra broker round
-	// trip on every turn when the runtime already resolved a real key.
+	// trip on every turn when the runtime already resolved a real key. This same
+	// closure is captured below by the `task` tool's inner Agent (issue #253) —
+	// the ModelRuntime handed to createRunner is already wrapped by
+	// applySecretStoreApiKeyFallback in getModelRuntime(), so no separate
+	// wrapping is needed here.
 	const getApiKey = async (): Promise<string | undefined> => {
 		const auth = await modelRuntime.getAuth(provider);
 		return auth?.auth.apiKey;
 	};
+
+	// The `task` tool's inner agent (issue #253) is seeded with the inherited
+	// constitution and the skills index only — no MEMORY.md, no channel/user
+	// lists. Recomputed on every call (cheap file reads) so a task always sees
+	// the current constitution/skills, same as a normal turn does below.
+	const buildTaskSystemPrompt = (): string => {
+		const taskConstitution = loadConstitution(workspaceDir);
+		const taskSkills = loadIrisSkills(channelDir, workspacePath, workingDir);
+		const constitutionSection = taskConstitution ? `\n\n${taskConstitution}` : "";
+		return `You are Iris, running as an isolated, fresh-context task. Carry out the instructions in the user's message and reply with a concise final summary — everything else in this run (tool calls, intermediate reasoning) is discarded and only that final summary is ever seen.${constitutionSection}
+
+## Skills (Custom CLI Tools)
+${taskSkills.length > 0 ? formatSkillsForIrisPrompt(taskSkills) : "(no skills installed yet)"}
+
+## Tools
+Each built-in tool requires a "label" parameter (shown to user).
+`;
+	};
+
+	// Settings manager, created early (only needs workingDir) so its
+	// provider-retry/timeout config is available to the shared streamFn below,
+	// which both the outer Agent and the `task` tool's inner Agent use.
+	const settingsManager = createIrisSettingsManager(workingDir);
+
+	// Mandatory as of pi-agent-core 0.84. Wired through the shared ModelRuntime
+	// (auth.json + models.json resolution happens there) with the same
+	// settings-driven retry/timeout plumbing upstream's SDK uses: provider-level
+	// retries absorb transient blips (429s, mid-stream resets) inside a single
+	// LLM call; the whole-turn retry loop in run() stays the backstop for
+	// failures that escape it. Shared verbatim with the task tool's inner
+	// Agent (issue #253) so a task's LLM calls get the same retry/timeout
+	// behavior as a normal turn.
+	const runnerStreamFn: NonNullable<ConstructorParameters<typeof Agent>[0]["streamFn"]> = async (streamModel, streamContext, streamOptions) => {
+		const providerRetry = settingsManager.getProviderRetrySettings();
+		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
+		// httpIdleTimeoutMs: 0 is the documented "disabled" setting, but SDKs treat
+		// timeout=0 as an immediate timeout, not "no timeout" — match pi-coding-agent's
+		// own reference streamFn and substitute max int32 so "disabled" actually means
+		// disabled instead of failing every stream call immediately.
+		const effectiveIdleTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
+		return modelRuntime.streamSimple(streamModel, streamContext, {
+			...streamOptions,
+			timeoutMs: streamOptions?.timeoutMs ?? providerRetry.timeoutMs ?? effectiveIdleTimeoutMs,
+			websocketConnectTimeoutMs: streamOptions?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
+			maxRetries: streamOptions?.maxRetries ?? providerRetry.maxRetries,
+			maxRetryDelayMs: providerRetry.maxRetryDelayMs,
+		});
+	};
+
+	// Create tools — read needs to know up front whether the active model accepts
+	// image input, so it can tell the model an image was skipped instead of
+	// claiming success while pi-ai silently strips the image content downstream.
+	// channelId/channelDir enable the bash policy layer + command audit log (#131).
+	const supportsImageInput = model.input.includes("image");
+	const taskOptions: Omit<TaskRunnerOptions, "tools"> = {
+		model,
+		getApiKey,
+		convertToLlm,
+		buildSystemPrompt: buildTaskSystemPrompt,
+		streamFn: runnerStreamFn,
+	};
+	const tools = createIrisTools(executor, {
+		supportsImageInput,
+		workspaceDir: workingDir,
+		channelId,
+		channelDir,
+		task: taskOptions,
+	});
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills
 	// and the real transport profile — this placeholder is never sent to the LLM)
@@ -738,11 +852,10 @@ function createRunner(
 	const agents = loadAgentRegistry(workspaceDir);
 	const systemPrompt = buildSystemPrompt(workspacePath, channelId, constitution, sandboxConfig, [], [], skills, agents, placeholderProfile);
 
-	// Create session manager and settings manager
+	// Create session manager
 	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
 	const contextFile = join(channelDir, "context.jsonl");
 	const sessionManager = SessionManager.open(contextFile, channelDir);
-	const settingsManager = createIrisSettingsManager(workingDir);
 
 	// Create agent
 	const agent = new Agent({
@@ -754,28 +867,7 @@ function createRunner(
 		},
 		convertToLlm,
 		getApiKey,
-		// Mandatory as of pi-agent-core 0.84. Wired through the shared ModelRuntime
-		// (auth.json + models.json resolution happens there) with the same
-		// settings-driven retry/timeout plumbing upstream's SDK uses: provider-level
-		// retries absorb transient blips (429s, mid-stream resets) inside a single
-		// LLM call; the whole-turn retry loop in run() stays the backstop for
-		// failures that escape it.
-		streamFn: async (streamModel, streamContext, streamOptions) => {
-			const providerRetry = settingsManager.getProviderRetrySettings();
-			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
-			// httpIdleTimeoutMs: 0 is the documented "disabled" setting, but SDKs treat
-			// timeout=0 as an immediate timeout, not "no timeout" — match pi-coding-agent's
-			// own reference streamFn and substitute max int32 so "disabled" actually means
-			// disabled instead of failing every stream call immediately.
-			const effectiveIdleTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
-			return modelRuntime.streamSimple(streamModel, streamContext, {
-				...streamOptions,
-				timeoutMs: streamOptions?.timeoutMs ?? providerRetry.timeoutMs ?? effectiveIdleTimeoutMs,
-				websocketConnectTimeoutMs: streamOptions?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
-				maxRetries: streamOptions?.maxRetries ?? providerRetry.maxRetries,
-				maxRetryDelayMs: providerRetry.maxRetryDelayMs,
-			});
-		},
+		streamFn: runnerStreamFn,
 		// Forwarded to providers that key caching/routing off it (openai-responses'
 		// prompt_cache_key, mistral's x-affinity). Anthropic/Bedrock ignore it — they
 		// cache off cache_control breakpoints instead. Channel id is a stable,
@@ -1650,6 +1742,14 @@ function createRunner(
 			} catch (err) {
 				log.logWarning(`[${channelId}] Failed to clear context file`, err instanceof Error ? err.message : String(err));
 			}
+		},
+
+		async runTask(prompt: string, label = "task"): Promise<string> {
+			// Same tool array the outer agent runs with, minus `task` itself
+			// (structurally omitted, matching createIrisTools) — never handed to
+			// this runner's own inner agent, so a task can't spawn a task.
+			const innerTools = tools.filter((t) => t.name !== "task");
+			return runIsolatedTask({ ...taskOptions, maxMs: getTaskMaxMs(), tools: innerTools }, prompt, label);
 		},
 	};
 }

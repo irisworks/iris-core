@@ -188,13 +188,19 @@ leave Iris hanging on nothing.
 
 ## One number to confirm before implementation
 
-Whether `formatSkillsForPrompt` (from `@mariozechner/pi-coding-agent`, used at
-`agent.ts:254`) renders a name+description index or full `SKILL.md` bodies
-into the system prompt. Index-only was assumed throughout this design
-(consistent with the measured ~3-4k token fixed prompt size); if it turns out
-to inject full bodies (54KB / ~13.5k tokens across today's 17 skills), that is
-the single largest item on this list and worth fixing independently of
-`task`.
+**Confirmed (2026-09-01):** `formatSkillsForPrompt`
+(`@earendil-works/pi-coding-agent`, `dist/core/skills.js:257`, used at
+`agent.ts:254`) renders an index only — one `<skill>` entry per visible skill
+with `name`/`description`/`location`, plus a fixed instruction block telling
+the model to `read` a skill's file when its description matches the task.
+Full `SKILL.md` bodies are never injected into the system prompt. This
+matches the index-only assumption made throughout this design (and the
+measured ~3-4k token fixed prompt size); no independent fix is needed before
+`task` proceeds.
+
+(Note: the package now resolves as `@earendil-works/pi-coding-agent` in
+`iris-runtime/node_modules`, not `@mariozechner/pi-coding-agent` as originally
+written above — same code, renamed scope.)
 
 ## Explicitly out of scope
 

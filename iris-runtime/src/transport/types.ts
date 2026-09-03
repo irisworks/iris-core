@@ -35,6 +35,14 @@ export interface TransportEvent {
 	text: string;
 	/** Processed attachments with local paths (populated after the transport logs the user message) */
 	attachments?: Array<{ local: string }>;
+	/**
+	 * Set by EventsWatcher (engine/events.ts) for a scheduled one-shot/periodic
+	 * event created with `runAsTask: true` (issue #253). When true AND
+	 * IRIS_TASKS_ENABLED, the engine runs `text` through the `task` machinery
+	 * and posts only the final result into the channel, instead of a full
+	 * turn that would grow the channel's own session history on every firing.
+	 */
+	runAsTask?: boolean;
 }
 
 /**
