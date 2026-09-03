@@ -785,6 +785,36 @@ Each built-in tool requires a "label" parameter (shown to user).
 `;
 	};
 
+	// Settings manager, created early (only needs workingDir) so its
+	// provider-retry/timeout config is available to the shared streamFn below,
+	// which both the outer Agent and the `task` tool's inner Agent use.
+	const settingsManager = createIrisSettingsManager(workingDir);
+
+	// Mandatory as of pi-agent-core 0.84. Wired through the shared ModelRuntime
+	// (auth.json + models.json resolution happens there) with the same
+	// settings-driven retry/timeout plumbing upstream's SDK uses: provider-level
+	// retries absorb transient blips (429s, mid-stream resets) inside a single
+	// LLM call; the whole-turn retry loop in run() stays the backstop for
+	// failures that escape it. Shared verbatim with the task tool's inner
+	// Agent (issue #253) so a task's LLM calls get the same retry/timeout
+	// behavior as a normal turn.
+	const runnerStreamFn: NonNullable<ConstructorParameters<typeof Agent>[0]["streamFn"]> = async (streamModel, streamContext, streamOptions) => {
+		const providerRetry = settingsManager.getProviderRetrySettings();
+		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
+		// httpIdleTimeoutMs: 0 is the documented "disabled" setting, but SDKs treat
+		// timeout=0 as an immediate timeout, not "no timeout" — match pi-coding-agent's
+		// own reference streamFn and substitute max int32 so "disabled" actually means
+		// disabled instead of failing every stream call immediately.
+		const effectiveIdleTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
+		return modelRuntime.streamSimple(streamModel, streamContext, {
+			...streamOptions,
+			timeoutMs: streamOptions?.timeoutMs ?? providerRetry.timeoutMs ?? effectiveIdleTimeoutMs,
+			websocketConnectTimeoutMs: streamOptions?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
+			maxRetries: streamOptions?.maxRetries ?? providerRetry.maxRetries,
+			maxRetryDelayMs: providerRetry.maxRetryDelayMs,
+		});
+	};
+
 	// Create tools — read needs to know up front whether the active model accepts
 	// image input, so it can tell the model an image was skipped instead of
 	// claiming success while pi-ai silently strips the image content downstream.
@@ -795,6 +825,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 		getApiKey,
 		convertToLlm,
 		buildSystemPrompt: buildTaskSystemPrompt,
+		streamFn: runnerStreamFn,
 	};
 	const tools = createIrisTools(executor, {
 		supportsImageInput,
@@ -821,11 +852,10 @@ Each built-in tool requires a "label" parameter (shown to user).
 	const agents = loadAgentRegistry(workspaceDir);
 	const systemPrompt = buildSystemPrompt(workspacePath, channelId, constitution, sandboxConfig, [], [], skills, agents, placeholderProfile);
 
-	// Create session manager and settings manager
+	// Create session manager
 	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
 	const contextFile = join(channelDir, "context.jsonl");
 	const sessionManager = SessionManager.open(contextFile, channelDir);
-	const settingsManager = createIrisSettingsManager(workingDir);
 
 	// Create agent
 	const agent = new Agent({
@@ -837,28 +867,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 		},
 		convertToLlm,
 		getApiKey,
-		// Mandatory as of pi-agent-core 0.84. Wired through the shared ModelRuntime
-		// (auth.json + models.json resolution happens there) with the same
-		// settings-driven retry/timeout plumbing upstream's SDK uses: provider-level
-		// retries absorb transient blips (429s, mid-stream resets) inside a single
-		// LLM call; the whole-turn retry loop in run() stays the backstop for
-		// failures that escape it.
-		streamFn: async (streamModel, streamContext, streamOptions) => {
-			const providerRetry = settingsManager.getProviderRetrySettings();
-			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
-			// httpIdleTimeoutMs: 0 is the documented "disabled" setting, but SDKs treat
-			// timeout=0 as an immediate timeout, not "no timeout" — match pi-coding-agent's
-			// own reference streamFn and substitute max int32 so "disabled" actually means
-			// disabled instead of failing every stream call immediately.
-			const effectiveIdleTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
-			return modelRuntime.streamSimple(streamModel, streamContext, {
-				...streamOptions,
-				timeoutMs: streamOptions?.timeoutMs ?? providerRetry.timeoutMs ?? effectiveIdleTimeoutMs,
-				websocketConnectTimeoutMs: streamOptions?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
-				maxRetries: streamOptions?.maxRetries ?? providerRetry.maxRetries,
-				maxRetryDelayMs: providerRetry.maxRetryDelayMs,
-			});
-		},
+		streamFn: runnerStreamFn,
 		// Forwarded to providers that key caching/routing off it (openai-responses'
 		// prompt_cache_key, mistral's x-affinity). Anthropic/Bedrock ignore it — they
 		// cache off cache_control breakpoints instead. Channel id is a stable,

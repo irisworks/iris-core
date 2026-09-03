@@ -37,7 +37,7 @@ test("createIrisTools: task tool absent when IRIS_TASKS_ENABLED is unset", () =>
 	const tools = createIrisTools(fakeExecutor(), { supportsImageInput: false, workspaceDir: "/tmp" });
 	assert.deepEqual(
 		tools.map((t) => t.name),
-		["read", "bash", "edit", "write", "attach"],
+		["read", "bash", "edit", "write", "attach", "read_full"],
 	);
 });
 
@@ -51,7 +51,7 @@ test("createIrisTools: task tool absent when IRIS_TASKS_ENABLED is unset even if
 	assert.ok(!tools.some((t) => t.name === "task"));
 	assert.deepEqual(
 		tools.map((t) => t.name),
-		["read", "bash", "edit", "write", "attach"],
+		["read", "bash", "edit", "write", "attach", "read_full"],
 	);
 });
 
@@ -79,7 +79,7 @@ test("createIrisTools: task tool present when IRIS_TASKS_ENABLED=true and task o
 		});
 		assert.deepEqual(
 			tools.map((t) => t.name),
-			["read", "bash", "edit", "write", "attach", "task"],
+			["read", "bash", "edit", "write", "attach", "read_full", "task"],
 		);
 	} finally {
 		delete process.env.IRIS_TASKS_ENABLED;
@@ -92,7 +92,7 @@ test("createIrisTools: task tool absent (and other tools unchanged) with no task
 		const tools = createIrisTools(fakeExecutor(), { supportsImageInput: false, workspaceDir: "/tmp" });
 		assert.deepEqual(
 			tools.map((t) => t.name),
-			["read", "bash", "edit", "write", "attach"],
+			["read", "bash", "edit", "write", "attach", "read_full"],
 		);
 	} finally {
 		delete process.env.IRIS_TASKS_ENABLED;

@@ -26,10 +26,11 @@ export interface TaskRunnerOptions {
 	buildSystemPrompt: () => string;
 	/** Hard ceiling on the inner run, ms. Defaults to IRIS_TASK_MAX_MS (300000). */
 	maxMs?: number;
-	/** Test seam only — overrides the inner Agent's LLM call. Production
-	 * callers (agent.ts) never set this; unit tests use it to drive the inner
-	 * agent deterministically without a real model/network call. */
-	streamFn?: StreamFn;
+	/** Mandatory as of pi-agent-core 0.84 (Agent no longer defaults this itself).
+	 * Production callers (agent.ts) pass the same ModelRuntime-backed streamFn
+	 * their own outer Agent uses; unit tests pass a scripted/fake one to drive
+	 * the inner agent deterministically without a real model/network call. */
+	streamFn: StreamFn;
 }
 
 export function isTasksEnabled(): boolean {
