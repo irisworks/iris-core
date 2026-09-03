@@ -5,6 +5,7 @@ import type { Executor } from "../sandbox.js";
 import { resizeImageIfNeededAsync } from "../image-resize.js";
 import { detectImageMimeType, detectMimeType, MIME_SNIFF_BYTES } from "../mime.js";
 import { loadReadHandlerRegistry, renderHandlerCommand } from "../read-handlers.js";
+import { persistFullOutput } from "./full-output-store.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateForToolOutput, type TruncationResult } from "./truncate.js";
 
 /**
@@ -55,6 +56,9 @@ export interface ReadToolOptions {
 	supportsImageInput: boolean;
 	/** Host workspace root — read-handlers are discovered from `<workspaceDir>/read-handlers/`. */
 	workspaceDir: string;
+	/** Channel dir to persist full output under when a JSON structural summary
+	 * discards raw content that offset/limit paging can't get back (#159). */
+	channelDir?: string;
 }
 
 export function createReadTool(executor: Executor, options: ReadToolOptions): AgentTool<typeof readSchema> {
@@ -223,10 +227,11 @@ export function createReadTool(executor: Executor, options: ReadToolOptions): Ag
 				outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
 				details = { truncation };
 			} else if (truncation.truncatedBy === "structure") {
-				outputText = `${truncation.content}\n\n[File is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw content. Use bash/jq to query specific values.]`;
+				const fullOutputId = persistFullOutput(options.channelDir, selectedContent);
+				outputText = `${truncation.content}\n\n[File is JSON (${formatSize(truncation.totalBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit): showing structural summary (keys/shape and sample values) instead of raw content. Full output saved, use read_full("${fullOutputId}") to see the rest, or bash/jq to query specific values.]`;
 				const summarizedEnd = startLineDisplay + truncation.totalLines - 1;
 				if (summarizedEnd < totalFileLines) {
-					outputText += ` Use offset=${summarizedEnd + 1} to continue past the summarized section.`;
+					outputText += ` Use read's offset=${summarizedEnd + 1} (line number, not read_full's byte offset) to continue past the summarized section.`;
 				}
 				details = { truncation };
 			} else if (truncation.truncated) {

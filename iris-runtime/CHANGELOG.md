@@ -4,6 +4,11 @@
 
 ### Added
 
+- `read_full(id)` tool: when a tool output is truncated (bash, or a `read`
+  hitting the JSON structural-summary path), the full content is saved under
+  the channel dir and the truncation notice includes an id to retrieve it
+  with, instead of discarding it outright. `IRIS_FULL_OUTPUT_RETENTION_MS`
+  (default 24h) controls how long saved output is kept. Fixes #159.
 - `agents/lib/register-bridge.sh collect-secrets <skill-dir>...` and
   `check-secrets <secrets_csv>`: deterministically union a skill's declared
   `secrets:` frontmatter across every skill attached to a new sub-agent, and
