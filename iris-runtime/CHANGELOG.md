@@ -9,6 +9,17 @@
   the channel dir and the truncation notice includes an id to retrieve it
   with, instead of discarding it outright. `IRIS_FULL_OUTPUT_RETENTION_MS`
   (default 24h) controls how long saved output is kept. Fixes #159.
+- `agents/lib/register-bridge.sh collect-secrets <skill-dir>...` and
+  `check-secrets <secrets_csv>`: deterministically union a skill's declared
+  `secrets:` frontmatter across every skill attached to a new sub-agent, and
+  proactively warn (without blocking spawn) about any that don't resolve yet.
+  `spawn-agent` now calls these — in both the default service-mode flow and
+  the `--mode=docker` Terraform flow, which also appends the agent's own LLM
+  key when the module's `secrets_mode` is `store`/`proxy` — instead of
+  reading `SKILL.md` frontmatter by hand. Closes #125.
+- `scripts/cut-release.sh`: signs and pushes the release tag and publishes
+  the GitHub Release from `iris-runtime/package.json` + the CHANGELOG entry,
+  replacing the manual multi-command sequence in `docs/RELEASING.md`.
 
 ## [1.10.1] - 2026-09-01
 

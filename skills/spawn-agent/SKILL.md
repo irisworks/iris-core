@@ -93,23 +93,38 @@ getting.** If `--with-skill=<name>` scaffolded a skill (or a starter skill was
 copied by hand) whose `SKILL.md` frontmatter declares a `secrets:` list — e.g.
 `search-web`'s `secrets: [PERPLEXITY-API-KEY]` — that secret must reach this
 agent or the skill fails at the exact moment it's invoked, not at spawn time.
-Don't guess or skip this: read every attached skill's frontmatter and collect
-its `secrets:` entries. For each one, in an env-mode install, resolve it from
+Collect this deterministically, don't read frontmatter by hand:
+```bash
+SECRETS_CSV=$(agents/lib/register-bridge.sh collect-secrets agents/<name>/skills/*)
+```
+This unions every `secrets:` entry across all skills scaffolded into
+`agents/<name>/skills/` and prints them as a comma-separated list (empty if
+none declare any). Then check each one actually resolves *now*, before the
+agent goes live with a skill it can't use yet:
+```bash
+agents/lib/register-bridge.sh check-secrets "$SECRETS_CSV"
+```
+This warns (doesn't block) about any name that doesn't resolve via
+`get-secret` in the current install — surface those warnings to the user so
+they know to configure it, but keep going; a missing secret means that one
+skill fails when invoked, not that the whole agent is broken.
+
+For each collected secret, in an env-mode install, resolve it from
 `/iris/.env` and add it to `agents/<name>/bootstrap.sh` as its own literal
 `Environment=` line — the same pattern the template already uses for the LLM
 key, never `EnvironmentFile=/iris/.env` (see the template's own warning for
 why). In a store/proxy-mode install, skip the literal env var and instead pass
-it through the `secrets` allow-list in the next step — the agent resolves it
-itself via `get-secret`/the internal broker route, credential-store agnostic
-either way.
+`$SECRETS_CSV` through to `register-bridge.sh register` in the next step — the
+agent resolves it itself via `get-secret`/the internal broker route,
+credential-store agnostic either way.
 
 ### Step 4 — Patch it into the bridge (always, unconditional)
 
 ```bash
-agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>" "" "<SECRET-A,SECRET-B>"
+agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>" "" "$SECRETS_CSV"
 ```
-The 5th argument is the comma-separated `secrets` allow-list from the step
-above (omit or leave empty if no attached skill declares any) — it's what lets
+The 5th argument is `$SECRETS_CSV` from the step above (empty string if no
+attached skill declares any) — it's what lets
 this agent's own `get-secret` calls resolve them at all; without it, `GET
 /secrets/:name` 403s regardless of which backend (store, proxy, external
 broker, Key Vault) the install uses. This writes/merges the entry into
@@ -176,11 +191,42 @@ The image build (`npm run build && docker build`) now runs at most once
 across all docker-mode agents — see `terraform/main.tf`'s
 `null_resource.iris_runtime_image` — instead of once per agent.
 
+**Deciding secrets works the same way as the default flow, but what to do
+with the result depends on the module's `secrets_mode` variable.** Collect
+the CSV the same way:
+```bash
+SECRETS_CSV=$(agents/lib/register-bridge.sh collect-secrets agents/<name>/skills/*)
+agents/lib/register-bridge.sh check-secrets "$SECRETS_CSV"
+```
+- `secrets_mode = "env"` (the module's default): the container gets the whole
+  `/iris/.env` via `--env-file`, so every skill secret is already present —
+  `$SECRETS_CSV` still gets passed to `register` in Step 4 below (for
+  `agents.json` bookkeeping) but nothing else needs to change.
+- `secrets_mode = "store"` or `"proxy"`: the container gets **no** env file at
+  all — it resolves everything through the parent API's `secrets` allow-list
+  instead (`docs/sub-agents.md`). That allow-list must include **every**
+  secret the agent needs, not just skill secrets — append the agent's own LLM
+  key (e.g. `ANTHROPIC-API-KEY`) to `$SECRETS_CSV` before Step 4 without
+  introducing an empty CSV entry:
+  ```bash
+  if [[ -n "$SECRETS_CSV" ]]; then
+    SECRETS_CSV+=","
+  fi
+  SECRETS_CSV+="ANTHROPIC-API-KEY"
+  ```
+  Also set
+  `unique_api_token = true` on the module block (a Terraform precondition
+  enforces this pairing).
+
 ### Step 4 (docker) — Patch it into the bridge
 
-Same `agents/lib/register-bridge.sh register` call as the default flow
-(mode-agnostic). Pass the module's `api_token` output as the 4th arg if
-`unique_api_token = true` was set.
+```bash
+agents/lib/register-bridge.sh register "<name>" "http://127.0.0.1:${PORT}" "<one-line-purpose>" "<api_token output>" "$SECRETS_CSV"
+```
+Same call as the default flow (mode-agnostic) — pass the module's `api_token`
+output as the 4th arg if `unique_api_token = true` was set, and `$SECRETS_CSV`
+from Step 3 above (with the LLM key appended, for store/proxy mode) as the
+5th.
 
 ### Step 5 (docker) — Verify
 
