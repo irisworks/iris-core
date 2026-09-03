@@ -37,6 +37,8 @@ env vars.
 | `IRIS_BASH_POLICY` | on | Set `off` to disable the bash policy layer's refusals and confirmation gates (the command audit log stays on) — see [Bash Policy Layer](bash-policy.md) |
 | `IRIS_BASH_AUDIT_FILE` | `<workspace>/meta/bash-audit.log` | Location of the append-only bash command audit log — see [Bash Policy Layer](bash-policy.md) |
 | `IRIS_FULL_OUTPUT_RETENTION_MS` | `86400000` (24h) | Age at which full, untruncated tool output saved for `read_full(id)` becomes eligible for cleanup from `<channel dir>/tool-output/` — swept opportunistically the next time that channel saves new output, not on a fixed timer |
+| `IRIS_TASKS_ENABLED` | — (off) | Set `true` to wire up the `task` tool — an isolated, fresh-context sub-agent Iris can run noisy multi-step investigation through, discarding every intermediate tool call/reasoning turn and returning only the final text. Also gates `--as-task` scheduled events (the `schedule` skill) |
+| `IRIS_TASK_MAX_MS` | `300000` (5m) | Hard ceiling on one `task` tool run; the inner agent is aborted past this |
 | `IRIS_GITHUB_ORG` / `IRIS_GITHUB_REPO` | — | The repo Iris commits her own skills, sub-agents, and self-edits to (the `github` skill's push target — see [Extending Iris](overlay.md)). Use your own private overlay repo, or a private mirror of `iris-core` — never the upstream you cloned from, and never a public fork, since Iris's memory lands here. Prompted by bootstrap alongside the GitHub token; also injected into the constitution as Iris's identity source |
 | `IRIS_KEY_VAULT` | — | Azure Key Vault name (Key Vault profile only) |
 | `IRIS_SECRETS_MODE` | `store` | `store` (default) \| `proxy` \| `env` (legacy opt-out) — credential backend, see [Secrets](secrets.md) |

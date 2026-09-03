@@ -4,6 +4,15 @@
 
 ### Added
 
+- `task` tool, gated on `IRIS_TASKS_ENABLED`: runs an isolated, fresh-context
+  sub-agent to completion (same model/executor/tools as the caller, minus
+  `task` itself) and returns only its final text — every intermediate tool
+  call and reasoning turn stays out of the calling channel's context.
+  `IRIS_TASK_MAX_MS` (default 5m) bounds one run. `schedule every`/`schedule
+  once --as-task` fires a scheduled event through this machinery instead of a
+  full channel turn, so a recurring job no longer grows the channel's session
+  history on every firing; without the flag it falls back to today's
+  full-turn behavior. Closes #253.
 - `read_full(id)` tool: when a tool output is truncated (bash, or a `read`
   hitting the JSON structural-summary path), the full content is saved under
   the channel dir and the truncation notice includes an id to retrieve it
