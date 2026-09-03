@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Security
+
+- Pinned the transitive `fast-uri` dep (pulled in via `ajv`) to `^3.1.6` via
+  `overrides`, fixing four high-severity host-confusion/SSRF advisories
+  (GHSA-5jgf-p345-68v8, GHSA-f65p-4m7j-42xc, GHSA-fph4-wmhf-6fwf,
+  GHSA-jqff-g426-hqxp) present in 3.0.0-3.1.5.
+
 ### Added
 
 - `read_full(id)` tool: when a tool output is truncated (bash, or a `read`
