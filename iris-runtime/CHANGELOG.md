@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-09-03
+
 ### Added
 
 - `read_full(id)` tool: when a tool output is truncated (bash, or a `read`
@@ -55,6 +57,11 @@
   - Model resolution is registry-only now: an unknown `provider/model`
     combination errors with a pointer to `models.json` instead of falling
     back to pi-ai's deprecated built-in catalog lookup.
+
+### Security
+
+- Bumped `fast-uri` (transitive, via `ajv`) 3.1.5 -> 3.1.7, resolving
+  host-confusion/SSRF advisories fixed upstream in 3.1.6.
 
 ## [1.10.1] - 2026-09-01
 
