@@ -8,7 +8,8 @@
   sub-agent to completion (same model/executor/tools as the caller, minus
   `task` itself) and returns only its final text — every intermediate tool
   call and reasoning turn stays out of the calling channel's context.
-  `IRIS_TASK_MAX_MS` (default 5m) bounds one run. `schedule every`/`schedule
+  `IRIS_TASK_MAX_MS` (default 5m) bounds one run, `IRIS_TASK_MAX_CONCURRENT`
+  (default 3) caps how many run at once process-wide. `schedule every`/`schedule
   once --as-task` fires a scheduled event through this machinery instead of a
   full channel turn, so a recurring job no longer grows the channel's session
   history on every firing; without the flag it falls back to today's

@@ -329,3 +329,59 @@ test("createIrisTools: the task tool sees currently-connected MCP tools, not a p
 		delete process.env.IRIS_TASKS_ENABLED;
 	}
 });
+
+test("runIsolatedTask: a call past IRIS_TASK_MAX_CONCURRENT fails immediately instead of queuing or running unbounded", async () => {
+	// Before this, nothing capped how many `task` calls could be in flight at
+	// once — a single turn firing off several investigative tasks (pi-agent-core
+	// can execute a turn's tool calls in parallel) had no circuit breaker, each
+	// one a full second Agent with its own LLM calls and up-to-5-minute ceiling.
+	const originalMax = process.env.IRIS_TASK_MAX_CONCURRENT;
+	process.env.IRIS_TASK_MAX_CONCURRENT = "1";
+	try {
+		let releaseTaskA;
+		const gate = new Promise((resolve) => {
+			releaseTaskA = resolve;
+		});
+		const gatedStreamFn = async (...args) => {
+			await gate;
+			return scriptedStreamFn([finalTextTurn("A done")])(...args);
+		};
+
+		const taskA = runIsolatedTask(fakeTaskOptions({ getTools: () => [], streamFn: gatedStreamFn }), "do a", "task a");
+
+		// Give task A a moment to actually start (and increment the in-flight
+		// counter) before task B is attempted, so this isn't racing task A's own
+		// startup.
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		await assert.rejects(
+			() =>
+				runIsolatedTask(
+					fakeTaskOptions({ getTools: () => [], streamFn: scriptedStreamFn([finalTextTurn("B done")]) }),
+					"do b",
+					"task b",
+				),
+			(err) => {
+				assert.match(err.message, /^task failed: 1 tasks are already running \(max 1\)/);
+				return true;
+			},
+		);
+
+		releaseTaskA();
+		assert.equal(await taskA, "A done");
+
+		// Task A finished and released its slot — a new call should succeed again.
+		const resultC = await runIsolatedTask(
+			fakeTaskOptions({ getTools: () => [], streamFn: scriptedStreamFn([finalTextTurn("C done")]) }),
+			"do c",
+			"task c",
+		);
+		assert.equal(resultC, "C done");
+	} finally {
+		if (originalMax === undefined) {
+			delete process.env.IRIS_TASK_MAX_CONCURRENT;
+		} else {
+			process.env.IRIS_TASK_MAX_CONCURRENT = originalMax;
+		}
+	}
+});

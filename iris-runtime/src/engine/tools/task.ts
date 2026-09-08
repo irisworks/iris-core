@@ -45,6 +45,20 @@ export function getTaskMaxMs(): number {
 	return Number.isFinite(raw) && raw > 0 ? raw : 300000;
 }
 
+export function getTaskMaxConcurrent(): number {
+	const raw = Number(process.env.IRIS_TASK_MAX_CONCURRENT);
+	return Number.isFinite(raw) && raw > 0 ? raw : 3;
+}
+
+/** Process-wide in-flight count — every `task` call and every `--as-task`
+ * scheduled event goes through runIsolatedTask, so gating here (rather than
+ * per-channel) caps total concurrent LLM spend regardless of which channel
+ * triggered it. Nothing previously stopped a single turn from firing off
+ * several investigative tasks at once (pi-agent-core can execute a turn's
+ * tool calls in parallel) — each one a full second Agent with its own LLM
+ * calls and its own up-to-5-minute ceiling, with no circuit breaker. */
+let activeTaskCount = 0;
+
 /** Same shape as agent.ts's private extractToolResultText — kept as a small,
  * separately-owned copy here so tools/task.ts never has to import from
  * agent.ts (agent.ts imports tools/index.ts, which imports this file). */
@@ -70,6 +84,26 @@ function extractToolResultText(result: unknown): string {
  * tasks, as the text posted into the channel).
  */
 export async function runIsolatedTask(
+	options: TaskRunnerOptions,
+	prompt: string,
+	label: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	const maxConcurrent = getTaskMaxConcurrent();
+	if (activeTaskCount >= maxConcurrent) {
+		throw new Error(
+			`task failed: ${activeTaskCount} tasks are already running (max ${maxConcurrent}) — wait for one to finish before starting another`,
+		);
+	}
+	activeTaskCount++;
+	try {
+		return await runIsolatedTaskInner(options, prompt, label, signal);
+	} finally {
+		activeTaskCount--;
+	}
+}
+
+async function runIsolatedTaskInner(
 	options: TaskRunnerOptions,
 	prompt: string,
 	label: string,
