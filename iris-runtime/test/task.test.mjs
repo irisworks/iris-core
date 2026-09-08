@@ -198,7 +198,7 @@ test("runIsolatedTask: inner tool events never reach outer respond/onToolEvent/r
 	]);
 
 	const result = await runIsolatedTask(
-		fakeTaskOptions({ tools: [fakeTool], streamFn, maxMs: 5000 }),
+		fakeTaskOptions({ getTools: () => [fakeTool], streamFn, maxMs: 5000 }),
 		"do the thing",
 		"do the thing",
 	);
@@ -223,7 +223,7 @@ test("runIsolatedTask: a thrown error inside the inner run surfaces as 'task fai
 		throw new Error("boom");
 	};
 	await assert.rejects(
-		() => runIsolatedTask(fakeTaskOptions({ tools: [], streamFn: throwingStreamFn }), "do it", "do it"),
+		() => runIsolatedTask(fakeTaskOptions({ getTools: () => [], streamFn: throwingStreamFn }), "do it", "do it"),
 		(err) => {
 			assert.match(err.message, /^task failed: /);
 			return true;
@@ -236,10 +236,96 @@ test("runIsolatedTask: exceeding maxMs aborts and surfaces as a timeout tool err
 	// maxMs ceiling rather than hang forever.
 	const hangingStreamFn = () => new Promise(() => {});
 	await assert.rejects(
-		() => runIsolatedTask(fakeTaskOptions({ tools: [], streamFn: hangingStreamFn, maxMs: 50 }), "do it", "do it"),
+		() => runIsolatedTask(fakeTaskOptions({ getTools: () => [], streamFn: hangingStreamFn, maxMs: 50 }), "do it", "do it"),
 		(err) => {
 			assert.match(err.message, /^task failed: exceeded 50ms limit$/);
 			return true;
 		},
 	);
+});
+
+test("runIsolatedTask: an external AbortSignal cancels the inner run immediately, without waiting for maxMs", async () => {
+	// Before the fix, a caller's AbortSignal (the outer channel's stop command,
+	// forwarded through the `task` tool's execute(signal)) had no path into
+	// runIsolatedTask at all — only the maxMs timer could ever end a run early.
+	// This streamFn mirrors how a real one (pi-agent-core passes {..., signal}
+	// as its 3rd arg) reacts to abort: it never produces a response on its own,
+	// only rejects once the run's AbortSignal fires — exactly what should
+	// happen when runIsolatedTask forwards our caller-supplied signal into
+	// innerAgent.abort().
+	const hangingButAbortableStreamFn = (_model, _context, options) => ({
+		[Symbol.asyncIterator]() {
+			return {
+				next: () =>
+					new Promise((_resolve, reject) => {
+						if (options.signal?.aborted) {
+							reject(new Error("stream aborted"));
+							return;
+						}
+						options.signal?.addEventListener("abort", () => reject(new Error("stream aborted")), { once: true });
+					}),
+			};
+		},
+		result: async () => {
+			throw new Error("result() should not be reached — the iterator should reject first");
+		},
+	});
+	const controller = new AbortController();
+	const start = Date.now();
+	const rejection = assert.rejects(
+		() =>
+			runIsolatedTask(
+				fakeTaskOptions({ getTools: () => [], streamFn: hangingButAbortableStreamFn, maxMs: 60000 }),
+				"do it",
+				"do it",
+				controller.signal,
+			),
+		(err) => {
+			assert.match(err.message, /^task failed: /);
+			return true;
+		},
+	);
+	// Give runIsolatedTask a moment to actually start the inner prompt() call
+	// and reach the streamFn's next() before we abort — aborting too early
+	// (before the fake's own listener is attached) would only prove the race
+	// went our way, not that the signal is forwarded correctly.
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	controller.abort();
+	await rejection;
+	assert.ok(Date.now() - start < 5000, "abort should end the run well before the 60s maxMs ceiling");
+});
+
+test("createIrisTools: the task tool sees currently-connected MCP tools, not a permanent pre-MCP snapshot", async () => {
+	// Before the fix, `task`'s tool array was captured once at createIrisTools()
+	// time — before agent.ts's per-turn `agent.state.tools = [...tools,
+	// ...mcpManager.getTools()]` merge ever runs — so an MCP tool configured
+	// for the channel was invisible inside every task, silently. getMcpTools
+	// is called fresh on every task invocation so it always reflects whatever
+	// the outer agent currently has connected.
+	process.env.IRIS_TASKS_ENABLED = "true";
+	try {
+		let mcpToolCalls = 0;
+		const mcpTool = {
+			name: "mcp-search",
+			label: "mcp-search",
+			description: "a tool that only exists because an MCP server is connected",
+			parameters: { type: "object", properties: {} },
+			execute: async () => {
+				mcpToolCalls++;
+				return { content: [{ type: "text", text: "mcp result" }], details: undefined };
+			},
+		};
+		const streamFn = scriptedStreamFn([toolCallTurn("mcp-search", {}), finalTextTurn("Found it via MCP.")]);
+		const tools = createIrisTools(fakeExecutor(), {
+			supportsImageInput: false,
+			workspaceDir: "/tmp",
+			task: fakeTaskOptions({ streamFn, getMcpTools: () => [mcpTool] }),
+		});
+		const taskTool = tools.find((t) => t.name === "task");
+		const result = await taskTool.execute("tc1", { label: "search", prompt: "find it" });
+		assert.equal(mcpToolCalls, 1, "the MCP tool should have been callable, and called, from inside the task");
+		assert.equal(result.content[0].text, "Found it via MCP.");
+	} finally {
+		delete process.env.IRIS_TASKS_ENABLED;
+	}
 });

@@ -19,8 +19,11 @@ export interface TaskRunnerOptions {
 	model: Model<any>;
 	getApiKey: (provider: string) => Promise<string | undefined> | string | undefined;
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
-	/** Inner agent's tool array — Iris's own tools minus `task` (structurally, not via a runtime guard). */
-	tools: AgentTool<any>[];
+	/** Inner agent's tool array — Iris's own tools minus `task` (structurally, not via a runtime
+	 * guard). Called fresh on every task invocation (not read once at construction) so a task
+	 * sees whatever MCP tools are currently connected, the same as a normal turn's per-turn
+	 * `agent.state.tools = [...tools, ...mcpManager.getTools()]` merge in agent.ts's run(). */
+	getTools: () => AgentTool<any>[];
 	/** Constitution + skills index, no MEMORY.md, no channel/user lists. Recomputed
 	 * per call (cheap file reads) so a task always sees current skills/constitution. */
 	buildSystemPrompt: () => string;
@@ -66,7 +69,12 @@ function extractToolResultText(result: unknown): string {
  * caller's context, as the `task` tool's own result (or, for scheduled
  * tasks, as the text posted into the channel).
  */
-export async function runIsolatedTask(options: TaskRunnerOptions, prompt: string, label: string): Promise<string> {
+export async function runIsolatedTask(
+	options: TaskRunnerOptions,
+	prompt: string,
+	label: string,
+	signal?: AbortSignal,
+): Promise<string> {
 	const taskId = `task-${randomUUID()}`;
 	const systemPrompt = options.buildSystemPrompt();
 
@@ -75,7 +83,7 @@ export async function runIsolatedTask(options: TaskRunnerOptions, prompt: string
 			systemPrompt,
 			model: options.model,
 			thinkingLevel: "off",
-			tools: options.tools,
+			tools: options.getTools(),
 		},
 		convertToLlm: options.convertToLlm,
 		getApiKey: options.getApiKey,
@@ -117,12 +125,24 @@ export async function runIsolatedTask(options: TaskRunnerOptions, prompt: string
 		}, maxMs);
 	});
 
+	// Forward the outer run's abort (e.g. a user's stop command) to the inner
+	// agent — without this, stopping the outer channel only ever raced the
+	// IRIS_TASK_MAX_MS timer, leaving the task running (and billing) for up to
+	// 5 more minutes regardless of the stop.
+	const onAbort = () => innerAgent.abort();
+	if (signal?.aborted) {
+		innerAgent.abort();
+	} else {
+		signal?.addEventListener("abort", onAbort);
+	}
+
 	try {
 		await Promise.race([innerAgent.prompt(prompt), timeout]);
 	} catch (err) {
 		throw new Error(`task failed: ${err instanceof Error ? err.message : String(err)}`);
 	} finally {
 		clearTimeout(timeoutHandle);
+		signal?.removeEventListener("abort", onAbort);
 	}
 
 	const lastAssistant = innerAgent.state.messages.filter((m) => m.role === "assistant").pop() as
@@ -164,8 +184,12 @@ export function createTaskTool(options: TaskRunnerOptions): AgentTool<typeof tas
 			"would otherwise permanently bloat this channel's context — every intermediate tool call and " +
 			"reasoning turn inside the task is discarded; only the final text comes back.",
 		parameters: taskSchema,
-		execute: async (_toolCallId: string, { label, prompt }: { label: string; prompt: string }) => {
-			const text = await runIsolatedTask(options, prompt, label);
+		execute: async (
+			_toolCallId: string,
+			{ label, prompt }: { label: string; prompt: string },
+			signal?: AbortSignal,
+		) => {
+			const text = await runIsolatedTask(options, prompt, label, signal);
 			return { content: [{ type: "text", text }], details: undefined };
 		},
 	};

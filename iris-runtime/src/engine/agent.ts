@@ -1,4 +1,4 @@
-import { Agent, type AgentEvent } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import {
 	AgentSession,
@@ -773,7 +773,13 @@ function createRunner(
 	// the current constitution/skills, same as a normal turn does below.
 	const buildTaskSystemPrompt = (): string => {
 		const taskConstitution = loadConstitution(workspaceDir);
-		const taskSkills = loadIrisSkills(channelDir, workspacePath, workingDir);
+		let taskSkills = loadIrisSkills(channelDir, workspacePath, workingDir);
+		// SESSION- channels are non-admin (thread mode) — no agent spawning allowed.
+		// A task's skills index must honor the same restriction as a normal turn's
+		// (see the identical filter below in the main run() path).
+		if (channelId.startsWith("SESSION-")) {
+			taskSkills = taskSkills.filter((s) => s.name !== "spawn-agent");
+		}
 		const constitutionSection = taskConstitution ? `\n\n${taskConstitution}` : "";
 		return `You are Iris, running as an isolated, fresh-context task. Carry out the instructions in the user's message and reply with a concise final summary — everything else in this run (tool calls, intermediate reasoning) is discarded and only that final summary is ever seen.${constitutionSection}
 
@@ -820,12 +826,17 @@ Each built-in tool requires a "label" parameter (shown to user).
 	// claiming success while pi-ai silently strips the image content downstream.
 	// channelId/channelDir enable the bash policy layer + command audit log (#131).
 	const supportsImageInput = model.input.includes("image");
-	const taskOptions: Omit<TaskRunnerOptions, "tools"> = {
+	const taskOptions: Omit<TaskRunnerOptions, "getTools"> & { getMcpTools: () => AgentTool<any>[] } = {
 		model,
 		getApiKey,
 		convertToLlm,
 		buildSystemPrompt: buildTaskSystemPrompt,
 		streamFn: runnerStreamFn,
+		// Mirrors the outer agent's per-turn MCP merge below (agent.state.tools =
+		// [...tools, ...mcpManager.getTools()]) so a task sees the same MCP tools
+		// a normal turn would, instead of a permanent snapshot taken before any
+		// MCP server ever connected.
+		getMcpTools: () => getMcpManager(workingDir).getTools(),
 	};
 	const tools = createIrisTools(executor, {
 		supportsImageInput,
@@ -1227,6 +1238,12 @@ Each built-in tool requires a "label" parameter (shown to user).
 			}
 		}
 	}
+
+	// Set only while runTask() (scheduled `--as-task` events) has an isolated
+	// task in flight, so abort() below can cancel it the same way a stop
+	// command cancels a normal turn — otherwise a stop mid-task only ever
+	// raced IRIS_TASK_MAX_MS and the task kept running (and billing) regardless.
+	let currentTaskAbortController: AbortController | undefined;
 
 	return {
 		async run(
@@ -1714,6 +1731,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 
 		abort(): void {
 			session.abort();
+			currentTaskAbortController?.abort();
 		},
 
 		async compact(): Promise<{ tokensBefore: number } | null> {
@@ -1749,7 +1767,18 @@ Each built-in tool requires a "label" parameter (shown to user).
 			// (structurally omitted, matching createIrisTools) — never handed to
 			// this runner's own inner agent, so a task can't spawn a task.
 			const innerTools = tools.filter((t) => t.name !== "task");
-			return runIsolatedTask({ ...taskOptions, maxMs: getTaskMaxMs(), tools: innerTools }, prompt, label);
+			const abortController = new AbortController();
+			currentTaskAbortController = abortController;
+			try {
+				return await runIsolatedTask(
+					{ ...taskOptions, maxMs: getTaskMaxMs(), getTools: () => innerTools },
+					prompt,
+					label,
+					abortController.signal,
+				);
+			} finally {
+				currentTaskAbortController = undefined;
+			}
 		},
 	};
 }

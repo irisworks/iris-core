@@ -28,7 +28,12 @@ export interface IrisToolsOptions {
 	 * Optional so tests and headless callers can omit it — with no `task`
 	 * option, or with the flag unset/false, the returned tool array is
 	 * byte-for-byte the same as before `task` existed. */
-	task?: Omit<TaskRunnerOptions, "tools">;
+	task?: Omit<TaskRunnerOptions, "getTools"> & {
+		/** Called fresh on every task invocation so a task sees whatever MCP
+		 * tools are currently connected, mirroring the outer agent's per-turn
+		 * `agent.state.tools = [...tools, ...mcpManager.getTools()]` merge. */
+		getMcpTools?: () => AgentTool<any>[];
+	};
 }
 
 export function createIrisTools(executor: Executor, options: IrisToolsOptions): AgentTool<any>[] {
@@ -56,6 +61,10 @@ export function createIrisTools(executor: Executor, options: IrisToolsOptions): 
 	// The inner task agent gets Iris's own tool array minus `task` itself —
 	// omitted structurally (baseTools has no `task` entry yet), not via a
 	// runtime recursion guard, so a task-spawning-a-task fork bomb can't happen.
-	const taskTool = createTaskTool({ ...options.task, tools: baseTools });
+	const { getMcpTools, ...taskRunnerOptions } = options.task;
+	const taskTool = createTaskTool({
+		...taskRunnerOptions,
+		getTools: () => [...baseTools, ...(getMcpTools?.() ?? [])],
+	});
 	return [...baseTools, taskTool];
 }

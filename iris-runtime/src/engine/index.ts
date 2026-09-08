@@ -13,6 +13,7 @@ import { isChannelObserved, mirrorContextToObservers } from "./channel-observers
 import * as log from "./log.js";
 import type { SandboxConfig } from "./sandbox.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
+import { isTasksEnabled } from "./tools/task.js";
 import type { MessageContext, TransportEvent } from "../transport/types.js";
 
 export interface ChannelState {
@@ -171,7 +172,7 @@ export async function createEngine(config: EngineConfig): Promise<Engine> {
 			// (not baked into the event) so flipping the flag off is enough to
 			// return every such event to today's full-turn behavior.
 			if (event.runAsTask) {
-				if (process.env.IRIS_TASKS_ENABLED === "true") {
+				if (isTasksEnabled()) {
 					log.logInfo(`[${event.channel}] Running scheduled event as task: ${event.text.substring(0, 50)}`);
 					state.running = true;
 					try {
@@ -186,6 +187,16 @@ export async function createEngine(config: EngineConfig): Promise<Engine> {
 						await transport.postMessage(event.channel, `_Error: ${errMsg}_`);
 					} finally {
 						state.running = false;
+						// A stop command during a running task sets stopMessageTs and
+						// posts "_Stopping..._" (handleStop below), expecting the normal
+						// turn path to later update it to "_Stopped_" — this branch never
+						// reached that path, so without this the message is left stuck on
+						// "_Stopping..._" forever and stopMessageTs is never cleared.
+						if (state.stopMessageTs) {
+							await transport.updateMessage(event.channel, state.stopMessageTs, "_Stopped_");
+							state.stopMessageTs = undefined;
+						}
+						state.stopRequested = false;
 					}
 					return;
 				}
