@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-09-09
+
 ### Fixed
 
 - `bootstrap.sh`: `IRIS_DIR` is now overridable (was hardcoded to `/iris`),
