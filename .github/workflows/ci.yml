@@ -38,5 +38,8 @@ jobs:
       - run: npm run build
       - name: Dispatch regression suite
         run: npm test
+      - name: Bootstrap environment-input regression suite
+        working-directory: .
+        run: bash scripts/test-bootstrap-env.sh
       - name: Smoke test (bridge-only boot)
         run: bash scripts/smoke.sh
