@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `bootstrap.sh`: `IRIS_DIR` is now overridable (was hardcoded to `/iris`),
+  enabling a second install on one host. Secret/token prompts (LLM provider
+  keys, Slack/Telegram/GitHub, Resend/Perplexity, AWS Bedrock) now use an
+  already-exported env var directly instead of ignoring it and blocking on
+  interactive input. Fixes #262.
+
 ## [1.11.0] - 2026-09-03
 
 ### Added
