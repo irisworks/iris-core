@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Mistral default model is now `codestral-2508` (Codestral 25.08, 256k
+  context), replacing the decommissioned `devstral-medium-latest` in
+  `bootstrap.sh` and `data/models.json.template`.
+
 ## [1.11.1] - 2026-09-09
 
 ### Fixed
