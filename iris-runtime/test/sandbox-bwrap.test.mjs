@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createExecutor, parseSandboxArg } from "../dist/engine/sandbox.js";
 
-const bwrapWorks = spawnSync("bwrap", ["--ro-bind", "/", "/", "true"]).status === 0;
+const bwrapWorks = spawnSync("bwrap", ["--ro-bind", "/", "/", "--unshare-all", "true"]).status === 0;
 
 function setup() {
 	const workspaceDir = mkdtempSync(join(tmpdir(), "iris-bwrap-"));

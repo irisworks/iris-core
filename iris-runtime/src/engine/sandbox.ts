@@ -69,10 +69,13 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 	}
 
 	if (config.type === "bwrap") {
+		// Probe a real sandbox, not just --version: bwrap can be installed while
+		// unprivileged user namespaces are blocked (e.g., Ubuntu 24.04 AppArmor).
 		try {
-			await execSimple("bwrap", ["--version"]);
-		} catch {
-			console.error("Error: bubblewrap (bwrap) is not installed or not in PATH (e.g., apt-get install bubblewrap)");
+			await execSimple("bwrap", ["--ro-bind", "/", "/", "--unshare-all", "true"]);
+		} catch (err) {
+			console.error(`Error: bubblewrap (bwrap) cannot create a sandbox: ${err}`);
+			console.error("Install it (apt-get install bubblewrap) and allow unprivileged user namespaces.");
 			process.exit(1);
 		}
 		console.log("  Bubblewrap mode: each command runs in a per-channel sandbox.");
