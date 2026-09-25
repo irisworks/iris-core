@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import { mkdirSync } from "fs";
+import { join } from "path";
 import { redactKnownSecrets } from "./redact.js";
 import { secretsMode } from "./secret-store.js";
 
@@ -6,7 +8,8 @@ export type SandboxConfig =
 	| { type: "host" }
 	| { type: "docker"; container: string }
 	| { type: "firecracker"; agentIp: string }
-	| { type: "firecracker-pool"; sessionId: string };
+	| { type: "firecracker-pool"; sessionId: string }
+	| { type: "bwrap" };
 
 export function parseSandboxArg(value: string): SandboxConfig {
 	if (value === "host") {
@@ -32,7 +35,12 @@ export function parseSandboxArg(value: string): SandboxConfig {
 		// sessionId is assigned later by createExecutor when the channelId is known
 		return { type: "firecracker-pool", sessionId: "" };
 	}
-	console.error(`Error: Invalid sandbox type '${value}'. Use 'host', 'docker:<container>', 'firecracker:<ip>', or 'firecracker-pool'`);
+	if (value === "bwrap") {
+		return { type: "bwrap" };
+	}
+	console.error(
+		`Error: Invalid sandbox type '${value}'. Use 'host', 'docker:<container>', 'firecracker:<ip>', 'firecracker-pool', or 'bwrap'`,
+	);
 	process.exit(1);
 }
 
@@ -57,6 +65,30 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 	if (config.type === "firecracker-pool") {
 		// Pool VMs are acquired lazily per session — nothing to validate upfront
 		console.log("  Firecracker pool mode: VMs will be spawned on demand per session.");
+		return;
+	}
+
+	if (config.type === "bwrap") {
+		// The sandbox shares the host network. Without an API token, a channel
+		// command can call Iris's loopback API as the unrestricted "iris" caller.
+		if (!process.env.IRIS_API_TOKEN) {
+			console.error("Error: --sandbox=bwrap requires IRIS_API_TOKEN because the sandbox can reach the host API.");
+			process.exit(1);
+		}
+		if (Number(process.env.IRIS_WEBUI_PORT ?? 0) > 0 && !process.env.IRIS_WEBUI_PASSWORD) {
+			console.error("Error: --sandbox=bwrap requires IRIS_WEBUI_PASSWORD when the web UI is enabled.");
+			process.exit(1);
+		}
+		// Probe a real sandbox, not just --version: bwrap can be installed while
+		// unprivileged user namespaces are blocked (e.g., Ubuntu 24.04 AppArmor).
+		try {
+			await execSimple("bwrap", ["--ro-bind", "/", "/", "--unshare-all", "true"]);
+		} catch (err) {
+			console.error(`Error: bubblewrap (bwrap) cannot create a sandbox: ${err}`);
+			console.error("Install it (apt-get install bubblewrap) and allow unprivileged user namespaces.");
+			process.exit(1);
+		}
+		console.log("  Bubblewrap mode: each command runs in a per-channel sandbox.");
 		return;
 	}
 
@@ -107,8 +139,14 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
  * Create an executor for the given sandbox config.
  * For firecracker-pool mode, sessionId (channelId) must be provided so the
  * VmManager can track which VM belongs to which session.
+ * For bwrap mode, dirs must be provided: the channel dir is the only writable
+ * path inside the sandbox.
  */
-export function createExecutor(config: SandboxConfig, sessionId?: string): Executor {
+export function createExecutor(
+	config: SandboxConfig,
+	sessionId?: string,
+	dirs?: { workspaceDir: string; channelDir: string },
+): Executor {
 	const executor = (() => {
 		if (config.type === "host") {
 			return new HostExecutor();
@@ -119,6 +157,10 @@ export function createExecutor(config: SandboxConfig, sessionId?: string): Execu
 		if (config.type === "firecracker-pool") {
 			if (!sessionId) throw new Error("firecracker-pool sandbox requires a sessionId");
 			return new FirecrackerPoolExecutor(sessionId);
+		}
+		if (config.type === "bwrap") {
+			if (!dirs) throw new Error("bwrap sandbox requires workspace and channel dirs");
+			return new BwrapExecutor(dirs.workspaceDir, dirs.channelDir);
 		}
 		return new DockerExecutor(config.container);
 	})();
@@ -275,6 +317,64 @@ class DockerExecutor implements Executor {
 	getWorkspacePath(_hostPath: string): string {
 		// Docker container sees /workspace
 		return "/workspace";
+	}
+}
+
+/**
+ * Runs each command under bubblewrap: fresh mount/pid/ipc/uts namespaces
+ * (network shared), system dirs read-only, the channel dir as the only writable
+ * path, and the workspace skills dir read-only. Other channels, the rest of the
+ * workspace, and the runtime's env (tokens) are not visible. A filesystem/process
+ * boundary, not a kernel-exploit boundary — use firecracker-pool for that.
+ */
+class BwrapExecutor implements Executor {
+	constructor(
+		private workspaceDir: string,
+		private channelDir: string,
+	) {}
+
+	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
+		mkdirSync(this.channelDir, { recursive: true });
+		const args = [
+			"--unshare-all",
+			"--share-net",
+			"--die-with-parent",
+			"--new-session",
+			"--clearenv",
+			"--setenv",
+			"PATH",
+			"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"--setenv",
+			"HOME",
+			this.channelDir,
+			"--ro-bind",
+			"/usr",
+			"/usr",
+			...["/bin", "/sbin", "/lib", "/lib64", "/etc"].flatMap((d) => ["--ro-bind-try", d, d]),
+			"--proc",
+			"/proc",
+			"--dev",
+			"/dev",
+			"--tmpfs",
+			"/tmp",
+			"--ro-bind-try",
+			join(this.workspaceDir, "skills"),
+			join(this.workspaceDir, "skills"),
+			"--bind",
+			this.channelDir,
+			this.channelDir,
+			"--chdir",
+			this.channelDir,
+			"sh",
+			"-c",
+			command,
+		];
+		return new HostExecutor().exec(["bwrap", ...args].map(shellEscape).join(" "), options);
+	}
+
+	getWorkspacePath(hostPath: string): string {
+		// Same paths inside the sandbox as on the host
+		return hostPath;
 	}
 }
 
