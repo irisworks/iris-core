@@ -1,9 +1,15 @@
 ---
 name: status
 description: Read-only health snapshot of this Iris install — service state, disk, sub-agent containers, recent errors, and message-processing check. Use when asked "are you healthy", "what's your status", or when diagnosing problems.
+run-as-task: true
 ---
 
 # Skill: status
+
+If the `task` tool is available, run this skill via it (`task` with `prompt`
+set to the `status` invocation below) — its output is noisy multi-step
+diagnostic dump that shouldn't permanently bloat this channel's context.
+Otherwise (no `task` tool available), run these steps directly.
 
 One read-only health snapshot of the install. Prints, in order:
 

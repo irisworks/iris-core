@@ -7,10 +7,14 @@ EVENTS_DIR="${IRIS_EVENTS_DIR:-/iris/data/events}"
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  schedule once  --channel <channelId> --at "<ISO 8601>" --text "<instruction>"
-  schedule every --channel <channelId> --cron "<expr>" [--tz <IANA>] --text "<instruction>"
+  schedule once  --channel <channelId> --at "<ISO 8601>" --text "<instruction>" [--as-task]
+  schedule every --channel <channelId> --cron "<expr>" [--tz <IANA>] --text "<instruction>" [--as-task]
   schedule list
   schedule cancel <event-file>
+
+--as-task requires IRIS_TASKS_ENABLED on the running Iris install. When set, each
+firing runs through the isolated `task` tool instead of a full channel turn: only
+the final result is posted, so the channel's own context doesn't grow on every fire.
 EOF
   exit 1
 }
@@ -19,7 +23,7 @@ CMD="${1:-}"; shift || true
 
 case "$CMD" in
   once|every)
-    CHANNEL="" AT="" CRON="" TZNAME="UTC" TEXT=""
+    CHANNEL="" AT="" CRON="" TZNAME="UTC" TEXT="" AS_TASK=false
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --channel) CHANNEL="$2"; shift 2 ;;
@@ -27,6 +31,7 @@ case "$CMD" in
         --cron)    CRON="$2";    shift 2 ;;
         --tz)      TZNAME="$2";  shift 2 ;;
         --text)    TEXT="$2";    shift 2 ;;
+        --as-task) AS_TASK=true; shift ;;
         *) echo "schedule: unknown option: $1" >&2; usage ;;
       esac
     done
@@ -37,14 +42,14 @@ case "$CMD" in
 
     if [[ "$CMD" == "once" ]]; then
       [[ -z "$AT" ]] && { echo "schedule once: --at is required" >&2; usage; }
-      jq -n --arg channelId "$CHANNEL" --arg text "$TEXT" --arg at "$AT" \
-        '{type:"one-shot", channelId:$channelId, text:$text, at:$at}' > "$EVENT_FILE"
+      jq -n --arg channelId "$CHANNEL" --arg text "$TEXT" --arg at "$AT" --argjson runAsTask "$AS_TASK" \
+        '{type:"one-shot", channelId:$channelId, text:$text, at:$at, runAsTask:$runAsTask}' > "$EVENT_FILE"
     else
       [[ -z "$CRON" ]] && { echo "schedule every: --cron is required" >&2; usage; }
-      jq -n --arg channelId "$CHANNEL" --arg text "$TEXT" --arg schedule "$CRON" --arg timezone "$TZNAME" \
-        '{type:"periodic", channelId:$channelId, text:$text, schedule:$schedule, timezone:$timezone}' > "$EVENT_FILE"
+      jq -n --arg channelId "$CHANNEL" --arg text "$TEXT" --arg schedule "$CRON" --arg timezone "$TZNAME" --argjson runAsTask "$AS_TASK" \
+        '{type:"periodic", channelId:$channelId, text:$text, schedule:$schedule, timezone:$timezone, runAsTask:$runAsTask}' > "$EVENT_FILE"
     fi
-    echo "scheduled: $(basename "$EVENT_FILE")"
+    echo "scheduled: $(basename "$EVENT_FILE")$($AS_TASK && echo " (as-task)")"
     ;;
 
   list)
@@ -53,9 +58,10 @@ case "$CMD" in
     for f in "$EVENTS_DIR"/*.json; do
       FOUND=true
       SUMMARY=$(jq -r '
-        if .type == "periodic" then "periodic  " + .schedule + " (" + .timezone + ")"
+        (if .type == "periodic" then "periodic  " + .schedule + " (" + .timezone + ")"
         elif .type == "one-shot" then "one-shot  at " + .at
-        else .type end
+        else .type end)
+        + (if .runAsTask == true then "  [as-task]" else "" end)
         + "  → #" + .channelId + ": " + .text' "$f" 2>/dev/null) || SUMMARY="(unparseable)"
       echo "$(basename "$f")  $SUMMARY"
     done

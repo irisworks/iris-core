@@ -4,6 +4,17 @@
 
 ### Added
 
+- `task` tool, gated on `IRIS_TASKS_ENABLED`: runs an isolated, fresh-context
+  sub-agent to completion (same model/executor/tools as the caller, minus
+  `task` itself) and returns only its final text — every intermediate tool
+  call and reasoning turn stays out of the calling channel's context.
+  `IRIS_TASK_MAX_MS` (default 5m) bounds one run, `IRIS_TASK_MAX_CONCURRENT`
+  (default 3) caps how many run at once process-wide. `schedule every`/`schedule
+  once --as-task` fires a scheduled event through this machinery instead of a
+  full channel turn, so a recurring job no longer grows the channel's session
+  history on every firing; without the flag it falls back to today's
+  full-turn behavior. Destructive bash commands that need confirmation are
+  refused inside a task. Closes #253.
 - `--sandbox=bwrap`: runs each channel's commands in a bubblewrap sandbox —
   only the channel dir is writable, other channels and the runtime env are
   hidden, network is shared. Requires `IRIS_API_TOKEN` to protect the

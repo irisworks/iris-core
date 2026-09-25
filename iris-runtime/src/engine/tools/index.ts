@@ -5,9 +5,12 @@ import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createReadFullTool } from "./read-full.js";
 import { createReadTool } from "./read.js";
+import { createTaskTool, isTasksEnabled, type TaskRunnerOptions } from "./task.js";
 import { createWriteTool } from "./write.js";
 
 export { setUploadFunction } from "./attach.js";
+export { getTaskMaxMs, isTasksEnabled, runIsolatedTask } from "./task.js";
+export type { TaskRunnerOptions } from "./task.js";
 
 export interface IrisToolsOptions {
 	/** Whether the active model's provider accepts image input. When false, the
@@ -21,15 +24,26 @@ export interface IrisToolsOptions {
 	 * log (#131). Optional so tests and headless callers can omit it. */
 	channelId?: string;
 	channelDir?: string;
+	/** Wires up the `task` tool (issue #253) when IRIS_TASKS_ENABLED is "true".
+	 * Optional so tests and headless callers can omit it — with no `task`
+	 * option, or with the flag unset/false, the returned tool array is
+	 * byte-for-byte the same as before `task` existed. */
+	task?: Omit<TaskRunnerOptions, "getTools"> & {
+		/** Called fresh on every task invocation so a task sees whatever MCP
+		 * tools are currently connected, mirroring the outer agent's per-turn
+		 * `agent.state.tools = [...tools, ...mcpManager.getTools()]` merge. */
+		getMcpTools?: () => AgentTool<any>[];
+	};
 }
 
-export function createIrisTools(executor: Executor, options: IrisToolsOptions): AgentTool<any>[] {
+function createBaseTools(executor: Executor, options: IrisToolsOptions, inTask: boolean): AgentTool<any>[] {
 	const bashPolicy =
 		options.channelId && options.channelDir
 			? {
 					channelId: options.channelId,
 					channelDir: options.channelDir,
 					workspaceDir: options.workspaceDir,
+					...(inTask ? { inTask: true } : {}),
 				}
 			: undefined;
 	return [
@@ -40,4 +54,31 @@ export function createIrisTools(executor: Executor, options: IrisToolsOptions): 
 		attachTool,
 		createReadFullTool({ channelDir: options.channelDir }),
 	];
+}
+
+/**
+ * Tool-array getter for a task's inner agent: Iris's own tools minus `task`
+ * itself — omitted structurally, not via a runtime recursion guard, so a
+ * task-spawning-a-task fork bomb can't happen — with a task-mode bash (see
+ * BashPolicyOptions.inTask), plus whatever MCP tools are connected at call
+ * time. Shared by the `task` tool and scheduled `--as-task` events
+ * (AgentRunner.runTask) so both paths get the same tools.
+ */
+export function createTaskToolsGetter(executor: Executor, options: IrisToolsOptions): () => AgentTool<any>[] {
+	const innerTools = createBaseTools(executor, options, true);
+	return () => [...innerTools, ...(options.task?.getMcpTools?.() ?? [])];
+}
+
+export function createIrisTools(executor: Executor, options: IrisToolsOptions): AgentTool<any>[] {
+	const baseTools = createBaseTools(executor, options, false);
+
+	if (!options.task || !isTasksEnabled()) {
+		return baseTools;
+	}
+
+	const taskTool = createTaskTool({
+		...options.task,
+		getTools: createTaskToolsGetter(executor, options),
+	});
+	return [...baseTools, taskTool];
 }
