@@ -69,6 +69,16 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 	}
 
 	if (config.type === "bwrap") {
+		// The sandbox shares the host network. Without an API token, a channel
+		// command can call Iris's loopback API as the unrestricted "iris" caller.
+		if (!process.env.IRIS_API_TOKEN) {
+			console.error("Error: --sandbox=bwrap requires IRIS_API_TOKEN because the sandbox can reach the host API.");
+			process.exit(1);
+		}
+		if (Number(process.env.IRIS_WEBUI_PORT ?? 0) > 0 && !process.env.IRIS_WEBUI_PASSWORD) {
+			console.error("Error: --sandbox=bwrap requires IRIS_WEBUI_PASSWORD when the web UI is enabled.");
+			process.exit(1);
+		}
 		// Probe a real sandbox, not just --version: bwrap can be installed while
 		// unprivileged user namespaces are blocked (e.g., Ubuntu 24.04 AppArmor).
 		try {

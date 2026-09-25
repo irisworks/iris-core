@@ -6,7 +6,9 @@
 
 - `--sandbox=bwrap`: runs each channel's commands in a bubblewrap sandbox —
   only the channel dir is writable, other channels and the runtime env are
-  hidden, network is shared. Fixes #267.
+  hidden, network is shared. Requires `IRIS_API_TOKEN` to protect the
+  loopback API from sandboxed commands; an enabled web UI requires its password
+  too. Fixes #267.
 
 ### Changed
 

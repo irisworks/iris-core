@@ -29,6 +29,36 @@ test("parseSandboxArg accepts bwrap", () => {
 	assert.deepEqual(parseSandboxArg("bwrap"), { type: "bwrap" });
 });
 
+test("bwrap mode refuses the unauthenticated loopback API", () => {
+	const env = { ...process.env };
+	delete env.IRIS_API_TOKEN;
+	const check = spawnSync(process.execPath, [
+		"--input-type=module", "-e",
+		'import { validateSandbox } from "./dist/engine/sandbox.js"; await validateSandbox({ type: "bwrap" });',
+	], { cwd: process.cwd(), env, encoding: "utf8" });
+	assert.equal(check.status, 1);
+	assert.match(check.stderr, /requires IRIS_API_TOKEN/);
+});
+
+test("bwrap mode starts when the loopback API has a token", { skip: !bwrapWorks && "bwrap unavailable" }, () => {
+	const check = spawnSync(process.execPath, [
+		"--input-type=module", "-e",
+		'import { validateSandbox } from "./dist/engine/sandbox.js"; await validateSandbox({ type: "bwrap" });',
+	], { cwd: process.cwd(), env: { ...process.env, IRIS_API_TOKEN: "test-token", IRIS_WEBUI_PORT: "0" }, encoding: "utf8" });
+	assert.equal(check.status, 0, check.stderr);
+});
+
+test("bwrap mode refuses an enabled unauthenticated web UI", () => {
+	const env = { ...process.env, IRIS_API_TOKEN: "test-token", IRIS_WEBUI_PORT: "3001" };
+	delete env.IRIS_WEBUI_PASSWORD;
+	const check = spawnSync(process.execPath, [
+		"--input-type=module", "-e",
+		'import { validateSandbox } from "./dist/engine/sandbox.js"; await validateSandbox({ type: "bwrap" });',
+	], { cwd: process.cwd(), env, encoding: "utf8" });
+	assert.equal(check.status, 1);
+	assert.match(check.stderr, /requires IRIS_WEBUI_PASSWORD/);
+});
+
 test("createExecutor requires dirs for bwrap", () => {
 	assert.throws(() => createExecutor({ type: "bwrap" }, "tg-1"), /requires workspace and channel dirs/);
 });

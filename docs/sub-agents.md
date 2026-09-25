@@ -38,7 +38,11 @@ not visible, and system packages cannot be installed. This is a
 filesystem/process boundary, not a kernel-exploit boundary — use
 `firecracker-pool` where kernel-level isolation is required. Requires
 unprivileged user namespaces (on Ubuntu 24.04+, an AppArmor profile permitting
-them for `bwrap`).
+them for `bwrap`). Set `IRIS_API_TOKEN` before starting Iris in this mode:
+bwrap shares the host network, including the loopback API, and without a token
+that API grants unrestricted access to other sessions. If the optional web UI
+is enabled, also set `IRIS_WEBUI_PASSWORD`. Other unauthenticated services on
+the host network are reachable from the sandbox.
 
 ## The bridge
 
