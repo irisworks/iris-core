@@ -42,7 +42,7 @@ import {
 	type UserInfo,
 } from "../transport/types.js";
 import { resolveChannelPath, type ChannelStore } from "./store.js";
-import { createIrisTools, getTaskMaxMs, setUploadFunction } from "./tools/index.js";
+import { createIrisTools, createTaskToolsGetter, getTaskMaxMs, setUploadFunction } from "./tools/index.js";
 import { runIsolatedTask, type TaskRunnerOptions } from "./tools/task.js";
 
 // Model is now configurable via getOrCreateRunner() — no longer hardcoded here.
@@ -843,13 +843,17 @@ Each built-in tool requires a "label" parameter (shown to user).
 		// MCP server ever connected.
 		getMcpTools: () => getMcpManager(workingDir).getTools(),
 	};
-	const tools = createIrisTools(executor, {
+	const toolsOptions = {
 		supportsImageInput,
 		workspaceDir: workingDir,
 		channelId,
 		channelDir,
 		task: taskOptions,
-	});
+	};
+	const tools = createIrisTools(executor, toolsOptions);
+	// Scheduled `--as-task` events (runTask below) use the same inner tool
+	// array as the `task` tool: task-mode bash plus live MCP tools.
+	const getTaskTools = createTaskToolsGetter(executor, toolsOptions);
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills
 	// and the real transport profile — this placeholder is never sent to the LLM)
@@ -1768,15 +1772,11 @@ Each built-in tool requires a "label" parameter (shown to user).
 		},
 
 		async runTask(prompt: string, label = "task"): Promise<string> {
-			// Same tool array the outer agent runs with, minus `task` itself
-			// (structurally omitted, matching createIrisTools) — never handed to
-			// this runner's own inner agent, so a task can't spawn a task.
-			const innerTools = tools.filter((t) => t.name !== "task");
 			const abortController = new AbortController();
 			currentTaskAbortController = abortController;
 			try {
 				return await runIsolatedTask(
-					{ ...taskOptions, maxMs: getTaskMaxMs(), getTools: () => innerTools },
+					{ ...taskOptions, maxMs: getTaskMaxMs(), getTools: getTaskTools },
 					prompt,
 					label,
 					abortController.signal,

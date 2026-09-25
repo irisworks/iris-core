@@ -7,8 +7,11 @@
 // Requires `npm run build` first (tests import ../dist/*.js).
 
 import assert from "node:assert/strict";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { createIrisTools } from "../dist/engine/tools/index.js";
+import { createIrisTools, createTaskToolsGetter } from "../dist/engine/tools/index.js";
 import { runIsolatedTask } from "../dist/engine/tools/task.js";
 
 function fakeExecutor() {
@@ -383,5 +386,70 @@ test("runIsolatedTask: a call past IRIS_TASK_MAX_CONCURRENT fails immediately in
 		} else {
 			process.env.IRIS_TASK_MAX_CONCURRENT = originalMax;
 		}
+	}
+});
+
+test("task-mode bash: a confirm-gated command is refused without touching the channel's confirmation state", async () => {
+	// A task has no live turn a human can answer, so a destructive command
+	// inside one must not leave a pending grant on the real channel (which a
+	// later unrelated "ok" would silently approve) nor consume a grant the
+	// human gave the outer turn.
+	const channelDir = mkdtempSync(join(tmpdir(), "iris-task-bash-"));
+	const channelId = "tg-task-confirm";
+	const command = "terraform destroy";
+	const calls = [];
+	const executor = {
+		exec: async (cmd) => {
+			calls.push(cmd);
+			return { stdout: "", stderr: "", code: 0 };
+		},
+		getWorkspacePath: (p) => p,
+	};
+	const appendHumanYes = () =>
+		appendFileSync(
+			join(channelDir, "log.jsonl"),
+			`${JSON.stringify({ date: new Date().toISOString(), user: "U1", text: "ok", isBot: false })}\n`,
+		);
+	try {
+		const options = { supportsImageInput: false, workspaceDir: channelDir, channelId, channelDir };
+		const taskBash = createTaskToolsGetter(executor, options)().find((t) => t.name === "bash");
+		const outerBash = createIrisTools(executor, options).find((t) => t.name === "bash");
+
+		// 1. Refused inside the task, and no pending request is recorded: a later
+		// human "ok" must not pre-authorize it for the outer agent.
+		await assert.rejects(
+			() => taskBash.execute("c1", { label: "t", command }),
+			/cannot be confirmed from inside a task/,
+		);
+		appendHumanYes();
+		await assert.rejects(() => outerBash.execute("c2", { label: "t", command }), /Ask the user/);
+
+		// 2. A grant the human gave the outer turn is not consumed by a task.
+		appendHumanYes();
+		await assert.rejects(
+			() => taskBash.execute("c3", { label: "t", command }),
+			/cannot be confirmed from inside a task/,
+		);
+		await outerBash.execute("c4", { label: "t", command });
+		assert.deepEqual(calls, [command], "only the outer, human-confirmed run executes");
+	} finally {
+		rmSync(channelDir, { recursive: true, force: true });
+	}
+});
+
+test("createTaskToolsGetter: task-less tool array plus live MCP tools (shared by the task tool and --as-task events)", () => {
+	process.env.IRIS_TASKS_ENABLED = "true";
+	try {
+		let mcpTools = [];
+		const getTools = createTaskToolsGetter(fakeExecutor(), {
+			supportsImageInput: false,
+			workspaceDir: "/tmp",
+			task: fakeTaskOptions({ streamFn: scriptedStreamFn([]), getMcpTools: () => mcpTools }),
+		});
+		assert.deepEqual(getTools().map((t) => t.name), ["read", "bash", "edit", "write", "attach", "read_full"]);
+		mcpTools = [{ name: "mcp-search" }];
+		assert.deepEqual(getTools().map((t) => t.name).at(-1), "mcp-search");
+	} finally {
+		delete process.env.IRIS_TASKS_ENABLED;
 	}
 });

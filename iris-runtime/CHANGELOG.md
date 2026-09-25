@@ -13,7 +13,8 @@
   once --as-task` fires a scheduled event through this machinery instead of a
   full channel turn, so a recurring job no longer grows the channel's session
   history on every firing; without the flag it falls back to today's
-  full-turn behavior. Closes #253.
+  full-turn behavior. Destructive bash commands that need confirmation are
+  refused inside a task. Closes #253.
 - `--sandbox=bwrap`: runs each channel's commands in a bubblewrap sandbox —
   only the channel dir is writable, other channels and the runtime env are
   hidden, network is shared. Requires `IRIS_API_TOKEN` to protect the

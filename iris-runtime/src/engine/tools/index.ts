@@ -36,16 +36,17 @@ export interface IrisToolsOptions {
 	};
 }
 
-export function createIrisTools(executor: Executor, options: IrisToolsOptions): AgentTool<any>[] {
+function createBaseTools(executor: Executor, options: IrisToolsOptions, inTask: boolean): AgentTool<any>[] {
 	const bashPolicy =
 		options.channelId && options.channelDir
 			? {
 					channelId: options.channelId,
 					channelDir: options.channelDir,
 					workspaceDir: options.workspaceDir,
+					...(inTask ? { inTask: true } : {}),
 				}
 			: undefined;
-	const baseTools: AgentTool<any>[] = [
+	return [
 		createReadTool(executor, options),
 		createBashTool(executor, bashPolicy, options.channelDir),
 		createEditTool(executor),
@@ -53,18 +54,31 @@ export function createIrisTools(executor: Executor, options: IrisToolsOptions): 
 		attachTool,
 		createReadFullTool({ channelDir: options.channelDir }),
 	];
+}
+
+/**
+ * Tool-array getter for a task's inner agent: Iris's own tools minus `task`
+ * itself — omitted structurally, not via a runtime recursion guard, so a
+ * task-spawning-a-task fork bomb can't happen — with a task-mode bash (see
+ * BashPolicyOptions.inTask), plus whatever MCP tools are connected at call
+ * time. Shared by the `task` tool and scheduled `--as-task` events
+ * (AgentRunner.runTask) so both paths get the same tools.
+ */
+export function createTaskToolsGetter(executor: Executor, options: IrisToolsOptions): () => AgentTool<any>[] {
+	const innerTools = createBaseTools(executor, options, true);
+	return () => [...innerTools, ...(options.task?.getMcpTools?.() ?? [])];
+}
+
+export function createIrisTools(executor: Executor, options: IrisToolsOptions): AgentTool<any>[] {
+	const baseTools = createBaseTools(executor, options, false);
 
 	if (!options.task || !isTasksEnabled()) {
 		return baseTools;
 	}
 
-	// The inner task agent gets Iris's own tool array minus `task` itself —
-	// omitted structurally (baseTools has no `task` entry yet), not via a
-	// runtime recursion guard, so a task-spawning-a-task fork bomb can't happen.
-	const { getMcpTools, ...taskRunnerOptions } = options.task;
 	const taskTool = createTaskTool({
-		...taskRunnerOptions,
-		getTools: () => [...baseTools, ...(getMcpTools?.() ?? [])],
+		...options.task,
+		getTools: createTaskToolsGetter(executor, options),
 	});
 	return [...baseTools, taskTool];
 }

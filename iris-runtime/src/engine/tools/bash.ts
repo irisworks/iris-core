@@ -27,7 +27,17 @@ export interface BashPolicyOptions {
 	channelId: string;
 	channelDir: string;
 	workspaceDir: string;
+	/** Set for a `task`'s inner bash tool (issue #253). A task has no live turn
+	 * a human can answer, so confirm-gated commands are refused outright —
+	 * never recorded as a pending request on the channel, and never allowed
+	 * to consume a grant the human gave the outer turn. */
+	inTask?: boolean;
 }
+
+const TASK_CONFIRM_MESSAGE =
+	"This command was blocked by the bash policy layer because it is destructive, and destructive " +
+	"commands cannot be confirmed from inside a task — no human sees this run. Do NOT retry it. " +
+	"Say in your final summary that this command needs to be run from a normal turn, where the user can confirm it.";
 
 const CONFIRM_MESSAGE =
 	"This command was blocked by the bash policy layer because it is destructive. " +
@@ -74,6 +84,10 @@ export function createBashTool(executor: Executor, policy?: BashPolicyOptions, c
 					throw new Error(`Command refused by bash policy: ${decision.reason}. This command cannot be run.`);
 				}
 				if (decision.action === "confirm") {
+					if (policy.inTask) {
+						audit("denied");
+						throw new Error(`${TASK_CONFIRM_MESSAGE} (reason: ${decision.reason})`);
+					}
 					if (isConfirmedByHuman(policy.channelId, command, policy.channelDir)) {
 						audit("confirmed");
 					} else {

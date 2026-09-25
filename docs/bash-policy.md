@@ -59,6 +59,10 @@ This flow works identically on every transport because it is conversational:
 the model asks in its normal channel reply and the next user message either
 unlocks the retry or doesn't.
 
+Inside a `task` run (see `IRIS_TASKS_ENABLED`) nobody can answer, so
+destructive commands are refused outright (audited as `denied`). They are never
+recorded as pending and never use up an approval the user gave the channel.
+
 ## Audit log
 
 Every bash command appends one JSONL line to the audit log:
