@@ -234,6 +234,8 @@ if (sandbox.type === "host") {
 	sandboxLabel = `docker:${sandbox.container}`;
 } else if (sandbox.type === "firecracker") {
 	sandboxLabel = `firecracker:${sandbox.agentIp}`;
+} else if (sandbox.type === "bwrap") {
+	sandboxLabel = "bwrap";
 } else {
 	sandboxLabel = "firecracker-pool";
 }

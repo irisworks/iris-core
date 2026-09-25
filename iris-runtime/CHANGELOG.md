@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `--sandbox=bwrap`: runs each channel's commands in a bubblewrap sandbox —
+  only the channel dir is writable, other channels and the runtime env are
+  hidden, network is shared. Fixes #267.
+
 ## [1.11.1] - 2026-09-09
 
 ### Fixed

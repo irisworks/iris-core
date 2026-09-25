@@ -13,11 +13,12 @@ need container/VM isolation.
 
 ## Sandboxing levels
 
-Iris's bash tool executes at one of four isolation levels (`--sandbox`):
+Iris's bash tool executes at one of five isolation levels (`--sandbox`):
 
 | Mode | Flag | Use case |
 |---|---|---|
 | Host | `--sandbox=host` | Iris herself — trusted ops, full access |
+| Bubblewrap | `--sandbox=bwrap` | Multi-tenant channels on one host — per-channel filesystem isolation, no daemon |
 | Docker | `--sandbox=docker:<name>` | Containerized sub-agents |
 | Static Firecracker | `--sandbox=firecracker:<ip>` | Persistent sub-agent at a fixed IP |
 | Dynamic pool | `--sandbox=firecracker-pool` | Fresh microVM per channel, auto-destroyed after 30 min idle |
@@ -25,6 +26,19 @@ Iris's bash tool executes at one of four isolation levels (`--sandbox`):
 Each microVM is defended in depth: KVM hardware boundary → minimal Firecracker VMM
 → jailer (chroot, uid 10000, seccomp) → per-VM `/30` TAP network → ephemeral
 rootfs destroyed with the VM.
+
+**Bubblewrap** (`apt-get install bubblewrap`) wraps every bash/read/write/edit
+call for a channel in a fresh [bwrap](https://github.com/containers/bubblewrap)
+sandbox: new mount/pid/ipc/uts namespaces, network shared (outbound APIs still
+work), `/usr`, `/bin`, `/lib`, `/etc` read-only, the workspace `skills/` dir
+read-only, and the channel's own directory as the only writable path (also the
+working directory and `$HOME`). Other channels' directories, the rest of the
+workspace (`MEMORY.md`, `events/`), and the runtime's environment variables are
+not visible, and system packages cannot be installed. This is a
+filesystem/process boundary, not a kernel-exploit boundary — use
+`firecracker-pool` where kernel-level isolation is required. Requires
+unprivileged user namespaces (on Ubuntu 24.04+, an AppArmor profile permitting
+them for `bwrap`).
 
 ## The bridge
 
