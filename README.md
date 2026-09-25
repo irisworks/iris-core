@@ -157,11 +157,12 @@ Set in `/iris/.env` (written by bootstrap) or as CLI flags (`--provider`, `--mod
 
 ## Sandboxing
 
-Iris's bash tool executes at one of four isolation levels (`--sandbox`):
+Iris's bash tool executes at one of five isolation levels (`--sandbox`):
 
 | Mode | Flag | Use case |
 |---|---|---|
 | Host | `--sandbox=host` | Iris herself — trusted ops, full access |
+| Bubblewrap | `--sandbox=bwrap` | Per-channel filesystem isolation on one host, no daemon |
 | Docker | `--sandbox=docker:<name>` | Containerized sub-agents |
 | Static Firecracker | `--sandbox=firecracker:<ip>` | Persistent sub-agent at a fixed IP |
 | Dynamic pool | `--sandbox=firecracker-pool` | Fresh microVM per channel, auto-destroyed after 30 min idle |

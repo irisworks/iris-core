@@ -217,6 +217,25 @@ both backends.
 
 ---
 
+## Scripted / CI Bootstrap
+
+`bootstrap.sh` can be driven end-to-end without any interactive prompts:
+
+- `IRIS_DIR` is overridable (defaults to `/iris`) — set it before running the
+  script to provision a second, independent install on the same host, e.g.
+  `IRIS_DIR=/iris-staging bash bootstrap.sh --setup --no-keyvault`.
+- Every value the script would otherwise prompt for — the LLM provider key,
+  Slack/Telegram/GitHub tokens, Resend/Perplexity keys, AWS Bedrock
+  credentials — is used directly with no prompt at all if the corresponding
+  env var is already set (`ANTHROPIC_API_KEY`, `AZURE_FOUNDRY_KEY`,
+  `IRIS_SLACK_APP_TOKEN`/`IRIS_SLACK_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`,
+  `GITHUB_TOKEN`, `RESEND_API_KEY`, `PERPLEXITY_API_KEY`,
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_PROFILE`/`AWS_REGION`,
+  `CUSTOM_API_KEY`/`CUSTOM_BASE_URL`/`CUSTOM_PROVIDER_NAME`). Export
+  everything a given run needs before invoking the script and it won't ask.
+
+---
+
 ## Release Tag Verification
 
 `install.sh` resolves the latest `v*` release tag and, once checked out, runs

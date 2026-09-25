@@ -14,6 +14,32 @@
   full channel turn, so a recurring job no longer grows the channel's session
   history on every firing; without the flag it falls back to today's
   full-turn behavior. Closes #253.
+- `--sandbox=bwrap`: runs each channel's commands in a bubblewrap sandbox —
+  only the channel dir is writable, other channels and the runtime env are
+  hidden, network is shared. Requires `IRIS_API_TOKEN` to protect the
+  loopback API from sandboxed commands; an enabled web UI requires its password
+  too. Fixes #267.
+
+### Changed
+
+- Mistral default model is now `codestral-2508` (Codestral 25.08, 256k
+  context), replacing the decommissioned `devstral-medium-latest` in
+  `bootstrap.sh` and `data/models.json.template`.
+
+## [1.11.1] - 2026-09-09
+
+### Fixed
+
+- `bootstrap.sh`: `IRIS_DIR` is now overridable (was hardcoded to `/iris`),
+  enabling a second install on one host. Secret/token prompts (LLM provider
+  keys, Slack/Telegram/GitHub, Resend/Perplexity, AWS Bedrock) now use an
+  already-exported env var directly instead of ignoring it and blocking on
+  interactive input. Fixes #262.
+
+## [1.11.0] - 2026-09-03
+
+### Added
+
 - `read_full(id)` tool: when a tool output is truncated (bash, or a `read`
   hitting the JSON structural-summary path), the full content is saved under
   the channel dir and the truncation notice includes an id to retrieve it
@@ -65,6 +91,11 @@
   - Model resolution is registry-only now: an unknown `provider/model`
     combination errors with a pointer to `models.json` instead of falling
     back to pi-ai's deprecated built-in catalog lookup.
+
+### Security
+
+- Bumped `fast-uri` (transitive, via `ajv`) 3.1.5 -> 3.1.7, resolving
+  host-confusion/SSRF advisories fixed upstream in 3.1.6.
 
 ## [1.10.1] - 2026-09-01
 

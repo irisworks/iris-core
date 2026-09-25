@@ -31,11 +31,36 @@
 # ============================================================
 set -euo pipefail
 
-IRIS_DIR="/iris"
+IRIS_DIR="${IRIS_DIR:-/iris}"
 # The real operating user, even when this script is invoked via `sudo bash bootstrap.sh`
 # (plain $USER gets reset to "root" by sudo in that case, which would leave iris.service
 # and /iris file ownership pointed at root instead of the actual VM user).
 TARGET_USER="${SUDO_USER:-$(id -un)}"
+
+# Secret/token env vars, captured before the "Variables written to .env" block
+# further down re-declares each of these as a plain "" local — without this
+# capture, a value already exported into the process environment (e.g. by a
+# CI job or a wrapper script) would be silently wiped before prompt_secrets()
+# ever gets a chance to use it.
+ENV_ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+ENV_OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+ENV_AZURE_FOUNDRY_KEY="${AZURE_FOUNDRY_KEY:-}"
+ENV_DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+ENV_MISTRAL_API_KEY="${MISTRAL_API_KEY:-}"
+ENV_CUSTOM_API_KEY="${CUSTOM_API_KEY:-}"
+ENV_CUSTOM_BASE_URL="${CUSTOM_BASE_URL:-}"
+ENV_CUSTOM_PROVIDER_NAME="${CUSTOM_PROVIDER_NAME:-}"
+ENV_AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
+ENV_AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
+ENV_AWS_PROFILE="${AWS_PROFILE:-}"
+ENV_AWS_REGION="${AWS_REGION:-}"
+ENV_IRIS_SLACK_APP_TOKEN="${IRIS_SLACK_APP_TOKEN:-}"
+ENV_IRIS_SLACK_BOT_TOKEN="${IRIS_SLACK_BOT_TOKEN:-}"
+ENV_TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+ENV_GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+ENV_RESEND_API_KEY="${RESEND_API_KEY:-}"
+ENV_PERPLEXITY_API_KEY="${PERPLEXITY_API_KEY:-}"
+
 REPO_URL="${REPO_URL:-}"
 IRIS_CORE_URL="${IRIS_CORE_URL:-https://github.com/irisworks/iris-core.git}"
 KV_NAME="${KV_NAME:-}"
@@ -70,13 +95,23 @@ confirm() {
   [[  "${answer,,}" == "y" ]]
 }
 prompt() {
-  local question="$1" default="${2:-}"
+  local question="$1" default="${2:-}" env_value="${3:-}"
+  if [[ -n "$env_value" ]]; then
+    log "$question → using value from environment" >&2
+    echo "$env_value"
+    return
+  fi
   local hint; [[ -n "$default" ]] && hint=" [$default]" || hint=""
   read -r -p "[iris-bootstrap] $question$hint: " answer
   echo "${answer:-$default}"
 }
 prompt_secret() {
-  local question="$1" default="${2:-}"
+  local question="$1" default="${2:-}" env_value="${3:-}"
+  if [[ -n "$env_value" ]]; then
+    log "$question → using value from environment" >&2
+    echo "$env_value"
+    return
+  fi
   local hint=""; [[ -n "$default" ]] && hint=" [Enter to keep existing key on file]"
   read -r -s -p "[iris-bootstrap] $question$hint: " answer
   echo "" >&2
@@ -399,7 +434,7 @@ prompt_secrets() {
     echo "  3) azure-foundry   — Azure AI Foundry (Azure OpenAI, Kimi)"
     echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)"
     echo "  5) deepseek        — DeepSeek V3 / R1"
-    echo "  6) mistral         — Mistral Large / Medium / Devstral"
+    echo "  6) mistral         — Codestral / Mistral Large / Medium"
     echo "  7) custom          — any other OpenAI-compatible endpoint (Kimi/Moonshot direct, self-hosted, etc.)"
     read -r -p "[iris-bootstrap] Choice [1]: " provider_choice
     case "${provider_choice:-1}" in
@@ -422,7 +457,7 @@ prompt_secrets() {
       azure-foundry)  default_model="Kimi-K2.6" ;;
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       deepseek)       default_model="deepseek-chat" ;;
-      mistral)        default_model="devstral-medium-latest" ;;
+      mistral)        default_model="codestral-2508" ;;
       custom)         default_model="" ;;
       *)              default_model="gpt-5.6-luna" ;;
     esac
@@ -447,11 +482,11 @@ prompt_secrets() {
 
   case "$IRIS_PROVIDER" in
     anthropic)
-      LLM_API_KEY=$(prompt_secret "Anthropic API key (sk-ant-...)")
+      LLM_API_KEY=$(prompt_secret "Anthropic API key (sk-ant-...)" "" "$ENV_ANTHROPIC_API_KEY")
       [[ -z "$LLM_API_KEY" ]] && die "Anthropic API key is required."
       ;;
     openai)
-      LLM_API_KEY=$(prompt_secret "OpenAI API key (sk-...)")
+      LLM_API_KEY=$(prompt_secret "OpenAI API key (sk-...)" "" "$ENV_OPENAI_API_KEY")
       [[ -z "$LLM_API_KEY" ]] && die "OpenAI API key is required."
       ;;
     azure-foundry)
@@ -469,7 +504,7 @@ prompt_secrets() {
           | head -1 | sed -E 's#https://##; s#\.cognitiveservices##' || true)
       fi
       [[ -n "$EXISTING_FOUNDRY_KEY" ]] && log "Found an existing Foundry API key on this machine — reusing it."
-      LLM_API_KEY=$(prompt_secret "Azure AI Foundry API key" "$EXISTING_FOUNDRY_KEY")
+      LLM_API_KEY=$(prompt_secret "Azure AI Foundry API key" "$EXISTING_FOUNDRY_KEY" "$ENV_AZURE_FOUNDRY_KEY")
       [[ -z "$LLM_API_KEY" ]] && die "Foundry API key is required."
       FOUNDRY_ACCOUNT=$(prompt "Azure AI Foundry account name — bare name only, not the full URL (e.g. my-account-eastus2)" "$EXISTING_FOUNDRY_ACCOUNT")
       [[ -z "$FOUNDRY_ACCOUNT" ]] && die "Foundry account name is required."
@@ -479,11 +514,11 @@ prompt_secrets() {
         log "Note: trimmed '$FOUNDRY_ACCOUNT_RAW' down to account name '$FOUNDRY_ACCOUNT' (looked like a full hostname/URL, not a bare account name)."
       ;;
     deepseek)
-      LLM_API_KEY=$(prompt_secret "DeepSeek API key (sk-...)")
+      LLM_API_KEY=$(prompt_secret "DeepSeek API key (sk-...)" "" "$ENV_DEEPSEEK_API_KEY")
       [[ -z "$LLM_API_KEY" ]] && die "DeepSeek API key is required."
       ;;
     mistral)
-      LLM_API_KEY=$(prompt_secret "Mistral API key")
+      LLM_API_KEY=$(prompt_secret "Mistral API key" "" "$ENV_MISTRAL_API_KEY")
       [[ -z "$LLM_API_KEY" ]] && die "Mistral API key is required."
       ;;
     custom)
@@ -500,11 +535,11 @@ prompt_secrets() {
         EXISTING_CUSTOM_KEY=$(az keyvault secret show --vault-name "$KV_NAME" --name "CUSTOM-API-KEY" --query value -o tsv 2>/dev/null || true)
       fi
       [[ -n "$EXISTING_CUSTOM_KEY" ]] && log "Found an existing custom-provider API key on this machine — reusing it."
-      CUSTOM_PROVIDER_NAME=$(prompt "Short name for this provider (lowercase, used as the models.json key, e.g. kimi)" "${EXISTING_CUSTOM_NAME:-kimi}")
+      CUSTOM_PROVIDER_NAME=$(prompt "Short name for this provider (lowercase, used as the models.json key, e.g. kimi)" "${EXISTING_CUSTOM_NAME:-kimi}" "$ENV_CUSTOM_PROVIDER_NAME")
       [[ -z "$CUSTOM_PROVIDER_NAME" ]] && die "Provider name is required."
-      CUSTOM_BASE_URL=$(prompt "Base URL (OpenAI-compatible, e.g. https://api.moonshot.ai/v1)" "$EXISTING_CUSTOM_BASE_URL")
+      CUSTOM_BASE_URL=$(prompt "Base URL (OpenAI-compatible, e.g. https://api.moonshot.ai/v1)" "$EXISTING_CUSTOM_BASE_URL" "$ENV_CUSTOM_BASE_URL")
       [[ -z "$CUSTOM_BASE_URL" ]] && die "Base URL is required."
-      LLM_API_KEY=$(prompt_secret "API key for $CUSTOM_PROVIDER_NAME" "$EXISTING_CUSTOM_KEY")
+      LLM_API_KEY=$(prompt_secret "API key for $CUSTOM_PROVIDER_NAME" "$EXISTING_CUSTOM_KEY" "$ENV_CUSTOM_API_KEY")
       [[ -z "$LLM_API_KEY" ]] && die "API key is required."
       ;;
     amazon-bedrock)
@@ -514,20 +549,27 @@ prompt_secrets() {
       echo "  │  2) Access key + secret                                        │"
       echo "  │  3) Named AWS profile (~/.aws/config)                          │"
       echo "  └────────────────────────────────────────────────────────────────────┘"
-      read -r -p "[iris-bootstrap] Credential method [1]: " bedrock_cred_choice
+      bedrock_cred_choice=""
+      if [[ -n "$ENV_AWS_ACCESS_KEY_ID" ]]; then
+        bedrock_cred_choice=2
+      elif [[ -n "$ENV_AWS_PROFILE" ]]; then
+        bedrock_cred_choice=3
+      else
+        read -r -p "[iris-bootstrap] Credential method [1]: " bedrock_cred_choice
+      fi
       case "${bedrock_cred_choice:-1}" in
         2)
-          AWS_ACCESS_KEY_INPUT=$(prompt_secret "AWS Access Key ID (AKIA...)")
-          AWS_SECRET_KEY_INPUT=$(prompt_secret "AWS Secret Access Key")
+          AWS_ACCESS_KEY_INPUT=$(prompt_secret "AWS Access Key ID (AKIA...)" "" "$ENV_AWS_ACCESS_KEY_ID")
+          AWS_SECRET_KEY_INPUT=$(prompt_secret "AWS Secret Access Key" "" "$ENV_AWS_SECRET_ACCESS_KEY")
           [[ -z "$AWS_ACCESS_KEY_INPUT" ]] && die "AWS Access Key ID is required."
           [[ -z "$AWS_SECRET_KEY_INPUT" ]] && die "AWS Secret Access Key is required."
           ;;
         3)
-          AWS_PROFILE_INPUT=$(prompt "AWS profile name" "default")
+          AWS_PROFILE_INPUT=$(prompt "AWS profile name" "default" "$ENV_AWS_PROFILE")
           ;;
         *) log "Using IAM instance role — no credentials needed." ;;
       esac
-      AWS_REGION_INPUT=$(prompt "AWS region for Bedrock" "us-east-1")
+      AWS_REGION_INPUT=$(prompt "AWS region for Bedrock" "us-east-1" "$ENV_AWS_REGION")
       ;;
   esac
 
@@ -535,7 +577,13 @@ prompt_secrets() {
   echo ""
   SLACK_APP_TOKEN=""
   SLACK_BOT_TOKEN=""
-  if confirm "Set up Slack integration?"; then
+  if [[ -n "$ENV_IRIS_SLACK_APP_TOKEN" && -n "$ENV_IRIS_SLACK_BOT_TOKEN" ]]; then
+    log "IRIS_SLACK_APP_TOKEN / IRIS_SLACK_BOT_TOKEN already set in the environment — using them."
+    SLACK_APP_TOKEN="$ENV_IRIS_SLACK_APP_TOKEN"
+    SLACK_BOT_TOKEN="$ENV_IRIS_SLACK_BOT_TOKEN"
+    [[ "$SLACK_APP_TOKEN" != xapp-* ]] && die "IRIS_SLACK_APP_TOKEN must start with 'xapp-'. Got: ${SLACK_APP_TOKEN:0:10}..."
+    [[ "$SLACK_BOT_TOKEN" != xoxb-* ]] && die "IRIS_SLACK_BOT_TOKEN must start with 'xoxb-'. Got: ${SLACK_BOT_TOKEN:0:10}..."
+  elif confirm "Set up Slack integration?"; then
     echo ""
     echo "  ┌─ Slack App Setup ────────────────────────────────────────────┐"
     echo "  │                                                               │"
@@ -583,32 +631,36 @@ prompt_secrets() {
   # ── Telegram ──
   echo ""
   TELEGRAM_BOT_TOKEN=""
-  if confirm "Set up Telegram integration?"; then
-    echo ""
-    echo "  ┌─ Telegram Bot Setup ────────────────────────────────────────────┐"
-    echo "  │                                                                 │"
-    echo "  │  1. Open Telegram, message  @BotFather                        │"
-    echo "  │     → confirm the handle is exactly @BotFather                │"
-    echo "  │                                                                 │"
-    echo "  │  2. Send  /newbot  and follow the prompts:                    │"
-    echo "  │     → display name (anything)                                 │"
-    echo "  │     → username (must end in 'bot' or '_bot')                  │"
-    echo "  │                                                                 │"
-    echo "  │  3. BotFather replies with your token — copy it               │"
-    echo "  │     (looks like  123456789:AAbecomeF-...)                     │"
-    echo "  │                                                                 │"
-    echo "  │  Tip: do this at web.telegram.org (or the desktop app) in a   │"
-    echo "  │  browser tab on THIS machine — Telegram syncs the BotFather    │"
-    echo "  │  chat to every device, so you can copy-paste locally instead   │"
-    echo "  │  of moving the token off your phone.                          │"
-    echo "  │                                                                 │"
-    echo "  │  Full walkthrough incl. claiming/reclaiming the bot:           │"
-    echo "  │  docs/SETUP.md#telegram-setup                                  │"
-    echo "  └─────────────────────────────────────────────────────────────────┘"
-    echo ""
-    read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
+  if [[ -n "$ENV_TELEGRAM_BOT_TOKEN" ]] || confirm "Set up Telegram integration?"; then
+    if [[ -n "$ENV_TELEGRAM_BOT_TOKEN" ]]; then
+      log "TELEGRAM_BOT_TOKEN already set in the environment — using it."
+    else
+      echo ""
+      echo "  ┌─ Telegram Bot Setup ────────────────────────────────────────────┐"
+      echo "  │                                                                 │"
+      echo "  │  1. Open Telegram, message  @BotFather                        │"
+      echo "  │     → confirm the handle is exactly @BotFather                │"
+      echo "  │                                                                 │"
+      echo "  │  2. Send  /newbot  and follow the prompts:                    │"
+      echo "  │     → display name (anything)                                 │"
+      echo "  │     → username (must end in 'bot' or '_bot')                  │"
+      echo "  │                                                                 │"
+      echo "  │  3. BotFather replies with your token — copy it               │"
+      echo "  │     (looks like  123456789:AAbecomeF-...)                     │"
+      echo "  │                                                                 │"
+      echo "  │  Tip: do this at web.telegram.org (or the desktop app) in a   │"
+      echo "  │  browser tab on THIS machine — Telegram syncs the BotFather    │"
+      echo "  │  chat to every device, so you can copy-paste locally instead   │"
+      echo "  │  of moving the token off your phone.                          │"
+      echo "  │                                                                 │"
+      echo "  │  Full walkthrough incl. claiming/reclaiming the bot:           │"
+      echo "  │  docs/SETUP.md#telegram-setup                                  │"
+      echo "  └─────────────────────────────────────────────────────────────────┘"
+      echo ""
+      read -r -p "[iris-bootstrap] Press Enter when your bot is created and token is ready..."
+    fi
     while true; do
-      TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token")
+      TELEGRAM_BOT_TOKEN=$(prompt_secret "Telegram Bot Token" "" "$ENV_TELEGRAM_BOT_TOKEN")
       [[ -z "$TELEGRAM_BOT_TOKEN" ]] && die "Telegram Bot Token is required."
       # BotFather tokens are "<numeric bot id>:<35-char hash>"; if stray text
       # landed on the same line (e.g. a label was pasted along with it), pull
@@ -633,6 +685,9 @@ prompt_secrets() {
       fi
       TG_ERR=$(echo "${TG_ME:-}" | jq -r '.description // empty' 2>/dev/null || true)
       log "⚠ Could not verify this token with Telegram${TG_ERR:+ (${TG_ERR})}."
+      # A token sourced from the environment can't be retyped — retrying would
+      # just re-fetch the same value from prompt_secret and loop forever.
+      [[ -n "$ENV_TELEGRAM_BOT_TOKEN" ]] && die "TELEGRAM_BOT_TOKEN from the environment could not be verified."
       confirm "Try a different token?" || die "Telegram Bot Token could not be verified."
     done
   else
@@ -643,17 +698,21 @@ prompt_secrets() {
   GITHUB_TOKEN=""
   IRIS_GITHUB_ORG=""
   IRIS_GITHUB_REPO=""
-  if confirm "Add GitHub token for repo access?" "n"; then
-    echo ""
-    echo "  ┌─ GitHub Token Setup ────────────────────────────────────────────┐"
-    echo "  │  1. https://github.com/settings/tokens                        │"
-    echo "  │     → Fine-grained personal access tokens → Generate new      │"
-    echo "  │  2. Permissions: Contents, Pull requests, Issues (read/write) │"
-    echo "  │  3. Copy the  github_pat_...  value                           │"
-    echo "  └────────────────────────────────────────────────────────────────────┘"
-    echo ""
-    read -r -p "[iris-bootstrap] Press Enter when your token is ready..."
-    GITHUB_TOKEN=$(prompt_secret "GitHub token (github_pat_... or ghp_...)")
+  if [[ -n "$ENV_GITHUB_TOKEN" ]] || confirm "Add GitHub token for repo access?" "n"; then
+    if [[ -n "$ENV_GITHUB_TOKEN" ]]; then
+      log "GITHUB_TOKEN already set in the environment — using it."
+    else
+      echo ""
+      echo "  ┌─ GitHub Token Setup ────────────────────────────────────────────┐"
+      echo "  │  1. https://github.com/settings/tokens                        │"
+      echo "  │     → Fine-grained personal access tokens → Generate new      │"
+      echo "  │  2. Permissions: Contents, Pull requests, Issues (read/write) │"
+      echo "  │  3. Copy the  github_pat_...  value                           │"
+      echo "  └────────────────────────────────────────────────────────────────────┘"
+      echo ""
+      read -r -p "[iris-bootstrap] Press Enter when your token is ready..."
+    fi
+    GITHUB_TOKEN=$(prompt_secret "GitHub token (github_pat_... or ghp_...)" "" "$ENV_GITHUB_TOKEN")
 
     echo ""
     echo "  This token needs a repo to push to: the one Iris commits her own"
@@ -700,13 +759,19 @@ prompt_secrets() {
 
   # ── Email (optional) ──
   RESEND_API_KEY=""
-  if confirm "Set up email sending (Resend.com)?" "n"; then
+  if [[ -n "$ENV_RESEND_API_KEY" ]]; then
+    log "RESEND_API_KEY already set in the environment — using it."
+    RESEND_API_KEY="$ENV_RESEND_API_KEY"
+  elif confirm "Set up email sending (Resend.com)?" "n"; then
     RESEND_API_KEY=$(prompt_secret "Resend API key (re_...)")
   fi
 
   # ── Web search (optional) ──
   PERPLEXITY_API_KEY=""
-  if confirm "Set up web search (Perplexity)?" "n"; then
+  if [[ -n "$ENV_PERPLEXITY_API_KEY" ]]; then
+    log "PERPLEXITY_API_KEY already set in the environment — using it."
+    PERPLEXITY_API_KEY="$ENV_PERPLEXITY_API_KEY"
+  elif confirm "Set up web search (Perplexity)?" "n"; then
     PERPLEXITY_API_KEY=$(prompt_secret "Perplexity API key (pplx-...)")
   fi
 
@@ -1004,7 +1069,7 @@ MODELJSON
       "apiKey": "MISTRAL_API_KEY",
       "compat": { "supportsStore": false },
       "models": [
-        { "id": "devstral-medium-latest", "name": "Devstral Medium",    "reasoning": false, "input": ["text"],          "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "codestral-2508",         "name": "Codestral 25.08",    "reasoning": false, "input": ["text"],          "contextWindow": 256000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
         { "id": "mistral-large-latest",   "name": "Mistral Large",      "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
         { "id": "mistral-medium-latest",  "name": "Mistral Medium 3.5", "reasoning": false, "input": ["text","image"], "contextWindow": 256000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]

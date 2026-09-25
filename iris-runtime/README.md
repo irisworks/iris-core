@@ -34,6 +34,7 @@ Options:
   --sandbox=docker:<name>     Tools run in a Docker container (sub-agents)
   --sandbox=firecracker:<ip>  Tools run in a static Firecracker microVM
   --sandbox=firecracker-pool  Fresh microVM per channel
+  --sandbox=bwrap             Per-channel bubblewrap sandbox (channel dir writable only)
   --api-port                  Internal HTTP API port (default 3000)
 ```
 

@@ -274,7 +274,12 @@ export function buildSystemPrompt(
 - Bash working directory: / (use cd or absolute paths)
 - Install tools with: apk add <package>
 - Your changes persist across sessions`
-		: `You are running directly on the host machine.
+		: sandboxConfig.type === "bwrap"
+			? `You are running in a bubblewrap sandbox on the host machine.
+- Bash working directory: ${channelPath}
+- Only ${channelPath} is writable; system directories are read-only and other workspace paths are not visible
+- You cannot install system packages`
+			: `You are running directly on the host machine.
 - Bash working directory: ${process.cwd()}
 - Be careful with system modifications`;
 
@@ -733,7 +738,7 @@ function createRunner(
 	workingDir: string,
 	modelRuntime: ModelRuntime,
 ): AgentRunner {
-	const executor = createExecutor(sandboxConfig, channelId);
+	const executor = createExecutor(sandboxConfig, channelId, { workspaceDir: workingDir, channelDir });
 	const workspaceDir = workingDir;
 	const workspacePath = executor.getWorkspacePath(workspaceDir);
 
