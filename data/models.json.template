@@ -90,11 +90,11 @@
       "compat": { "supportsStore": false },
       "models": [
         {
-          "id": "devstral-medium-latest",
-          "name": "Devstral Medium",
+          "id": "codestral-2508",
+          "name": "Codestral 25.08",
           "reasoning": false,
           "input": ["text"],
-          "contextWindow": 128000,
+          "contextWindow": 256000,
           "maxTokens": 16384,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
         },

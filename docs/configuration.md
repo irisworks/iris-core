@@ -121,16 +121,17 @@ when tool calls are present unless `reasoning_effort` is explicitly `"none"`,
 which `openai-completions` has no way to force. Do not switch it back to
 `openai-completions`.
 
-DeepSeek (`deepseek`) and Mistral (`mistral`, including Devstral) need only an
+DeepSeek (`deepseek`) and Mistral (`mistral`, including Codestral) need only an
 API key — both go through `pi-ai`'s `openai-completions` provider module,
 since Mistral's `/v1/chat/completions` endpoint is OpenAI-compatible and
 `pi-ai`'s native `mistral` provider module hangs indefinitely on every call
 (see the Fixed entry in `iris-runtime/CHANGELOG.md` — do not switch Mistral's
 `api` back to `"mistral"`). Both ship ready-to-use model entries in the
-template (`deepseek-chat` / `deepseek-reasoner`, `devstral-medium-latest` /
-`mistral-large-latest` / `mistral-medium-latest`). `mistral-medium-latest` (Mistral Medium 3.5 — 256k context window, text+image input)
-is the largest-context model in the Mistral lineup; `devstral-medium-latest` and
-`mistral-large-latest` remain selectable.
+template (`deepseek-chat` / `deepseek-reasoner`, `codestral-2508` /
+`mistral-large-latest` / `mistral-medium-latest`). `codestral-2508` (Codestral
+25.08 — 256k context window, text input) is the Mistral default;
+`mistral-medium-latest` (Mistral Medium 3.5 — 256k context, text+image input)
+and `mistral-large-latest` remain selectable.
 
 For any other OpenAI-compatible endpoint (Kimi/Moonshot direct, a self-hosted
 vLLM/Ollama gateway, etc.), pick `custom` — bootstrap asks for a short provider

@@ -8,6 +8,12 @@
   only the channel dir is writable, other channels and the runtime env are
   hidden, network is shared. Fixes #267.
 
+### Changed
+
+- Mistral default model is now `codestral-2508` (Codestral 25.08, 256k
+  context), replacing the decommissioned `devstral-medium-latest` in
+  `bootstrap.sh` and `data/models.json.template`.
+
 ## [1.11.1] - 2026-09-09
 
 ### Fixed

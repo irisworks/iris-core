@@ -434,7 +434,7 @@ prompt_secrets() {
     echo "  3) azure-foundry   — Azure AI Foundry (Azure OpenAI, Kimi)"
     echo "  4) amazon-bedrock  — AWS Bedrock (Claude, Llama, Nova)"
     echo "  5) deepseek        — DeepSeek V3 / R1"
-    echo "  6) mistral         — Mistral Large / Medium / Devstral"
+    echo "  6) mistral         — Codestral / Mistral Large / Medium"
     echo "  7) custom          — any other OpenAI-compatible endpoint (Kimi/Moonshot direct, self-hosted, etc.)"
     read -r -p "[iris-bootstrap] Choice [1]: " provider_choice
     case "${provider_choice:-1}" in
@@ -457,7 +457,7 @@ prompt_secrets() {
       azure-foundry)  default_model="Kimi-K2.6" ;;
       amazon-bedrock) default_model="us.anthropic.claude-sonnet-4-6" ;;
       deepseek)       default_model="deepseek-chat" ;;
-      mistral)        default_model="devstral-medium-latest" ;;
+      mistral)        default_model="codestral-2508" ;;
       custom)         default_model="" ;;
       *)              default_model="gpt-5.6-luna" ;;
     esac
@@ -1069,7 +1069,7 @@ MODELJSON
       "apiKey": "MISTRAL_API_KEY",
       "compat": { "supportsStore": false },
       "models": [
-        { "id": "devstral-medium-latest", "name": "Devstral Medium",    "reasoning": false, "input": ["text"],          "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "codestral-2508",         "name": "Codestral 25.08",    "reasoning": false, "input": ["text"],          "contextWindow": 256000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
         { "id": "mistral-large-latest",   "name": "Mistral Large",      "reasoning": false, "input": ["text","image"], "contextWindow": 128000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
         { "id": "mistral-medium-latest",  "name": "Mistral Medium 3.5", "reasoning": false, "input": ["text","image"], "contextWindow": 256000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
