@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { ImageContent, SystemMessage } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import {
 	AgentSession,
 	convertToLlm,
@@ -465,20 +465,6 @@ Each built-in tool requires a "label" parameter (shown to user). MCP tools (mcp_
  * on every turn. Prepended to the new user message instead, after the cached
  * history, where its churn doesn't cost anything.
  */
-/**
- * pi-agent-core 1.0 made `agent.state.systemPrompt` read-only: the transcript owns the
- * prompt via its leading system message. Replace (or insert) that message so each run
- * starts from a freshly built prompt. Declared tools on the old head are dropped on
- * purpose — the loop re-announces any difference from `agent.state.tools`.
- */
-function setLeadingSystemPrompt(agent: Agent, systemPrompt: string): void {
-	const head: SystemMessage = { role: "system", content: systemPrompt, timestamp: Date.now() };
-	const messages = agent.state.messages.slice();
-	if (messages[0]?.role === "system") messages[0] = head;
-	else messages.unshift(head);
-	agent.state.messages = messages;
-}
-
 function buildDynamicContext(memory: string, mcpStatus: McpStatusSummary | null, workspacePath: string): string {
 	return `<dynamic_context>
 ## Current Memory
@@ -917,13 +903,16 @@ Each built-in tool requires a "label" parameter (shown to user).
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
 	}
 
+	// pi-coding-agent 1.0 derives the prompt from the resource loader (agent.state.systemPrompt
+	// is read-only), so per-run rebuilds go through this variable + setActiveToolsByName().
+	let currentSystemPrompt = systemPrompt;
 	const resourceLoader: ResourceLoader = {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => systemPrompt,
+		getSystemPrompt: () => currentSystemPrompt,
 		// Required as of pi-coding-agent 0.84; the prompt isn't sourced from a
 		// file here, so there is no path to report.
 		getSystemPromptSource: () => undefined,
@@ -1342,7 +1331,10 @@ Each built-in tool requires a "label" parameter (shown to user).
 				agents,
 				profile,
 			);
-			setLeadingSystemPrompt(session.agent, systemPrompt);
+			// Re-point the loader at this run's prompt and rebuild; AgentSession patches the
+			// transcript's `preamble` section only if the text actually changed.
+			currentSystemPrompt = systemPrompt;
+			session.setActiveToolsByName(session.getActiveToolNames());
 
 			// Set up file upload function
 			setUploadFunction(async (filePath: string, title?: string) => {

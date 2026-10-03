@@ -26,6 +26,11 @@
 - Mistral default model is now `codestral-2508` (Codestral 25.08, 256k
   context), replacing the decommissioned `devstral-medium-latest` in
   `bootstrap.sh` and `data/models.json.template`.
+- Upgraded `@earendil-works/pi-agent-core`, `pi-ai` and `pi-coding-agent` from
+  0.84.2 to 1.0.0 (Node >=22.19). The per-run system prompt is now supplied
+  through the resource loader instead of the read-only
+  `agent.state.systemPrompt`. Also pulls in `undici` 8.10.2, which clears the
+  open undici security advisories. Closes #270.
 
 ## [1.11.1] - 2026-09-09
 
