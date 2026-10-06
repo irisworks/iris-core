@@ -903,13 +903,16 @@ Each built-in tool requires a "label" parameter (shown to user).
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
 	}
 
+	// pi-coding-agent 1.0 derives the prompt from the resource loader (agent.state.systemPrompt
+	// is read-only), so per-run rebuilds go through this variable + setActiveToolsByName().
+	let currentSystemPrompt = systemPrompt;
 	const resourceLoader: ResourceLoader = {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => systemPrompt,
+		getSystemPrompt: () => currentSystemPrompt,
 		// Required as of pi-coding-agent 0.84; the prompt isn't sourced from a
 		// file here, so there is no path to report.
 		getSystemPromptSource: () => undefined,
@@ -1328,7 +1331,10 @@ Each built-in tool requires a "label" parameter (shown to user).
 				agents,
 				profile,
 			);
-			session.agent.state.systemPrompt = systemPrompt;
+			// Re-point the loader at this run's prompt and rebuild; AgentSession patches the
+			// transcript's `preamble` section only if the text actually changed.
+			currentSystemPrompt = systemPrompt;
+			session.setActiveToolsByName(session.getActiveToolNames());
 
 			// Set up file upload function
 			setUploadFunction(async (filePath: string, title?: string) => {
