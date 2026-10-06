@@ -19,18 +19,23 @@ export function settle(ms = 25) {
 /**
  * Construct a SlackBot wired for synthetic dispatch:
  * - channels.json written from `channels`
- * - recording IrisHandler (calls.events / stops / compacts / resets)
+ * - recording IrisHandler (calls.events / steered / stops / compacts / resets)
  * - postMessage/postInThread stubbed and recorded (calls.posted / calls.threads)
  * - fake socket client capturing the app_mention/message handlers
  */
-export function makeBot({ channels = {}, isRunning = () => false, botUserId = "UBOT", botId = "BBOT" } = {}) {
+export function makeBot({ channels = {}, isRunning = () => false, steer = () => false, botUserId = "UBOT", botId = "BBOT" } = {}) {
 	const workingDir = mkdtempSync(join(tmpdir(), "iris-dispatch-test-"));
 	mkdirSync(join(workingDir, "meta"), { recursive: true });
 	writeFileSync(join(workingDir, "meta", "channels.json"), JSON.stringify(channels));
 
-	const calls = { events: [], stops: [], compacts: [], resets: [], verbose: [], posted: [], threads: [], updated: [] };
+	const calls = { events: [], steered: [], stops: [], compacts: [], resets: [], verbose: [], posted: [], threads: [], updated: [] };
 	const handler = {
 		isRunning,
+		steer: (event, userName) => {
+			const accepted = steer(event, userName);
+			if (accepted) calls.steered.push({ event, userName });
+			return accepted;
+		},
 		handleEvent: async (event, _bot, isEvent) => {
 			calls.events.push({ event, isEvent });
 		},

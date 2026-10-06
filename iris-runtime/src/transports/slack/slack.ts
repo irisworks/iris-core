@@ -203,6 +203,12 @@ export interface IrisHandler {
 	handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void>;
 
 	/**
+	 * Fold a user message into the channel's running turn (SYNC). Returns false
+	 * when nothing is running to steer into — the caller then enqueues it.
+	 */
+	steer(event: SlackEvent, userName?: string): boolean;
+
+	/**
 	 * Handle stop command (ASYNC)
 	 * Called when user says "stop" while Iris is running
 	 */
@@ -464,11 +470,21 @@ export class SlackBot implements ChannelTransport {
 			isBot: false,
 		});
 		slackEvent.channel = sessionChannel;
-		const queue = this.getQueue(sessionChannel);
+		this.steerOrEnqueue(slackEvent, () => this.postInThread(realChannel, threadTs, "_Too many messages queued. Please wait._"));
+	}
+
+	/**
+	 * Deliver a user message: steered into the channel's running turn when one is
+	 * in flight and nothing is already queued ahead of it (issue #272), else
+	 * enqueued as its own run — or `onFull` when the queue is at its cap.
+	 */
+	private steerOrEnqueue(event: SlackEvent, onFull: () => void): void {
+		const queue = this.getQueue(event.channel);
+		if (queue.size() === 0 && this.handler.steer(event, this.users.get(event.user)?.userName)) return;
 		if (queue.isFull()) {
-			this.postInThread(realChannel, threadTs, "_Too many messages queued. Please wait._");
+			onFull();
 		} else {
-			queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
+			queue.enqueue(() => this.handler.handleEvent(event, this));
 		}
 	}
 
@@ -1020,15 +1036,9 @@ export class SlackBot implements ChannelTransport {
 					case "session":
 						this.dispatchToSession(slackEvent, e.channel, decision.threadTs, decision.sessionId);
 						return;
-					case "chat": {
-						const queue = this.getQueue(e.channel);
-						if (queue.isFull()) {
-							this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
-						} else {
-							queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
-						}
+					case "chat":
+						this.steerOrEnqueue(slackEvent, () => this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._"));
 						return;
-					}
 				}
 			} catch (err) {
 				log.logWarning("[app_mention] handler error", err instanceof Error ? err.message : String(err));
@@ -1204,12 +1214,7 @@ export class SlackBot implements ChannelTransport {
 							}
 							return;
 						}
-						const dmQueue = this.getQueue(e.channel);
-						if (dmQueue.isFull()) {
-							this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
-						} else {
-							dmQueue.enqueue(() => this.handler.handleEvent(slackEvent, this));
-						}
+						this.steerOrEnqueue(slackEvent, () => this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._"));
 						return;
 					}
 				}

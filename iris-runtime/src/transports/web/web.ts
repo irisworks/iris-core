@@ -23,6 +23,7 @@ import { randomBytes } from "crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync, appendFileSync } from "fs";
 import { basename, join } from "path";
 import { WebSocketServer, type WebSocket } from "ws";
+import { ChannelQueue } from "../../engine/channel-queue.js";
 import * as log from "../../engine/log.js";
 import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
 import { readBody, secretMatches, secretsBackendRequest } from "../../engine/api.js";
@@ -48,8 +49,10 @@ import {
 export interface WebTransportOptions {
 	port: number;
 	workingDir: string;
-	/** Dispatch an event into the engine (wired in main.ts to engine.handleEvent) */
-	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void;
+	/** Dispatch an event into the engine (wired in main.ts to engine.handleEvent). */
+	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void | Promise<void>;
+	/** Fold a message into the channel's running turn (wired to engine.steer); false when none is running */
+	steer?: (event: TransportEvent) => boolean;
 	/** Admin actions, wired in main.ts to engine.handleStop/handleCompact/handleReset */
 	commands: {
 		stop: (channelId: string, transport: EngineTransport) => Promise<void>;
@@ -134,10 +137,13 @@ export class WebTransport implements ChannelTransport {
 
 	private readonly workingDir: string;
 	private readonly dispatch: WebTransportOptions["dispatch"];
+	private readonly steer: WebTransportOptions["steer"];
 	private readonly commands: WebTransportOptions["commands"];
 	private readonly port: number;
 	private readonly password: string | undefined;
 	private readonly sessionTokens = new Set<string>();
+	/** Per-channel FIFO used whenever a message cannot be folded into a running turn. */
+	private readonly queues = new Map<string, ChannelQueue>();
 	/** Connections currently subscribed to a given WEBUI-/SESSION- channel. */
 	private readonly connections = new Map<string, Set<WebSocket>>();
 	/** Placeholder message id for the in-flight *observed* run on a channel (see observedMessageId). */
@@ -148,6 +154,7 @@ export class WebTransport implements ChannelTransport {
 	constructor(options: WebTransportOptions) {
 		this.workingDir = options.workingDir;
 		this.dispatch = options.dispatch;
+		this.steer = options.steer;
 		this.commands = options.commands;
 		this.port = options.port;
 		this.password = process.env.IRIS_WEBUI_PASSWORD || undefined;
@@ -277,8 +284,24 @@ export class WebTransport implements ChannelTransport {
 	}
 
 	enqueueEvent(event: TransportEvent): boolean {
-		this.dispatch(event, this);
+		const queue = this.getQueue(event.channel);
+		if (queue.isFull()) {
+			log.logWarning(`[web] Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
+			return false;
+		}
+		queue.enqueue(async () => {
+			await this.dispatch(event, this);
+		});
 		return true;
+	}
+
+	private getQueue(channelId: string): ChannelQueue {
+		let queue = this.queues.get(channelId);
+		if (!queue) {
+			queue = new ChannelQueue();
+			this.queues.set(channelId, queue);
+		}
+		return queue;
 	}
 
 	createContext(event: TransportEvent, _state: ChannelState): MessageContext {
@@ -511,7 +534,13 @@ export class WebTransport implements ChannelTransport {
 		}
 
 		const ts = (Date.now() / 1000).toFixed(6);
-		this.enqueueEvent({ channel: channelId, user: "web", text: body.text, ts, attachments: body.attachments ?? [] });
+		const event: TransportEvent = { channel: channelId, user: "web", text: body.text, ts, attachments: body.attachments ?? [] };
+		// Steer into a running turn rather than start another one (issue #272) —
+		// but never past messages already waiting, to keep order.
+		if (this.getQueue(channelId).size() === 0 && this.steer?.(event)) return;
+		if (!this.enqueueEvent(event)) {
+			this.broadcast(channelId, { type: "error", message: "Too many messages queued. Please wait." });
+		}
 	}
 
 	private handleHttp(req: IncomingMessage, res: ServerResponse): void {

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Messages sent while a turn is running (Slack DMs/mentions/session threads,
+  Telegram, web UI) are folded into that turn after the in-flight tool call,
+  all waiting messages together, instead of queueing as separate runs.
+  `IRIS_STEER_MESSAGES=false` restores queueing. Closes #272.
 - `task` tool, gated on `IRIS_TASKS_ENABLED`: runs an isolated, fresh-context
   sub-agent to completion (same model/executor/tools as the caller, minus
   `task` itself) and returns only its final text — every intermediate tool

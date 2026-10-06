@@ -97,6 +97,87 @@ test("web transport: full message lifecycle (thinking -> tool -> final)", async 
 	ws.close();
 });
 
+test("web transport: a busy but non-steerable channel queues the next message", async () => {
+	const port = 19413;
+	const workingDir = makeWorkingDir();
+	const dispatched = [];
+	let releaseFirst;
+	const firstRun = new Promise((resolve) => { releaseFirst = resolve; });
+	const transport = new WebTransport({
+		port,
+		workingDir,
+		// Simulates the busy pre-prompt/compaction window: engine.steer declines,
+		// but the first dispatch has not completed yet.
+		steer: () => false,
+		dispatch: async (event) => {
+			dispatched.push(event.text);
+			if (event.text === "first") await firstRun;
+		},
+		commands: makeCommands(),
+	});
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=fifo`);
+	await new Promise((resolve) => ws.on("open", resolve));
+
+	ws.send(JSON.stringify({ type: "message", text: "first" }));
+	await settle();
+	ws.send(JSON.stringify({ type: "message", text: "second" }));
+	await settle();
+	assert.deepEqual(dispatched, ["first"], "the second message must not start a concurrent run");
+
+	releaseFirst();
+	await settle();
+	assert.deepEqual(dispatched, ["first", "second"]);
+	ws.close();
+});
+
+test("web transport: never steers past a message already waiting in the queue", async () => {
+	const port = 19414;
+	const workingDir = makeWorkingDir();
+	const dispatched = [];
+	const steered = [];
+	let steerable = false;
+	let releaseFirst;
+	const firstRun = new Promise((resolve) => { releaseFirst = resolve; });
+	const transport = new WebTransport({
+		port,
+		workingDir,
+		steer: (event) => {
+			if (steerable) steered.push(event.text);
+			return steerable;
+		},
+		dispatch: async (event) => {
+			dispatched.push(event.text);
+			if (event.text === "first") await firstRun;
+		},
+		commands: makeCommands(),
+	});
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=order`);
+	closers.push(() => ws.close());
+	await new Promise((resolve) => ws.on("open", resolve));
+
+	ws.send(JSON.stringify({ type: "message", text: "first" }));
+	await settle();
+	// "second" lands before the first run's prompt is in flight, so it queues.
+	ws.send(JSON.stringify({ type: "message", text: "second" }));
+	await settle();
+	// The prompt is now in flight, but "second" is still waiting ahead of "third".
+	steerable = true;
+	ws.send(JSON.stringify({ type: "message", text: "third" }));
+	await settle();
+
+	releaseFirst();
+	await settle();
+	assert.deepEqual(steered, [], "third must not jump ahead of the queued second");
+	assert.deepEqual(dispatched, ["first", "second", "third"]);
+	ws.close();
+});
+
 test("web transport: postMessage/updateMessage broadcast to the channel's connections", async () => {
 	const port = 19402;
 	const workingDir = makeWorkingDir();
