@@ -137,12 +137,18 @@ The endpoint's response is read as JSON; the first of `response`, `text`, or
 
 ## Queueing and overflow
 
-Each channel queues at most 5 pending messages for the LLM. This includes
-`leads` channels: under burst load, messages beyond the cap are logged with a
-warning but do not trigger a run — no notice is posted into the channel itself,
-which is often an external-facing feed. The full message text is always
-preserved in the channel's `log.jsonl`, so no lead is lost; only the automated
-response is skipped.
+Each channel queues at most 5 pending messages for the LLM. When a Slack,
+Telegram, or Web UI channel is already running a tool, ordinary user messages
+are inserted as one FIFO batch after the active tool batch completes, instead
+of waiting for the entire turn to end. This lets the agent react before it
+continues with more work while preserving parallel tool execution. Session,
+Bridge, and synthetic-event requests retain their normal turn queueing.
+
+This includes `leads` channels: under burst load, messages beyond the cap are
+logged with a warning but do not trigger a run — no notice is posted into the
+channel itself, which is often an external-facing feed. The full message text
+is always preserved in the channel's `log.jsonl`, so no lead is lost; only the
+automated response is skipped.
 
 ## Sessions
 

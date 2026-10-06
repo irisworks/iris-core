@@ -4,6 +4,11 @@
 
 ### Added
 
+- Messages received in busy Slack, Telegram, and Web UI channels now join the
+  active turn immediately after its current tool batch completes. Multiple
+  waiting messages remain FIFO-ordered and are supplied to the model together;
+  the existing five-message backpressure limit still applies. Fixes #272.
+
 - `task` tool, gated on `IRIS_TASKS_ENABLED`: runs an isolated, fresh-context
   sub-agent to completion (same model/executor/tools as the caller, minus
   `task` itself) and returns only its final text — every intermediate tool
