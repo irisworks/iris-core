@@ -155,6 +155,8 @@ registerPromptProfile(telegramPromptProfile);
 export interface IrisTelegramHandler {
 	isRunning(channelId: string): boolean;
 	handleEvent(event: TelegramEvent, bot: TelegramBot, isEvent?: boolean): Promise<void>;
+	/** Fold a user message into the running turn; false when there's none to steer into. */
+	steer(event: TelegramEvent): boolean;
 	handleStop(channelId: string, bot: TelegramBot): Promise<void>;
 	handleCompact(channelId: string, bot: TelegramBot): Promise<void>;
 	handleReset(channelId: string, bot: TelegramBot): Promise<void>;
@@ -754,15 +756,6 @@ export class TelegramBot implements ChannelTransport {
 		return queue;
 	}
 
-	/** Route a busy interactive chat to engine steering instead of its turn FIFO. */
-	private steerIfRunning(event: TelegramEvent): boolean {
-		if (!event.channel.startsWith("SESSION-") && this.handler.isRunning(event.channel)) {
-			void this.handler.handleEvent(event, this);
-			return true;
-		}
-		return false;
-	}
-
 	// ==========================================================================
 	// Private — long poll loop
 	// ==========================================================================
@@ -942,8 +935,10 @@ export class TelegramBot implements ChannelTransport {
 			attachments,
 		};
 
-		if (this.steerIfRunning(event)) return;
 		const queue = this.getQueue(channelId);
+		// Steer into a running turn rather than queue a run of its own (issue
+		// #272) — but never past messages already waiting, to keep order.
+		if (queue.size() === 0 && this.handler.steer(event)) return;
 		if (queue.isFull()) {
 			await this.postMessage(channelId, "_Too many messages queued. Please wait._");
 		} else {

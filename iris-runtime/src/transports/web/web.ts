@@ -50,6 +50,8 @@ export interface WebTransportOptions {
 	workingDir: string;
 	/** Dispatch an event into the engine (wired in main.ts to engine.handleEvent) */
 	dispatch: (event: TransportEvent, transport: ChannelTransport, isEvent?: boolean) => void;
+	/** Fold a message into the channel's running turn (wired to engine.steer); false when none is running */
+	steer?: (event: TransportEvent) => boolean;
 	/** Admin actions, wired in main.ts to engine.handleStop/handleCompact/handleReset */
 	commands: {
 		stop: (channelId: string, transport: EngineTransport) => Promise<void>;
@@ -134,6 +136,7 @@ export class WebTransport implements ChannelTransport {
 
 	private readonly workingDir: string;
 	private readonly dispatch: WebTransportOptions["dispatch"];
+	private readonly steer: WebTransportOptions["steer"];
 	private readonly commands: WebTransportOptions["commands"];
 	private readonly port: number;
 	private readonly password: string | undefined;
@@ -148,6 +151,7 @@ export class WebTransport implements ChannelTransport {
 	constructor(options: WebTransportOptions) {
 		this.workingDir = options.workingDir;
 		this.dispatch = options.dispatch;
+		this.steer = options.steer;
 		this.commands = options.commands;
 		this.port = options.port;
 		this.password = process.env.IRIS_WEBUI_PASSWORD || undefined;
@@ -511,7 +515,10 @@ export class WebTransport implements ChannelTransport {
 		}
 
 		const ts = (Date.now() / 1000).toFixed(6);
-		this.enqueueEvent({ channel: channelId, user: "web", text: body.text, ts, attachments: body.attachments ?? [] });
+		const event: TransportEvent = { channel: channelId, user: "web", text: body.text, ts, attachments: body.attachments ?? [] };
+		// Steer into a running turn rather than start another one (issue #272).
+		if (this.steer?.(event)) return;
+		this.enqueueEvent(event);
 	}
 
 	private handleHttp(req: IncomingMessage, res: ServerResponse): void {

@@ -208,6 +208,7 @@ const handler: IrisHandler = {
 	handleReset: (channelId, slack) => engine.handleReset(channelId, slack),
 	handleVerboseCommand: (channelId, slack, action) => engine.handleVerboseCommand(channelId, slack, action),
 	handleEvent: (event, slack, isEvent) => engine.handleEvent(event, slack, isEvent),
+	steer: (event, userName) => engine.steer(event, userName),
 };
 
 // ============================================================================
@@ -221,6 +222,7 @@ const telegramHandler: IrisTelegramHandler = {
 	handleReset: (channelId, bot) => engine.handleReset(channelId, bot),
 	handleVerboseCommand: (channelId, bot, action) => engine.handleVerboseCommand(channelId, bot, action),
 	handleEvent: (event, bot, isEvent) => engine.handleEvent(event, bot, isEvent),
+	steer: (event) => engine.steer(event),
 };
 
 // ============================================================================
@@ -293,6 +295,7 @@ const webTransport = webuiPort > 0
 		port: webuiPort,
 		workingDir,
 		dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
+		steer: (event) => engine.steer(event),
 		commands: {
 			stop: (channelId, transport) => engine.handleStop(channelId, transport),
 			compact: (channelId, transport) => engine.handleCompact(channelId, transport),

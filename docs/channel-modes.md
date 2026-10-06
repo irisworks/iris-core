@@ -137,18 +137,23 @@ The endpoint's response is read as JSON; the first of `response`, `text`, or
 
 ## Queueing and overflow
 
-Each channel queues at most 5 pending messages for the LLM. When a Slack,
-Telegram, or Web UI channel is already running a tool, ordinary user messages
-are inserted as one FIFO batch after the active tool batch completes, instead
-of waiting for the entire turn to end. This lets the agent react before it
-continues with more work while preserving parallel tool execution. Session,
-Bridge, and synthetic-event requests retain their normal turn queueing.
+A message sent while Iris is mid-turn in the same conversation doesn't wait for
+a turn of its own: it is folded into the running turn as soon as the current
+tool call finishes, before the next model call. Every message that arrived in
+the meantime is delivered together, so Iris can change course without being
+stopped first. This applies to direct and mentioned messages on Slack (including
+interactive-thread sessions), Telegram and the web UI. Scheduled events, `leads`
+feeds and session-API calls still queue as separate runs. If the turn is stopped
+or fails before a folded-in message is delivered, Slack and Telegram pick it up
+from the channel history on the next run. Set `IRIS_STEER_MESSAGES=false` to always queue
+instead.
 
-This includes `leads` channels: under burst load, messages beyond the cap are
-logged with a warning but do not trigger a run — no notice is posted into the
-channel itself, which is often an external-facing feed. The full message text
-is always preserved in the channel's `log.jsonl`, so no lead is lost; only the
-automated response is skipped.
+Each channel queues at most 5 pending messages for the LLM. This includes
+`leads` channels: under burst load, messages beyond the cap are logged with a
+warning but do not trigger a run — no notice is posted into the channel itself,
+which is often an external-facing feed. The full message text is always
+preserved in the channel's `log.jsonl`, so no lead is lost; only the automated
+response is skipped.
 
 ## Sessions
 

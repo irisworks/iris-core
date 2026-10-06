@@ -54,6 +54,13 @@ export interface PendingMessage {
 	timestamp: number;
 }
 
+/** A user message to fold into a running turn — see AgentRunner.steer(). */
+export interface SteerMessage {
+	text: string;
+	userName?: string;
+	attachments?: { local: string }[];
+}
+
 export interface AgentRunner {
 	run(
 		ctx: MessageContext,
@@ -61,9 +68,14 @@ export interface AgentRunner {
 		pendingMessages?: PendingMessage[],
 		verbose?: boolean,
 	): Promise<{ stopReason: string; errorMessage?: string }>;
-	/** Queue a user message into the active run's next safe agent-loop boundary. */
-	steer(message: PendingMessage): boolean;
 	abort(): void;
+	/**
+	 * Fold a user message into the turn currently in flight (issue #272). It is
+	 * delivered once the in-flight tool batch finishes, together with anything
+	 * else steered in meanwhile, before the next LLM call. Returns false when no
+	 * prompt is in flight — the caller should queue the message as its own run.
+	 */
+	steer(message: SteerMessage): boolean;
 	/** Summarise old messages into a single compaction entry and replace in-context */
 	compact(): Promise<{ tokensBefore: number } | null>;
 	/** Wipe all message history so the next prompt starts with a blank slate */
@@ -895,27 +907,10 @@ Each built-in tool requires a "label" parameter (shown to user).
 		// cache off cache_control breakpoints instead. Channel id is a stable,
 		// natural session boundary since each channel gets its own runner/history.
 		sessionId: channelId,
+		// Messages steered into a running turn (runner.steer) are delivered all
+		// together after the in-flight tool batch, not one per LLM call.
 		steeringMode: "all",
 	});
-
-	const MAX_STEERING_MESSAGES = 5;
-	const steeringMessages = new WeakSet<object>();
-	let steeringCount = 0;
-	const steer = (message: PendingMessage): boolean => {
-		if (steeringCount >= MAX_STEERING_MESSAGES) return false;
-		const attachments = message.attachments.length > 0
-			? `\n\n<attachments>\n${message.attachments.map((attachment) => attachment.local).join("\n")}\n</attachments>`
-			: "";
-		const queuedMessage = {
-			role: "user" as const,
-			content: [{ type: "text" as const, text: `[${new Date(message.timestamp).toISOString()}] [${message.userName || "unknown"}]: ${message.text}${attachments}` }],
-			timestamp: message.timestamp,
-		};
-		steeringMessages.add(queuedMessage);
-		steeringCount++;
-		agent.steer(queuedMessage);
-		return true;
-	};
 
 	// Load existing messages
 	const loadedSession = sessionManager.buildSessionContext();
@@ -994,9 +989,6 @@ Each built-in tool requires a "label" parameter (shown to user).
 		// run's output). ctx.setStatus stays unconditional — for a BRIDGE-
 		// channel the engine forwards it to the waiting caller as a status line.
 		const isHeadlessChannel = channelId.startsWith("SESSION-") || channelId.startsWith("BRIDGE-");
-		if (event.type === "message_start" && steeringMessages.has(event.message as object)) {
-			steeringCount--;
-		}
 
 		if (event.type === "tool_execution_start") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
@@ -1282,8 +1274,122 @@ Each built-in tool requires a "label" parameter (shown to user).
 	// raced IRIS_TASK_MAX_MS and the task kept running (and billing) regardless.
 	let currentTaskAbortController: AbortController | undefined;
 
+	/**
+	 * Build one timestamped user message — "[YYYY-MM-DD HH:MM:SS+HH:MM] [username]: text"
+	 * plus attachment tags and image content. Shared by run() and steer() so a
+	 * steered message reads exactly like a turn's own (and dedups the same way
+	 * against log.jsonl in syncLogToSessionManager).
+	 */
+	async function buildUserInput(
+		message: SteerMessage,
+		store: ChannelStore,
+		attachmentsTagName: string,
+	): Promise<{ text: string; images: ImageContent[] }> {
+		const now = new Date();
+		const pad = (n: number) => n.toString().padStart(2, "0");
+		const offset = -now.getTimezoneOffset();
+		const offsetSign = offset >= 0 ? "+" : "-";
+		const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
+		const offsetMins = pad(Math.abs(offset) % 60);
+		const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
+		let userMessage = `[${timestamp}] [${message.userName || "unknown"}]: ${message.text}`;
+
+		const imageAttachments: ImageContent[] = [];
+		const nonImagePaths: string[] = [];
+		const droppedImagePaths: string[] = [];
+		const unavailablePaths: string[] = [];
+
+		const availableAttachments: { fullPath: string; local: string }[] = [];
+		for (const a of message.attachments || []) {
+			const fullPath = `${workspacePath}/${a.local}`;
+
+			// Check availability before anything else — a Slack file that hasn't
+			// finished downloading (or failed) looks identical to a genuine text
+			// attachment if we only branch on mimeType, and silently handing over
+			// a path that isn't there is worse than saying so (the bound-await in
+			// ChannelStore.processAttachments()'s `ready` promise makes this the
+			// exception, not the common case, but it can still time out).
+			if (!existsSync(fullPath)) {
+				unavailablePaths.push(
+					`${fullPath} (${store.didDownloadFail(a.local) ? "download failed" : "still downloading — try again shortly"})`,
+				);
+				continue;
+			}
+
+			availableAttachments.push({ fullPath, local: a.local });
+		}
+
+		// Sniff all available attachments concurrently — each is an independent
+		// file read, so there's no reason to pay this latency once per attachment.
+		const mimeTypes = await Promise.all(
+			availableAttachments.map(({ fullPath }) => detectImageMimeTypeFromFile(fullPath)),
+		);
+
+		for (let i = 0; i < availableAttachments.length; i++) {
+			const { fullPath, local } = availableAttachments[i];
+			const mimeType = mimeTypes[i];
+			if (mimeType) {
+				if (!supportsImageInput) {
+					// Model can't accept image input — don't hand it an ImageContent
+					// block pi-ai will silently drop downstream (see model.input
+					// filtering in every provider module). Tell the model instead.
+					droppedImagePaths.push(fullPath);
+					continue;
+				}
+				try {
+					const rawData = readFileSync(fullPath).toString("base64");
+					// Downscale oversized images (e.g. an unresized phone photo) before
+					// they reach the model — base64 inflates the encoded size ~33%, and
+					// an unresized image can exceed a provider's per-image payload limit
+					// outright, failing the whole turn. Undefined means it couldn't be
+					// decoded/shrunk under the ceiling; send the original and let the
+					// provider decide rather than dropping the attachment entirely.
+					const resized = await resizeImageIfNeededAsync(rawData, mimeType);
+					if (resized?.wasResized) {
+						log.logInfo(
+							`[${channelId}] Resized image attachment ${local} to ${resized.width}x${resized.height}`,
+						);
+					}
+					imageAttachments.push({
+						type: "image",
+						mimeType: resized?.mimeType ?? mimeType,
+						data: resized?.data ?? rawData,
+					});
+				} catch {
+					nonImagePaths.push(fullPath);
+				}
+			} else {
+				nonImagePaths.push(fullPath);
+			}
+		}
+
+		if (unavailablePaths.length > 0) {
+			userMessage += `\n\n<unavailable_attachments>\n${unavailablePaths.join("\n")}\n</unavailable_attachments>`;
+		}
+
+		if (droppedImagePaths.length > 0) {
+			log.logWarning(
+				`[${channelId}] Dropping ${droppedImagePaths.length} image attachment(s): model ${provider}/${modelId} does not accept image input`,
+				droppedImagePaths.join(", "),
+			);
+			userMessage += `\n\n<dropped_image_attachments reason="current model '${modelId}' does not accept image input">\n${droppedImagePaths.join("\n")}\n</dropped_image_attachments>`;
+		}
+
+		if (nonImagePaths.length > 0) {
+			userMessage += `\n\n<${attachmentsTagName}>\n${nonImagePaths.join("\n")}\n</${attachmentsTagName}>`;
+		}
+
+		return { text: userMessage, images: imageAttachments };
+	}
+
+	// Set only while run() has a prompt in flight — what steer() needs to build a
+	// message the way run() does. Null means steer() declines (issue #272).
+	let steerTarget: { store: ChannelStore; attachmentsTagName: string } | null = null;
+	// steer() calls still building their message (attachment reads/resizes);
+	// run() settles these before checking for undelivered steers.
+	const pendingSteers = new Set<Promise<void>>();
+
 	return {
-		steer,
 		async run(
 			ctx: MessageContext,
 			store: ChannelStore,
@@ -1462,102 +1568,10 @@ Each built-in tool requires a "label" parameter (shown to user).
 			log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
 			log.logInfo(`Channels: ${ctx.channels.length}, Users: ${ctx.users.length}`);
 
-			// Build user message with timestamp and username prefix
-			// Format: "[YYYY-MM-DD HH:MM:SS+HH:MM] [username]: message" so LLM knows when and who
-			const now = new Date();
-			const pad = (n: number) => n.toString().padStart(2, "0");
-			const offset = -now.getTimezoneOffset();
-			const offsetSign = offset >= 0 ? "+" : "-";
-			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
-			const offsetMins = pad(Math.abs(offset) % 60);
-			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
 			const dynamicContext = buildDynamicContext(memory, mcpManager.getStatus(), workspacePath);
-			let userMessage = `${dynamicContext}\n\n[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
-
-			const imageAttachments: ImageContent[] = [];
-			const nonImagePaths: string[] = [];
-			const droppedImagePaths: string[] = [];
-			const unavailablePaths: string[] = [];
-
-			const availableAttachments: { fullPath: string; local: string }[] = [];
-			for (const a of ctx.message.attachments || []) {
-				const fullPath = `${workspacePath}/${a.local}`;
-
-				// Check availability before anything else — a Slack file that hasn't
-				// finished downloading (or failed) looks identical to a genuine text
-				// attachment if we only branch on mimeType, and silently handing over
-				// a path that isn't there is worse than saying so (the bound-await in
-				// ChannelStore.processAttachments()'s `ready` promise makes this the
-				// exception, not the common case, but it can still time out).
-				if (!existsSync(fullPath)) {
-					unavailablePaths.push(
-						`${fullPath} (${store.didDownloadFail(a.local) ? "download failed" : "still downloading — try again shortly"})`,
-					);
-					continue;
-				}
-
-				availableAttachments.push({ fullPath, local: a.local });
-			}
-
-			// Sniff all available attachments concurrently — each is an independent
-			// file read, so there's no reason to pay this latency once per attachment.
-			const mimeTypes = await Promise.all(
-				availableAttachments.map(({ fullPath }) => detectImageMimeTypeFromFile(fullPath)),
-			);
-
-			for (let i = 0; i < availableAttachments.length; i++) {
-				const { fullPath, local } = availableAttachments[i];
-				const mimeType = mimeTypes[i];
-				if (mimeType) {
-					if (!supportsImageInput) {
-						// Model can't accept image input — don't hand it an ImageContent
-						// block pi-ai will silently drop downstream (see model.input
-						// filtering in every provider module). Tell the model instead.
-						droppedImagePaths.push(fullPath);
-						continue;
-					}
-					try {
-						const rawData = readFileSync(fullPath).toString("base64");
-						// Downscale oversized images (e.g. an unresized phone photo) before
-						// they reach the model — base64 inflates the encoded size ~33%, and
-						// an unresized image can exceed a provider's per-image payload limit
-						// outright, failing the whole turn. Undefined means it couldn't be
-						// decoded/shrunk under the ceiling; send the original and let the
-						// provider decide rather than dropping the attachment entirely.
-						const resized = await resizeImageIfNeededAsync(rawData, mimeType);
-						if (resized?.wasResized) {
-							log.logInfo(
-								`[${channelId}] Resized image attachment ${local} to ${resized.width}x${resized.height}`,
-							);
-						}
-						imageAttachments.push({
-							type: "image",
-							mimeType: resized?.mimeType ?? mimeType,
-							data: resized?.data ?? rawData,
-						});
-					} catch {
-						nonImagePaths.push(fullPath);
-					}
-				} else {
-					nonImagePaths.push(fullPath);
-				}
-			}
-
-			if (unavailablePaths.length > 0) {
-				userMessage += `\n\n<unavailable_attachments>\n${unavailablePaths.join("\n")}\n</unavailable_attachments>`;
-			}
-
-			if (droppedImagePaths.length > 0) {
-				log.logWarning(
-					`[${channelId}] Dropping ${droppedImagePaths.length} image attachment(s): model ${provider}/${modelId} does not accept image input`,
-					droppedImagePaths.join(", "),
-				);
-				userMessage += `\n\n<dropped_image_attachments reason="current model '${modelId}' does not accept image input">\n${droppedImagePaths.join("\n")}\n</dropped_image_attachments>`;
-			}
-
-			if (nonImagePaths.length > 0) {
-				userMessage += `\n\n<${profile.attachmentsTagName}>\n${nonImagePaths.join("\n")}\n</${profile.attachmentsTagName}>`;
-			}
+			const userInput = await buildUserInput(ctx.message, store, profile.attachmentsTagName);
+			const userMessage = `${dynamicContext}\n\n${userInput.text}`;
+			const imageAttachments = userInput.images;
 
 			// Debug: write context to last_prompt.jsonl. Nothing in the request path reads
 			// this back — it's a post-hoc inspection aid, so keep it entirely off the hot
@@ -1636,44 +1650,65 @@ Each built-in tool requires a "label" parameter (shown to user).
 			const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 			let lastError: Error | undefined;
-			for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-				let llmTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
-				const llmTimeout = new Promise<never>((_, reject) => {
-					llmTimeoutHandle = setTimeout(() => {
-						log.logWarning(`[${channelId}] LLM timeout after ${LLM_TIMEOUT_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})`);
-						session.agent.abort();
-						reject(new Error(`LLM response timeout after ${LLM_TIMEOUT_MS / 1000}s`));
-					}, LLM_TIMEOUT_MS);
-				});
-				try {
-					await Promise.race([
-						session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined),
-						llmTimeout,
-					]);
-					lastError = undefined;
-					break; // success
-				} catch (err) {
-					lastError = err instanceof Error ? err : new Error(String(err));
-					const msg = lastError.message.toLowerCase();
-					const isRetryable = msg.includes("timeout") || msg.includes("429") || msg.includes("econnreset") || msg.includes("fetch failed") || msg.includes("rate limit") || msg.includes("throttled");
-					if (!isRetryable || attempt === MAX_RETRIES) {
-						await finalizeTrace(lastError);
-						throw lastError; // final failure — will be caught below
+			// Messages arriving while the prompt is in flight are steered into it
+			// (issue #272) instead of waiting in the channel queue for their own run.
+			steerTarget = { store, attachmentsTagName: profile.attachmentsTagName };
+			try {
+				for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+					let llmTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+					const llmTimeout = new Promise<never>((_, reject) => {
+						llmTimeoutHandle = setTimeout(() => {
+							log.logWarning(`[${channelId}] LLM timeout after ${LLM_TIMEOUT_MS / 1000}s (attempt ${attempt}/${MAX_RETRIES})`);
+							session.agent.abort();
+							reject(new Error(`LLM response timeout after ${LLM_TIMEOUT_MS / 1000}s`));
+						}, LLM_TIMEOUT_MS);
+					});
+					try {
+						await Promise.race([
+							session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined),
+							llmTimeout,
+						]);
+						lastError = undefined;
+						break; // success
+					} catch (err) {
+						lastError = err instanceof Error ? err : new Error(String(err));
+						const msg = lastError.message.toLowerCase();
+						const isRetryable = msg.includes("timeout") || msg.includes("429") || msg.includes("econnreset") || msg.includes("fetch failed") || msg.includes("rate limit") || msg.includes("throttled");
+						if (!isRetryable || attempt === MAX_RETRIES) {
+							await finalizeTrace(lastError);
+							throw lastError; // final failure — will be caught below
+						}
+						const delay = RETRY_BASE_MS * (2 ** (attempt - 1)) + Math.random() * 1000;
+						log.logWarning(`[${channelId}] LLM attempt ${attempt} failed, retrying in ${Math.round(delay)}ms: ${lastError.message}`);
+						if (!channelId.startsWith("SESSION-")) {
+							await ctx.replaceMessage(`_Retrying (${attempt}/${MAX_RETRIES})..._`);
+						}
+						await sleep(delay);
+					} finally {
+						clearTimeout(llmTimeoutHandle);
 					}
-					const delay = RETRY_BASE_MS * (2 ** (attempt - 1)) + Math.random() * 1000;
-					log.logWarning(`[${channelId}] LLM attempt ${attempt} failed, retrying in ${Math.round(delay)}ms: ${lastError.message}`);
-					if (!channelId.startsWith("SESSION-")) {
-						await ctx.replaceMessage(`_Retrying (${attempt}/${MAX_RETRIES})..._`);
-					}
-					await sleep(delay);
-				} finally {
-					clearTimeout(llmTimeoutHandle);
 				}
+			} finally {
+				steerTarget = null;
+				await Promise.all(pendingSteers);
+				// A failed run leaves its undelivered steers queued; drop them so the
+				// next run doesn't send them on top of its log.jsonl sync, which
+				// already replays them as history.
+				if (lastError) session.agent.clearAllQueues();
 			}
 			if (lastError) {
 				await finalizeTrace(lastError);
 				throw lastError;
 			}
+
+			// A message steered in after the agent's last steering poll is still
+			// queued — answer it now rather than at the start of some later run.
+			// A stopped or errored run drops it instead (log.jsonl sync replays it next run).
+			const runEndedCleanly = () => runState.stopReason !== "aborted" && runState.stopReason !== "error";
+			while (runEndedCleanly() && session.agent.hasQueuedMessages()) {
+				await session.agent.continue();
+			}
+			if (!runEndedCleanly()) session.agent.clearAllQueues();
 
 			// Wait for queued messages
 			await queueChain;
@@ -1768,6 +1803,22 @@ Each built-in tool requires a "label" parameter (shown to user).
 			runState.trace = undefined;
 
 			return { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
+		},
+
+		steer(message: SteerMessage): boolean {
+			const target = steerTarget;
+			if (!target) return false;
+			log.logInfo(`[${channelId}] Steering message into running turn: ${message.text.substring(0, 50)}`);
+			const pending: Promise<void> = buildUserInput(message, target.store, target.attachmentsTagName)
+				.then(({ text, images }) => {
+					session.agent.steer({ role: "user", content: [{ type: "text", text }, ...images], timestamp: Date.now() });
+				})
+				.catch((err) => {
+					log.logWarning(`[${channelId}] Failed to steer message`, err instanceof Error ? err.message : String(err));
+				})
+				.finally(() => pendingSteers.delete(pending));
+			pendingSteers.add(pending);
+			return true;
 		},
 
 		abort(): void {
