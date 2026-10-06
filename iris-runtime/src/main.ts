@@ -294,7 +294,7 @@ const webTransport = webuiPort > 0
 	? new WebTransport({
 		port: webuiPort,
 		workingDir,
-		dispatch: (event, transport, isEvent) => void engine.handleEvent(event, transport, isEvent),
+		dispatch: (event, transport, isEvent) => engine.handleEvent(event, transport, isEvent),
 		steer: (event) => engine.steer(event),
 		commands: {
 			stop: (channelId, transport) => engine.handleStop(channelId, transport),

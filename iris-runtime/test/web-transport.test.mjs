@@ -97,6 +97,42 @@ test("web transport: full message lifecycle (thinking -> tool -> final)", async 
 	ws.close();
 });
 
+test("web transport: a busy but non-steerable channel queues the next message", async () => {
+	const port = 19413;
+	const workingDir = makeWorkingDir();
+	const dispatched = [];
+	let releaseFirst;
+	const firstRun = new Promise((resolve) => { releaseFirst = resolve; });
+	const transport = new WebTransport({
+		port,
+		workingDir,
+		// Simulates the busy pre-prompt/compaction window: engine.steer declines,
+		// but the first dispatch has not completed yet.
+		steer: () => false,
+		dispatch: async (event) => {
+			dispatched.push(event.text);
+			if (event.text === "first") await firstRun;
+		},
+		commands: makeCommands(),
+	});
+	transport.start();
+	closers.push(() => transport.stop());
+
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?thread=fifo`);
+	await new Promise((resolve) => ws.on("open", resolve));
+
+	ws.send(JSON.stringify({ type: "message", text: "first" }));
+	await settle();
+	ws.send(JSON.stringify({ type: "message", text: "second" }));
+	await settle();
+	assert.deepEqual(dispatched, ["first"], "the second message must not start a concurrent run");
+
+	releaseFirst();
+	await settle();
+	assert.deepEqual(dispatched, ["first", "second"]);
+	ws.close();
+});
+
 test("web transport: postMessage/updateMessage broadcast to the channel's connections", async () => {
 	const port = 19402;
 	const workingDir = makeWorkingDir();
