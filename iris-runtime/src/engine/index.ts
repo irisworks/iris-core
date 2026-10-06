@@ -163,6 +163,26 @@ export async function createEngine(config: EngineConfig): Promise<Engine> {
 
 		async handleEvent(event: TransportEvent, transport: EngineTransport, isEvent?: boolean): Promise<void> {
 			const state = getState(event.channel);
+			// Interactive messages that arrive mid-turn should influence the active
+			// agent as soon as its current tool batch ends, rather than waiting for
+			// the entire turn. Keep synthetic events and SESSION/BRIDGE requests on
+			// their established FIFO/request-response paths.
+			if (
+				state.running &&
+				!isEvent &&
+				!event.channel.startsWith("SESSION-") &&
+				!event.channel.startsWith("BRIDGE-")
+			) {
+				const ctx = transport.createContext(event, state);
+				const accepted = state.runner.steer({
+					userName: ctx.message.userName ?? ctx.message.user,
+					text: ctx.message.text,
+					attachments: ctx.message.attachments,
+					timestamp: Date.now(),
+				});
+				if (!accepted) await transport.postMessage(event.channel, "_Too many messages queued. Please wait._");
+				return;
+			}
 
 			// A scheduled event created with `--as-task` (skills/schedule) carries
 			// runAsTask through EventsWatcher (engine/events.ts). Route it through

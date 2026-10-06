@@ -61,6 +61,8 @@ export interface AgentRunner {
 		pendingMessages?: PendingMessage[],
 		verbose?: boolean,
 	): Promise<{ stopReason: string; errorMessage?: string }>;
+	/** Queue a user message into the active run's next safe agent-loop boundary. */
+	steer(message: PendingMessage): boolean;
 	abort(): void;
 	/** Summarise old messages into a single compaction entry and replace in-context */
 	compact(): Promise<{ tokensBefore: number } | null>;
@@ -893,7 +895,27 @@ Each built-in tool requires a "label" parameter (shown to user).
 		// cache off cache_control breakpoints instead. Channel id is a stable,
 		// natural session boundary since each channel gets its own runner/history.
 		sessionId: channelId,
+		steeringMode: "all",
 	});
+
+	const MAX_STEERING_MESSAGES = 5;
+	const steeringMessages = new WeakSet<object>();
+	let steeringCount = 0;
+	const steer = (message: PendingMessage): boolean => {
+		if (steeringCount >= MAX_STEERING_MESSAGES) return false;
+		const attachments = message.attachments.length > 0
+			? `\n\n<attachments>\n${message.attachments.map((attachment) => attachment.local).join("\n")}\n</attachments>`
+			: "";
+		const queuedMessage = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: `[${new Date(message.timestamp).toISOString()}] [${message.userName || "unknown"}]: ${message.text}${attachments}` }],
+			timestamp: message.timestamp,
+		};
+		steeringMessages.add(queuedMessage);
+		steeringCount++;
+		agent.steer(queuedMessage);
+		return true;
+	};
 
 	// Load existing messages
 	const loadedSession = sessionManager.buildSessionContext();
@@ -972,6 +994,9 @@ Each built-in tool requires a "label" parameter (shown to user).
 		// run's output). ctx.setStatus stays unconditional — for a BRIDGE-
 		// channel the engine forwards it to the waiting caller as a status line.
 		const isHeadlessChannel = channelId.startsWith("SESSION-") || channelId.startsWith("BRIDGE-");
+		if (event.type === "message_start" && steeringMessages.has(event.message as object)) {
+			steeringCount--;
+		}
 
 		if (event.type === "tool_execution_start") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_start" };
@@ -1258,6 +1283,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 	let currentTaskAbortController: AbortController | undefined;
 
 	return {
+		steer,
 		async run(
 			ctx: MessageContext,
 			store: ChannelStore,

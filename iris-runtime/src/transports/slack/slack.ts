@@ -906,6 +906,15 @@ export class SlackBot implements ChannelTransport {
 		return queue;
 	}
 
+	/** Route a busy interactive channel to engine steering instead of waiting in its FIFO. */
+	private steerIfRunning(event: SlackEvent): boolean {
+		if (!event.channel.startsWith("SESSION-") && this.handler.isRunning(event.channel)) {
+			void this.handler.handleEvent(event, this);
+			return true;
+		}
+		return false;
+	}
+
 	/** False the first time channel:ts is seen (and records it); true on any redelivery within the next 60s. */
 	private alreadyHandled(channel: string, ts: string): boolean {
 		const key = `${channel}:${ts}`;
@@ -1021,6 +1030,7 @@ export class SlackBot implements ChannelTransport {
 						this.dispatchToSession(slackEvent, e.channel, decision.threadTs, decision.sessionId);
 						return;
 					case "chat": {
+						if (this.steerIfRunning(slackEvent)) return;
 						const queue = this.getQueue(e.channel);
 						if (queue.isFull()) {
 							this.postMessage(e.channel, "_Too many messages queued. Say `stop` to cancel._");
@@ -1193,6 +1203,7 @@ export class SlackBot implements ChannelTransport {
 						this.dispatchToSession(slackEvent, e.channel, decision.threadTs, decision.sessionId);
 						return;
 					case "chat": {
+						if (this.steerIfRunning(slackEvent)) return;
 						if (!isDM) {
 							// Ambient top-level dispatch (the leads recipe): don't post a notice into what's
 							// often an external-facing feed — the message is already in log.jsonl.

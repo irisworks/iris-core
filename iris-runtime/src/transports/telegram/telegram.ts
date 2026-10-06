@@ -754,6 +754,15 @@ export class TelegramBot implements ChannelTransport {
 		return queue;
 	}
 
+	/** Route a busy interactive chat to engine steering instead of its turn FIFO. */
+	private steerIfRunning(event: TelegramEvent): boolean {
+		if (!event.channel.startsWith("SESSION-") && this.handler.isRunning(event.channel)) {
+			void this.handler.handleEvent(event, this);
+			return true;
+		}
+		return false;
+	}
+
 	// ==========================================================================
 	// Private — long poll loop
 	// ==========================================================================
@@ -933,6 +942,7 @@ export class TelegramBot implements ChannelTransport {
 			attachments,
 		};
 
+		if (this.steerIfRunning(event)) return;
 		const queue = this.getQueue(channelId);
 		if (queue.isFull()) {
 			await this.postMessage(channelId, "_Too many messages queued. Please wait._");
