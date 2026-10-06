@@ -1706,7 +1706,17 @@ Each built-in tool requires a "label" parameter (shown to user).
 			// A stopped or errored run drops it instead (log.jsonl sync replays it next run).
 			const runEndedCleanly = () => runState.stopReason !== "aborted" && runState.stopReason !== "error";
 			while (runEndedCleanly() && session.agent.hasQueuedMessages()) {
-				await session.agent.continue();
+				// Same per-call timeout as session.prompt above: an abort ends the
+				// continuation with stopReason "aborted", which exits this loop.
+				const continueTimeoutHandle = setTimeout(() => {
+					log.logWarning(`[${channelId}] LLM timeout after ${LLM_TIMEOUT_MS / 1000}s (steered follow-up)`);
+					session.agent.abort();
+				}, LLM_TIMEOUT_MS);
+				try {
+					await session.agent.continue();
+				} finally {
+					clearTimeout(continueTimeoutHandle);
+				}
 			}
 			if (!runEndedCleanly()) session.agent.clearAllQueues();
 

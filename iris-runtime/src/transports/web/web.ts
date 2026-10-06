@@ -535,8 +535,9 @@ export class WebTransport implements ChannelTransport {
 
 		const ts = (Date.now() / 1000).toFixed(6);
 		const event: TransportEvent = { channel: channelId, user: "web", text: body.text, ts, attachments: body.attachments ?? [] };
-		// Steer into a running turn rather than start another one (issue #272).
-		if (this.steer?.(event)) return;
+		// Steer into a running turn rather than start another one (issue #272) —
+		// but never past messages already waiting, to keep order.
+		if (this.getQueue(channelId).size() === 0 && this.steer?.(event)) return;
 		if (!this.enqueueEvent(event)) {
 			this.broadcast(channelId, { type: "error", message: "Too many messages queued. Please wait." });
 		}
