@@ -92,9 +92,23 @@ function describeToolCall(toolName: string, args: unknown): string {
 	return shown ? `${toolName} \`${shown}\`` : toolName;
 }
 
+const TRAIL_HEADER = "_↳ task ran:_";
+const MAX_TRAIL_LINES = 30;
+
 /** Visible record of a task's mutating tool calls, one line each — or "" if none ran. */
 export function formatTaskTrail(ran: string[]): string {
-	return ran.length > 0 ? `_↳ task ran:_\n${ran.map((line) => `• ${line}`).join("\n")}` : "";
+	if (ran.length === 0) return "";
+	const lines = ran.slice(0, MAX_TRAIL_LINES).map((line) => `• ${line}`);
+	if (ran.length > MAX_TRAIL_LINES) lines.push(`• …and ${ran.length - MAX_TRAIL_LINES} more (see logs)`);
+	return `${TRAIL_HEADER}\n${lines.join("\n")}`;
+}
+
+/** Split a failed task's error message (see withTrail) back into the error
+ * itself and its trail, so callers can truncate/italicize the error without
+ * cutting off or mangling the record of what ran. */
+export function splitTaskTrail(message: string): { error: string; trail: string } {
+	const at = message.indexOf(`\n${TRAIL_HEADER}\n`);
+	return at === -1 ? { error: message, trail: "" } : { error: message.slice(0, at), trail: message.slice(at + 1) };
 }
 
 export interface TaskResult {
@@ -106,8 +120,8 @@ export interface TaskResult {
 /**
  * Run one isolated, fresh-context task to completion and return the inner
  * agent's final assistant text, plus the trail of mutating tool calls it made
- * so callers can post a visible record of them. This is the whole isolation guarantee the
- * task primitive depends on: the inner Agent gets its OWN event subscription
+ * so callers can post a visible record of them (#261). This is the whole
+ * isolation guarantee the task primitive depends on: the inner Agent gets its OWN event subscription
  * here, wired only to local logs (log.logToolStart/Success/Error) — it never
  * touches ctx.respond, ctx.onToolEvent, queue.enqueueMessage, or
  * runState.trace.recordTool, all of which belong to the outer channel
@@ -166,7 +180,9 @@ async function runIsolatedTaskInner(
 		if (event.type === "tool_execution_start") {
 			const args = event.args as { label?: string };
 			const toolLabel = args?.label || event.toolName;
-			const ranIndex = UNRECORDED_TOOLS.has(event.toolName) ? undefined : ran.push(describeToolCall(event.toolName, event.args)) - 1;
+			const ranIndex = UNRECORDED_TOOLS.has(event.toolName)
+				? undefined
+				: ran.push(describeToolCall(event.toolName, event.args)) - 1;
 			pendingTools.set(event.toolCallId, { toolName: event.toolName, args: event.args, startTime: Date.now(), ranIndex });
 			log.logToolStart(logCtx, event.toolName, toolLabel, event.args as Record<string, unknown>);
 		} else if (event.type === "tool_execution_end") {
@@ -174,7 +190,9 @@ async function runIsolatedTaskInner(
 			pendingTools.delete(event.toolCallId);
 			const durationMs = pending ? Date.now() - pending.startTime : 0;
 			const resultStr = extractToolResultText(event.result);
-			if (event.isError && pending?.ranIndex !== undefined) ran[pending.ranIndex] = `✗ ${ran[pending.ranIndex]}`;
+			if (event.isError && pending?.ranIndex !== undefined) {
+				ran[pending.ranIndex] = `✗ ${ran[pending.ranIndex]}`;
+			}
 			if (event.isError) {
 				log.logToolError(logCtx, event.toolName, durationMs, resultStr);
 			} else {

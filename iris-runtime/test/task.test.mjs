@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createIrisTools, createTaskToolsGetter } from "../dist/engine/tools/index.js";
-import { formatTaskTrail, runIsolatedTask } from "../dist/engine/tools/task.js";
+import { formatTaskTrail, runIsolatedTask, splitTaskTrail } from "../dist/engine/tools/task.js";
 
 function fakeExecutor() {
 	return {
@@ -549,11 +549,18 @@ test("runIsolatedTask: a failed task's error still lists what it ran before fail
 		(err) => {
 			assert.match(err.message, /^task failed: /);
 			assert.match(err.message, /• write `\/etc\/x`$/);
+			const { error, trail } = splitTaskTrail(err.message);
+			assert.doesNotMatch(error, /task ran/);
+			assert.equal(trail, formatTaskTrail(["write `/etc/x`"]));
 			return true;
 		},
 	);
 });
 
-test("formatTaskTrail: empty when nothing state-changing ran", () => {
+test("formatTaskTrail: empty when nothing state-changing ran; capped when a lot did", () => {
 	assert.equal(formatTaskTrail([]), "");
+	const long = formatTaskTrail(Array.from({ length: 35 }, (_, i) => `bash \`echo ${i}\``));
+	assert.equal(long.split("\n").length, 1 + 30 + 1);
+	assert.match(long, /…and 5 more \(see logs\)$/);
+	assert.deepEqual(splitTaskTrail("task failed: boom"), { error: "task failed: boom", trail: "" });
 });

@@ -13,7 +13,7 @@ import { isChannelObserved, mirrorContextToObservers } from "./channel-observers
 import * as log from "./log.js";
 import type { SandboxConfig } from "./sandbox.js";
 import { ChannelStore, resolveChannelDir } from "./store.js";
-import { formatTaskTrail, isTasksEnabled } from "./tools/task.js";
+import { formatTaskTrail, isTasksEnabled, splitTaskTrail } from "./tools/task.js";
 import type { MessageContext, TransportEvent } from "../transport/types.js";
 
 export interface ChannelState {
@@ -201,7 +201,8 @@ export async function createEngine(config: EngineConfig): Promise<Engine> {
 					} catch (err) {
 						const errMsg = err instanceof Error ? err.message : String(err);
 						log.logWarning(`[${event.channel}] Scheduled task failed`, errMsg);
-						await transport.postMessage(event.channel, `_Error: ${errMsg}_`);
+						const { error, trail } = splitTaskTrail(errMsg);
+						await transport.postMessage(event.channel, trail ? `_Error: ${error}_\n\n${trail}` : `_Error: ${error}_`);
 					} finally {
 						state.running = false;
 						// A stop command during a running task sets stopMessageTs and
