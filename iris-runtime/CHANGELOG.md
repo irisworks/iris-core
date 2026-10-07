@@ -4,6 +4,8 @@
 
 ### Security
 
+- Pinned transitive `shell-quote` to 1.12.0, fixing a critical command
+  injection vulnerability in `quote()` (GHSA-pqg4-j6r4-53mv).
 - Pinned transitive `proxy-addr` to 2.0.8, which fixes IPv4-mapped IPv6
   addresses bypassing trusted proxy subnets (CVE-2026-90711).
 
