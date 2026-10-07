@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security
+
+- Pinned transitive `proxy-addr` to 2.0.8, which fixes IPv4-mapped IPv6
+  addresses bypassing trusted proxy subnets (CVE-2026-90711).
+
 ### Added
 
 - `task` tool, gated on `IRIS_TASKS_ENABLED`: runs an isolated, fresh-context
