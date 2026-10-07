@@ -43,7 +43,7 @@ import {
 } from "../transport/types.js";
 import { resolveChannelPath, type ChannelStore } from "./store.js";
 import { createIrisTools, createTaskToolsGetter, getTaskMaxMs, setUploadFunction } from "./tools/index.js";
-import { runIsolatedTask, type TaskRunnerOptions } from "./tools/task.js";
+import { formatTaskTrail, runIsolatedTask, type TaskResult, type TaskRunnerOptions } from "./tools/task.js";
 
 // Model is now configurable via getOrCreateRunner() — no longer hardcoded here.
 
@@ -83,12 +83,12 @@ export interface AgentRunner {
 	/**
 	 * Run one isolated, fresh-context task to completion (issue #253) using
 	 * this channel's own executor/model/tools, and return only the inner
-	 * agent's final text — never touches this channel's own session/context
+	 * agent's final text plus its trail of state-changing tool calls — never touches this channel's own session/context
 	 * file. Available regardless of IRIS_TASKS_ENABLED; callers (the `task`
 	 * tool itself, and scheduled `runAsTask` events) are responsible for
 	 * checking the flag before calling this.
 	 */
-	runTask(prompt: string, label?: string): Promise<string>;
+	runTask(prompt: string, label?: string): Promise<TaskResult>;
 }
 
 // Shared model/auth runtime (pi-coding-agent >= 0.84), one per workspace
@@ -1065,6 +1065,14 @@ Each built-in tool requires a "label" parameter (shown to user).
 			if (agentEvent.isError && !isHeadlessChannel) {
 				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
 			}
+
+			// A `task`'s inner tool calls never reach this subscription (see
+			// tools/task.ts) — post its trail of state-changing calls so what a
+			// task did stays visible even when it succeeds (#261).
+			const taskRan = agentEvent.toolName === "task" ? (agentEvent.result as { details?: { ran?: string[] } })?.details?.ran : undefined;
+			if (taskRan?.length && !isHeadlessChannel) {
+				queue.enqueue(() => ctx.respond(formatTaskTrail(taskRan), false), "task trail");
+			}
 		} else if (event.type === "message_start") {
 			const agentEvent = event as AgentEvent & { type: "message_start" };
 			if (agentEvent.message.role === "assistant") {
@@ -1864,7 +1872,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 			}
 		},
 
-		async runTask(prompt: string, label = "task"): Promise<string> {
+		async runTask(prompt: string, label = "task"): Promise<TaskResult> {
 			const abortController = new AbortController();
 			currentTaskAbortController = abortController;
 			try {
