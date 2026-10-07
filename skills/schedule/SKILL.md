@@ -55,7 +55,9 @@ The script writes an event file the runtime's `EventsWatcher`
 When `runAsTask` is true and the runtime has `IRIS_TASKS_ENABLED` set, the
 engine runs `text` as a `task` tool prompt (fresh context, no memory, same
 executor/model as the channel) and posts only its final result into the
-channel — the firing never becomes a full turn in that channel's own session.
+channel, followed by a one-line record of each state-changing tool call it made
+(`bash`/`edit`/`write`/MCP; reads are omitted) — posted even when the result is
+`[SILENT]`. The firing never becomes a full turn in that channel's own session.
 If the flag isn't set, the event still fires, but as a normal full turn (with
 a warning logged), same as if `--as-task` had been omitted.
 

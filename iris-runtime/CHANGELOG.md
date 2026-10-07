@@ -9,6 +9,9 @@
 
 ### Added
 
+- A `task` (tool call or `--as-task` event) now posts a one-line record of
+  each state-changing tool call it made (`bash`/`edit`/`write`/MCP; reads are
+  omitted) into the channel, on success as well as failure. Closes #261.
 - Messages sent while a turn is running (Slack DMs/mentions/session threads,
   Telegram, web UI) are folded into that turn after the in-flight tool call,
   all waiting messages together, instead of queueing as separate runs.

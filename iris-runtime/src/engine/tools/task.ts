@@ -72,10 +72,56 @@ function extractToolResultText(result: unknown): string {
 	return JSON.stringify(result);
 }
 
+/** Inner tool calls left out of a task's visible trail: they don't change
+ * state (`read`, `read_full`) or already post into the channel (`attach`).
+ * Everything else — bash/edit/write and any MCP tool — is recorded (#261). */
+const UNRECORDED_TOOLS = new Set(["read", "read_full", "attach"]);
+
+function describeToolCall(toolName: string, args: unknown): string {
+	const a = (args ?? {}) as { command?: unknown; path?: unknown; label?: unknown };
+	const detail =
+		toolName === "bash" && typeof a.command === "string"
+			? a.command
+			: typeof a.path === "string"
+				? a.path
+				: typeof a.label === "string"
+					? a.label
+					: "";
+	const oneLine = detail.replace(/\s+/g, " ").replace(/`/g, "'").trim();
+	const shown = oneLine.length > 150 ? `${oneLine.slice(0, 147)}...` : oneLine;
+	return shown ? `${toolName} \`${shown}\`` : toolName;
+}
+
+const TRAIL_HEADER = "_↳ task ran:_";
+const MAX_TRAIL_LINES = 30;
+
+/** Visible record of a task's mutating tool calls, one line each — or "" if none ran. */
+export function formatTaskTrail(ran: string[]): string {
+	if (ran.length === 0) return "";
+	const lines = ran.slice(0, MAX_TRAIL_LINES).map((line) => `• ${line}`);
+	if (ran.length > MAX_TRAIL_LINES) lines.push(`• …and ${ran.length - MAX_TRAIL_LINES} more (see logs)`);
+	return `${TRAIL_HEADER}\n${lines.join("\n")}`;
+}
+
+/** Split a failed task's error message (see withTrail) back into the error
+ * itself and its trail, so callers can truncate/italicize the error without
+ * cutting off or mangling the record of what ran. */
+export function splitTaskTrail(message: string): { error: string; trail: string } {
+	const at = message.indexOf(`\n${TRAIL_HEADER}\n`);
+	return at === -1 ? { error: message, trail: "" } : { error: message.slice(0, at), trail: message.slice(at + 1) };
+}
+
+export interface TaskResult {
+	text: string;
+	/** One line per non-read-only inner tool call, in start order; failed calls prefixed "✗ ". */
+	ran: string[];
+}
+
 /**
  * Run one isolated, fresh-context task to completion and return the inner
- * agent's final assistant text. This is the whole isolation guarantee the
- * task primitive depends on: the inner Agent gets its OWN event subscription
+ * agent's final assistant text, plus the trail of mutating tool calls it made
+ * so callers can post a visible record of them (#261). This is the whole
+ * isolation guarantee the task primitive depends on: the inner Agent gets its OWN event subscription
  * here, wired only to local logs (log.logToolStart/Success/Error) — it never
  * touches ctx.respond, ctx.onToolEvent, queue.enqueueMessage, or
  * runState.trace.recordTool, all of which belong to the outer channel
@@ -88,7 +134,7 @@ export async function runIsolatedTask(
 	prompt: string,
 	label: string,
 	signal?: AbortSignal,
-): Promise<string> {
+): Promise<TaskResult> {
 	const maxConcurrent = getTaskMaxConcurrent();
 	if (activeTaskCount >= maxConcurrent) {
 		throw new Error(
@@ -108,7 +154,7 @@ async function runIsolatedTaskInner(
 	prompt: string,
 	label: string,
 	signal?: AbortSignal,
-): Promise<string> {
+): Promise<TaskResult> {
 	const taskId = `task-${randomUUID()}`;
 	const systemPrompt = options.buildSystemPrompt();
 
@@ -128,18 +174,25 @@ async function runIsolatedTaskInner(
 	// Local-logs-only subscription — deliberately separate from the outer
 	// session's session.subscribe() in agent.ts. See module doc comment.
 	const logCtx = { channelId: taskId };
-	const pendingTools = new Map<string, { toolName: string; args: unknown; startTime: number }>();
+	const pendingTools = new Map<string, { toolName: string; args: unknown; startTime: number; ranIndex?: number }>();
+	const ran: string[] = [];
 	innerAgent.subscribe((event: AgentEvent) => {
 		if (event.type === "tool_execution_start") {
 			const args = event.args as { label?: string };
 			const toolLabel = args?.label || event.toolName;
-			pendingTools.set(event.toolCallId, { toolName: event.toolName, args: event.args, startTime: Date.now() });
+			const ranIndex = UNRECORDED_TOOLS.has(event.toolName)
+				? undefined
+				: ran.push(describeToolCall(event.toolName, event.args)) - 1;
+			pendingTools.set(event.toolCallId, { toolName: event.toolName, args: event.args, startTime: Date.now(), ranIndex });
 			log.logToolStart(logCtx, event.toolName, toolLabel, event.args as Record<string, unknown>);
 		} else if (event.type === "tool_execution_end") {
 			const pending = pendingTools.get(event.toolCallId);
 			pendingTools.delete(event.toolCallId);
 			const durationMs = pending ? Date.now() - pending.startTime : 0;
 			const resultStr = extractToolResultText(event.result);
+			if (event.isError && pending?.ranIndex !== undefined) {
+				ran[pending.ranIndex] = `✗ ${ran[pending.ranIndex]}`;
+			}
 			if (event.isError) {
 				log.logToolError(logCtx, event.toolName, durationMs, resultStr);
 			} else {
@@ -173,7 +226,7 @@ async function runIsolatedTaskInner(
 	try {
 		await Promise.race([innerAgent.prompt(prompt), timeout]);
 	} catch (err) {
-		throw new Error(`task failed: ${err instanceof Error ? err.message : String(err)}`);
+		throw new Error(withTrail(`task failed: ${err instanceof Error ? err.message : String(err)}`, ran));
 	} finally {
 		clearTimeout(timeoutHandle);
 		signal?.removeEventListener("abort", onAbort);
@@ -193,7 +246,10 @@ async function runIsolatedTaskInner(
 	// throw is the precedent).
 	if (lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted") {
 		throw new Error(
-			`task failed: ${lastAssistant.errorMessage ?? `inner run stopped with reason "${lastAssistant.stopReason}"`}`,
+			withTrail(
+				`task failed: ${lastAssistant.errorMessage ?? `inner run stopped with reason "${lastAssistant.stopReason}"`}`,
+				ran,
+			),
 		);
 	}
 
@@ -205,7 +261,13 @@ async function runIsolatedTaskInner(
 		: "";
 
 	log.logInfo(`[${taskId}] Task complete: ${label}`);
-	return finalText.trim() || "(task completed with no output)";
+	return { text: finalText.trim() || "(task completed with no output)", ran };
+}
+
+/** A failed task's error message still carries what it ran before failing. */
+function withTrail(message: string, ran: string[]): string {
+	const trail = formatTaskTrail(ran);
+	return trail ? `${message}\n${trail}` : message;
 }
 
 export function createTaskTool(options: TaskRunnerOptions): AgentTool<typeof taskSchema> {
@@ -216,15 +278,19 @@ export function createTaskTool(options: TaskRunnerOptions): AgentTool<typeof tas
 			"Run an isolated, fresh-context sub-agent to completion and return only its final summary. " +
 			"Use this for noisy multi-step investigation (log digging, terraform plan, diagnostics) that " +
 			"would otherwise permanently bloat this channel's context — every intermediate tool call and " +
-			"reasoning turn inside the task is discarded; only the final text comes back.",
+			"reasoning turn inside the task is discarded; only the final text comes back, plus a one-line " +
+			"record of each state-changing tool call (bash/edit/write/MCP) it made, which is also posted to the channel.",
 		parameters: taskSchema,
 		execute: async (
 			_toolCallId: string,
 			{ label, prompt }: { label: string; prompt: string },
 			signal?: AbortSignal,
 		) => {
-			const text = await runIsolatedTask(options, prompt, label, signal);
-			return { content: [{ type: "text", text }], details: undefined };
+			const { text, ran } = await runIsolatedTask(options, prompt, label, signal);
+			// The trail rides along in the result so the calling agent knows what
+			// ran; agent.ts posts details.ran into the channel as a visible record.
+			const trail = formatTaskTrail(ran);
+			return { content: [{ type: "text", text: trail ? `${text}\n\n${trail}` : text }], details: { ran } };
 		},
 	};
 }

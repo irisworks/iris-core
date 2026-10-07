@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createIrisTools, createTaskToolsGetter } from "../dist/engine/tools/index.js";
-import { runIsolatedTask } from "../dist/engine/tools/task.js";
+import { formatTaskTrail, runIsolatedTask, splitTaskTrail } from "../dist/engine/tools/task.js";
 
 function fakeExecutor() {
 	return {
@@ -206,7 +206,7 @@ test("runIsolatedTask: inner tool events never reach outer respond/onToolEvent/r
 		"do the thing",
 	);
 
-	assert.equal(result, "Task complete: did the thing.");
+	assert.equal(result.text, "Task complete: did the thing.");
 	assert.equal(fakeToolCalls, 1, "the inner tool should have executed exactly once");
 
 	// The isolation guarantee: nothing from the inner run reached the outer
@@ -327,7 +327,7 @@ test("createIrisTools: the task tool sees currently-connected MCP tools, not a p
 		const taskTool = tools.find((t) => t.name === "task");
 		const result = await taskTool.execute("tc1", { label: "search", prompt: "find it" });
 		assert.equal(mcpToolCalls, 1, "the MCP tool should have been callable, and called, from inside the task");
-		assert.equal(result.content[0].text, "Found it via MCP.");
+		assert.match(result.content[0].text, /^Found it via MCP\./);
 	} finally {
 		delete process.env.IRIS_TASKS_ENABLED;
 	}
@@ -371,7 +371,7 @@ test("runIsolatedTask: a call past IRIS_TASK_MAX_CONCURRENT fails immediately in
 		);
 
 		releaseTaskA();
-		assert.equal(await taskA, "A done");
+		assert.equal((await taskA).text, "A done");
 
 		// Task A finished and released its slot — a new call should succeed again.
 		const resultC = await runIsolatedTask(
@@ -379,7 +379,7 @@ test("runIsolatedTask: a call past IRIS_TASK_MAX_CONCURRENT fails immediately in
 			"do c",
 			"task c",
 		);
-		assert.equal(resultC, "C done");
+		assert.equal(resultC.text, "C done");
 	} finally {
 		if (originalMax === undefined) {
 			delete process.env.IRIS_TASK_MAX_CONCURRENT;
@@ -452,4 +452,115 @@ test("createTaskToolsGetter: task-less tool array plus live MCP tools (shared by
 	} finally {
 		delete process.env.IRIS_TASKS_ENABLED;
 	}
+});
+
+// ---------------------------------------------------------------------------
+// Visible trail of what a task ran (#261)
+// ---------------------------------------------------------------------------
+
+function namedTool(name, { fail = false } = {}) {
+	return {
+		name,
+		label: name,
+		description: name,
+		parameters: { type: "object", properties: {} },
+		execute: async () => {
+			if (fail) throw new Error(`${name} failed`);
+			return { content: [{ type: "text", text: "ok" }], details: undefined };
+		},
+	};
+}
+
+function multiToolCallTurn(calls) {
+	return {
+		...toolCallTurn("unused", {}),
+		content: calls.map(([name, args], i) => ({ type: "toolCall", id: `tc${i}`, name, arguments: args })),
+	};
+}
+
+test("runIsolatedTask: records state-changing tool calls (bash/edit/write/MCP) but not read-only ones", async () => {
+	const tools = ["read", "read_full", "bash", "edit", "write", "mcp-deploy"].map((n) => namedTool(n));
+	const streamFn = scriptedStreamFn([
+		multiToolCallTurn([
+			["read", { path: "/etc/foo.conf" }],
+			["bash", { label: "restart", command: "systemctl restart foo\n&& echo `done`" }],
+			["edit", { path: "/etc/foo.conf", oldText: "a", newText: "b" }],
+			["write", { path: "/tmp/out.txt", content: "x" }],
+			["read_full", { id: "abc" }],
+			["mcp-deploy", { label: "ship it" }],
+		]),
+		finalTextTurn("All good."),
+	]);
+	const result = await runIsolatedTask(fakeTaskOptions({ getTools: () => tools, streamFn, maxMs: 5000 }), "go", "go");
+	assert.equal(result.text, "All good.");
+	assert.deepEqual(result.ran, [
+		"bash `systemctl restart foo && echo 'done'`",
+		"edit `/etc/foo.conf`",
+		"write `/tmp/out.txt`",
+		"mcp-deploy `ship it`",
+	]);
+});
+
+test("runIsolatedTask: a failed state-changing call is marked in the trail", async () => {
+	const streamFn = scriptedStreamFn([
+		toolCallTurn("bash", { command: "rm /nope" }),
+		finalTextTurn("Tried."),
+	]);
+	const result = await runIsolatedTask(
+		fakeTaskOptions({ getTools: () => [namedTool("bash", { fail: true })], streamFn, maxMs: 5000 }),
+		"go",
+		"go",
+	);
+	assert.deepEqual(result.ran, ["✗ bash `rm /nope`"]);
+});
+
+test("task tool: result text and details carry the trail; nothing extra when only reads ran", async () => {
+	process.env.IRIS_TASKS_ENABLED = "true";
+	try {
+		const run = async (calls) => {
+			const streamFn = scriptedStreamFn([multiToolCallTurn(calls), finalTextTurn("Done.")]);
+			const tools = createIrisTools(fakeExecutor(), {
+				supportsImageInput: false,
+				workspaceDir: "/tmp",
+				task: fakeTaskOptions({ streamFn, getMcpTools: () => [namedTool("mcp-restart"), namedTool("mcp-lookup")] }),
+			});
+			return tools.find((t) => t.name === "task").execute("tc", { label: "l", prompt: "p" });
+		};
+		const mutating = await run([["mcp-restart", { label: "restart foo" }]]);
+		assert.deepEqual(mutating.details.ran, ["mcp-restart `restart foo`"]);
+		assert.equal(mutating.content[0].text, `Done.\n\n${formatTaskTrail(["mcp-restart `restart foo`"])}`);
+		assert.match(mutating.content[0].text, /task ran:_\n• mcp-restart `restart foo`$/);
+		const readOnly = await run([["read", { path: "/etc/foo" }]]);
+		assert.deepEqual(readOnly.details.ran, []);
+		assert.equal(readOnly.content[0].text, "Done.");
+	} finally {
+		delete process.env.IRIS_TASKS_ENABLED;
+	}
+});
+
+test("runIsolatedTask: a failed task's error still lists what it ran before failing", async () => {
+	let turn = 0;
+	const streamFn = async (...args) => {
+		if (turn++ === 0) return scriptedStreamFn([toolCallTurn("write", { path: "/etc/x", content: "y" })])(...args);
+		throw new Error("model down");
+	};
+	await assert.rejects(
+		() => runIsolatedTask(fakeTaskOptions({ getTools: () => [namedTool("write")], streamFn, maxMs: 5000 }), "go", "go"),
+		(err) => {
+			assert.match(err.message, /^task failed: /);
+			assert.match(err.message, /• write `\/etc\/x`$/);
+			const { error, trail } = splitTaskTrail(err.message);
+			assert.doesNotMatch(error, /task ran/);
+			assert.equal(trail, formatTaskTrail(["write `/etc/x`"]));
+			return true;
+		},
+	);
+});
+
+test("formatTaskTrail: empty when nothing state-changing ran; capped when a lot did", () => {
+	assert.equal(formatTaskTrail([]), "");
+	const long = formatTaskTrail(Array.from({ length: 35 }, (_, i) => `bash \`echo ${i}\``));
+	assert.equal(long.split("\n").length, 1 + 30 + 1);
+	assert.match(long, /…and 5 more \(see logs\)$/);
+	assert.deepEqual(splitTaskTrail("task failed: boom"), { error: "task failed: boom", trail: "" });
 });
