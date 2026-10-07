@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security
+
+- Pinned transitive `proxy-addr` to 2.0.8, which fixes IPv4-mapped IPv6
+  addresses bypassing trusted proxy subnets (CVE-2026-90711).
+
 ### Added
 
 - Messages sent while a turn is running (Slack DMs/mentions/session threads,
