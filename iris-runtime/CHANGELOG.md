@@ -2,8 +2,25 @@
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-07
+
+### UPGRADING
+
+- Messages sent while a turn is running are now folded into that turn instead
+  of queueing as a separate run. Set `IRIS_STEER_MESSAGES=false` to keep the
+  old queueing behavior.
+- Mistral installs: `devstral-medium-latest` is decommissioned and upgrading
+  does not rewrite an existing `/iris/.env` or `models.json`. If `IRIS_MODEL`
+  still names it, switch to `codestral-2508` and add that model to
+  `models.json` (see `data/models.json.template`), then restart `iris`.
+- `task` and `--sandbox=bwrap` are opt-in; nothing changes unless
+  `IRIS_TASKS_ENABLED` / `--sandbox=bwrap` are set. `bwrap` refuses to start
+  without `IRIS_API_TOKEN` (and a web UI password when the web UI is on).
+
 ### Security
 
+- Bumped transitive `fast-uri` 3.1.7 -> 3.1.8 (GHSA-hrr3-gc8f-f4qj) and
+  `ip-address` 10.5.0 -> 10.7.3.
 - Pinned transitive `shell-quote` to 1.12.0, fixing a critical command
   injection vulnerability in `quote()` (GHSA-pqg4-j6r4-53mv).
 - Pinned transitive `proxy-addr` to 2.0.8, which fixes IPv4-mapped IPv6
