@@ -29,7 +29,7 @@
  *                                          body: { value, proxyOnly?, agentReadable? }
  *   DELETE /secrets/:name                — delete a secret (iris only)
  *   GET  /secrets                        — list names + metadata, never values (iris only)
- *   POST /secret-drops                   — mint a one-time out-of-band submission link (iris only)
+ *   POST /secret-drops                   — request a secret out of band: in-app form or one-time link (iris only)
  *                                          body: { name, channelId?, ttlSeconds?, proxyOnly? }
  *
  *   POST   /sessions                     — create session
@@ -70,7 +70,8 @@ import type { EngineTransport } from "./index.js";
 import { resolveChannelDir, resolveChannelPath, safeJoin } from "./store.js";
 import { getSecretMeta, getSecretProvider } from "./secrets.js";
 import { SECRET_NAME_RE, SecretStore, secretsMode, type SecretSource } from "./secret-store.js";
-import { createDrop } from "./secret-drops.js";
+import { consumeDrop, createDrop, promptDrop } from "./secret-drops.js";
+import { openDropTunnel } from "./secret-drop-tunnel.js";
 import { loadServices } from "../broker/services.js";
 
 // Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
@@ -483,27 +484,46 @@ export function startApiServer(
 					});
 					return;
 				}
-				const webuiPort = parseInt(process.env.IRIS_WEBUI_PORT ?? "0", 10);
-				if (!(webuiPort > 0)) {
-					json(res, 503, {
-						error: "secret drops are served by the web transport — set IRIS_WEBUI_PORT (and expose it via serve-public for remote users)",
-					});
-					return;
-				}
 				const drop = createDrop({
 					name: body.name,
 					channelId: body.channelId,
 					ttlMs: body.ttlSeconds !== undefined ? body.ttlSeconds * 1000 : undefined,
 					proxyOnlyDefault: body.proxyOnly ?? isGatewaySecret(body.name),
 				});
+				const expiresAt = new Date(drop.expiresAt).toISOString();
+				// Intake chain: in-app form on the requesting transport (Slack modal),
+				// then the web drop link — public URL, ephemeral tunnel, or local path.
+				// Only the route and name are logged, never a value.
+				if (drop.channelId && (await promptDrop(drop))) {
+					log.logInfo(`[api] secret drop '${drop.name}' → route in-app`);
+					json(res, 200, { route: "in-app", expiresAt });
+					return;
+				}
+				const webuiPort = parseInt(process.env.IRIS_WEBUI_PORT ?? "0", 10);
+				if (!(webuiPort > 0)) {
+					consumeDrop(drop.token);
+					json(res, 503, {
+						error: "secret drops are served by the web transport — set IRIS_WEBUI_PORT (and expose it via serve-public for remote users)",
+					});
+					return;
+				}
 				const path = `/secret-drop/${drop.token}`;
 				const baseDomain = process.env.IRIS_BASE_DOMAIN;
-				json(res, 200, {
-					token: drop.token,
-					path,
-					url: baseDomain ? `https://${baseDomain}${path}` : undefined,
-					expiresAt: new Date(drop.expiresAt).toISOString(),
-				});
+				let route = "local";
+				let dropUrl: string | undefined;
+				if (baseDomain) {
+					route = "web";
+					dropUrl = `https://${baseDomain}${path}`;
+				} else {
+					const tunnel = await openDropTunnel(webuiPort, drop.token);
+					if (tunnel) {
+						route = "tunnel";
+						dropUrl = `${tunnel.url}${path}`;
+						drop.teardown = tunnel.close;
+					}
+				}
+				log.logInfo(`[api] secret drop '${drop.name}' → route ${route}`);
+				json(res, 200, { route, token: drop.token, path, url: dropUrl, expiresAt });
 				return;
 			}
 

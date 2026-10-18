@@ -19,6 +19,8 @@ import {
 } from "../../engine/dispatch-config.js";
 import { envMs, loadSessions, registerSessionRequest } from "../../engine/sessions.js";
 import { resolveChannelDir, type Attachment, type ChannelStore } from "../../engine/store.js";
+import { secretsBackendRequest } from "../../engine/api.js";
+import { consumeDrop, notifyDropStored, peekDrop, registerDropPrompter, type SecretDrop } from "../../engine/secret-drops.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
 	byId,
@@ -30,6 +32,21 @@ import {
 	type TransportPromptProfile,
 	type UserInfo,
 } from "../../transport/types.js";
+
+const SECRET_DROP_ACTION = "iris_secret_drop";
+
+/** The fields of a Socket Mode `interactive` payload the secret-drop flow reads. */
+interface SlackInteractiveBody {
+	type?: string;
+	trigger_id?: string;
+	actions?: Array<{ action_id?: string; value?: string }>;
+	container?: { channel_id?: string; message_ts?: string };
+	view?: {
+		callback_id?: string;
+		private_metadata?: string;
+		state?: { values?: Record<string, Record<string, { value?: string | null }>> };
+	};
+}
 
 // Slack message text limit (safely under the actual 40K limit); IRIS_SLACK_MAX_CHARS overrides
 const SLACK_MAX_LENGTH = Number(process.env.IRIS_SLACK_MAX_CHARS) || 30000;
@@ -577,6 +594,7 @@ export class SlackBot implements ChannelTransport {
 		}
 
 		this.setupEventHandlers();
+		registerDropPrompter((drop) => this.promptSecretDrop(drop));
 		this.setupSocketWatchdog();
 		await this.socketClient.start();
 
@@ -1296,6 +1314,116 @@ export class SlackBot implements ChannelTransport {
 				await ackOnce().catch(() => {});
 			}
 		});
+
+		this.socketClient.on("interactive", async ({ body, ack }: { body: SlackInteractiveBody; ack: (response?: unknown) => Promise<void> }) => {
+			try {
+				if (body.type === "block_actions" && body.actions?.[0]?.action_id === SECRET_DROP_ACTION) {
+					await ack();
+					await this.openSecretDropModal(body);
+				} else if (body.type === "view_submission" && body.view?.callback_id === SECRET_DROP_ACTION) {
+					await this.submitSecretDropModal(body, ack);
+				} else {
+					await ack();
+				}
+			} catch (err) {
+				log.logWarning("[slack] secret-drop interaction failed", err instanceof Error ? err.message : String(err));
+			}
+		});
+	}
+
+	// ==========================================================================
+	// Secret intake — an "Enter secret" button that opens a modal, so the value
+	// goes straight to the secret store and never into chat, the LLM context,
+	// or transcripts. Needs Interactivity enabled on the Slack app (Socket Mode
+	// delivers it — no Request URL). Only the name is ever posted back.
+	// ==========================================================================
+
+	private async promptSecretDrop(drop: SecretDrop): Promise<boolean> {
+		const channelId = drop.channelId;
+		if (!channelId || channelId.startsWith("tg-") || this.isVirtualChannel(channelId)) return false;
+		const route = channelId.startsWith("SESSION-") ? this.sessionRoutes.get(channelId) : { channel: channelId, threadTs: undefined };
+		if (!route) return false;
+		const text = `Iris needs the secret \`${drop.name}\`. Click below to enter it privately — it goes straight to the encrypted store, never into this chat.`;
+		try {
+			await this.webClient.chat.postMessage({
+				channel: route.channel,
+				thread_ts: route.threadTs,
+				text,
+				blocks: [
+					{ type: "section", text: { type: "mrkdwn", text } },
+					{
+						type: "actions",
+						elements: [
+							{ type: "button", action_id: SECRET_DROP_ACTION, text: { type: "plain_text", text: `Enter ${drop.name}` }, value: drop.token, style: "primary" },
+						],
+					},
+				],
+			});
+			return true;
+		} catch (err) {
+			log.logWarning(`[slack] couldn't post secret-drop button for '${drop.name}'`, err instanceof Error ? err.message : String(err));
+			return false;
+		}
+	}
+
+	private async openSecretDropModal(body: SlackInteractiveBody): Promise<void> {
+		const token = body.actions?.[0]?.value ?? "";
+		const drop = peekDrop(token);
+		const view = drop
+			? {
+					type: "modal",
+					callback_id: SECRET_DROP_ACTION,
+					private_metadata: JSON.stringify({ token, channel: body.container?.channel_id, ts: body.container?.message_ts }),
+					title: { type: "plain_text", text: "Enter secret" },
+					submit: { type: "plain_text", text: "Store" },
+					close: { type: "plain_text", text: "Cancel" },
+					blocks: [
+						{
+							type: "input",
+							block_id: "secret",
+							label: { type: "plain_text", text: drop.name },
+							element: { type: "plain_text_input", action_id: "value" },
+						},
+						{
+							type: "context",
+							elements: [{ type: "mrkdwn", text: "Stored encrypted. Never posted to chat or shown to the model." }],
+						},
+					],
+				}
+			: {
+					type: "modal",
+					title: { type: "plain_text", text: "Link expired" },
+					close: { type: "plain_text", text: "Close" },
+					blocks: [{ type: "section", text: { type: "mrkdwn", text: "This request expired or was already used — ask Iris for a new one." } }],
+				};
+		await this.webClient.views.open({ trigger_id: body.trigger_id ?? "", view: view as never });
+	}
+
+	private async submitSecretDropModal(body: SlackInteractiveBody, ack: (response?: unknown) => Promise<void>): Promise<void> {
+		const meta = JSON.parse(body.view?.private_metadata ?? "{}") as { token?: string; channel?: string; ts?: string };
+		const value = body.view?.state?.values?.secret?.value?.value ?? "";
+		if (!value || value.length > 64 * 1024) {
+			await ack({ response_action: "errors", errors: { secret: "Enter a value (max 64 KB)." } });
+			return;
+		}
+		const drop = consumeDrop(meta.token ?? "");
+		if (!drop) {
+			await ack({ response_action: "errors", errors: { secret: "This request expired or was already used — ask Iris for a new one." } });
+			return;
+		}
+		const result = await secretsBackendRequest("PUT", drop.name, { value, proxyOnly: drop.proxyOnlyDefault, source: "drop" });
+		if (result.status !== 200) {
+			log.logWarning(`[slack] secret-drop store failed for '${drop.name}' (status ${result.status})`);
+			await ack({ response_action: "errors", errors: { secret: "Storing the secret failed — ask Iris for a new request." } });
+			return;
+		}
+		await ack();
+		log.logInfo(`[slack] secret '${drop.name}' submitted via modal`);
+		notifyDropStored(this.workingDir, drop, "the Slack form");
+		if (meta.channel && meta.ts) {
+			const done = `Secret \`${drop.name}\` stored.`;
+			await this.webClient.chat.update({ channel: meta.channel, ts: meta.ts, text: done, blocks: [] }).catch(() => {});
+		}
 	}
 
 	/**

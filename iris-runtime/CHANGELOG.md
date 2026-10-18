@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- `set-secret request` walks an intake chain: a Slack "Enter secret" button
+  that opens a private modal (needs Slack Interactivity enabled), then the web
+  drop link — public via `IRIS_BASE_DOMAIN`, or through a temporary
+  `cloudflared` quick tunnel when installed, else a local path.
+
+### Changed
+
+- The `set-secret` skill accepts a secret pasted in chat as a last resort, when
+  no request route works or the user says chat is their only option. It stores
+  the value from stdin, warns once, and never echoes it.
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed

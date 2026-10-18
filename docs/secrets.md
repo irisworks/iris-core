@@ -97,19 +97,41 @@ source, flags) stays readable without decryption; values never are.
 Both files are 0600; paths are overridable via `IRIS_SECRET_KEY_FILE` /
 `IRIS_SECRET_STORE_FILE`.
 
-## Getting secrets in — never through chat
+## Getting secrets in — not through chat
 
 Pasting a credential into chat puts it in the LLM context, transcripts, and
-channel logs. Both routes below bypass all three.
+channel logs. The routes below bypass all three.
 
-**Drop links (any user, no shell access).** Iris mints a one-time link
-(`set-secret request NAME --channel <id>`, or `POST /secret-drops` on the
-internal API) and relays it. The user opens `/secret-drop/<token>` on the web
-transport, pastes the value into a form, and submits; the link burns
-(single-use, default 15-minute expiry) and a *name-only* notification lands
-back in the requesting conversation. Requires `IRIS_WEBUI_PORT`; share links
-only over HTTPS (`serve-public`) or an SSH tunnel. Links don't survive a
-runtime restart — ask Iris for a fresh one.
+**Requesting a secret (any user, no shell access).** Iris runs
+`set-secret request NAME --channel <id>` (or `POST /secret-drops` on the
+internal API). The runtime uses the first route that works and logs which one
+it chose (name only, never the value):
+
+1. **Slack form** — when the conversation is on Slack, Iris posts an
+   "Enter NAME" button; clicking it opens a modal and the submitted value
+   goes straight to the store. Works over Socket Mode — no public URL — but
+   the Slack app needs **Interactivity & Shortcuts** turned on (leave the
+   Request URL blank). If posting the button fails, the chain moves on.
+2. **Drop link** — a one-time `/secret-drop/<token>` page on the web
+   transport, where the user pastes the value into a form. Needs
+   `IRIS_WEBUI_PORT`. The link is public when `IRIS_BASE_DOMAIN` is set
+   (`serve-public`). Otherwise, if `cloudflared` is installed, Iris opens a
+   temporary quick tunnel (`https://….trycloudflare.com`, no account needed)
+   that exposes only that one drop path — never the rest of the web UI — and
+   closes it once the secret is submitted or the link expires.
+3. **Local path** — with neither, Iris gets only the path, which works for
+   someone who can reach the web UI directly.
+
+Telegram has no in-app form; Telegram conversations use the drop link.
+
+Every request is single-use (default 15-minute expiry), and a *name-only*
+notification lands back in the requesting conversation when the secret
+arrives. Requests don't survive a runtime restart — ask Iris for a fresh one.
+
+**Pasted in chat (last resort).** Iris never asks for a paste, but accepts one
+when no route above works or the user says chat is their only option. She
+stores it from stdin, warns once that the value is now in the conversation
+history (prefer short-lived or rotatable tokens), and never echoes it back.
 
 **`iris-secret` CLI (operators over SSH).**
 

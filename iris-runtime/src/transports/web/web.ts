@@ -27,7 +27,7 @@ import { ChannelQueue } from "../../engine/channel-queue.js";
 import * as log from "../../engine/log.js";
 import { loadAgentRegistry, callAgentBridge } from "../../engine/bridge.js";
 import { readBody, secretMatches, secretsBackendRequest } from "../../engine/api.js";
-import { consumeDrop, peekDrop, type SecretDrop } from "../../engine/secret-drops.js";
+import { consumeDrop, notifyDropStored, peekDrop, type SecretDrop } from "../../engine/secret-drops.js";
 import type { ChannelState, EngineTransport } from "../../engine/index.js";
 import {
 	registerChannelObserver,
@@ -707,23 +707,7 @@ export class WebTransport implements ChannelTransport {
 			return;
 		}
 		log.logInfo(`[web] secret '${drop.name}' submitted via drop link`);
-		// Name-only notification back into the conversation that requested the
-		// drop — the root events watcher (main.ts) routes it to the owning
-		// transport. The value itself never appears in any event or log.
-		if (drop.channelId) {
-			const eventsDir = join(this.workingDir, "events");
-			mkdirSync(eventsDir, { recursive: true });
-			const eventId = `drop-${Date.now()}-${randomBytes(4).toString("hex")}`;
-			writeFileSync(
-				join(eventsDir, `${eventId}.json`),
-				JSON.stringify({
-					type: "immediate",
-					channelId: drop.channelId,
-					user: "secret-drop",
-					text: `Secret '${drop.name}' was submitted via its drop link and stored.`,
-				}),
-			);
-		}
+		notifyDropStored(this.workingDir, drop, "its drop link");
 		res.writeHead(200, { "Content-Type": "application/json" });
 		res.end(JSON.stringify({ ok: true }));
 	}

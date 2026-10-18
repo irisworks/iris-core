@@ -70,8 +70,10 @@ When deploying Iris Core:
 - Rotate secrets regularly
 - Use separate secrets for preview and prod environments
 - Never ask a user to paste a secret into chat — it lands in the LLM's
-  context and transcripts. Use the `set-secret` skill to mint a one-time drop
-  link instead (`docs/secrets.md`)
+  context and transcripts. Use `set-secret request` (Slack form or one-time
+  drop link, `docs/secrets.md`) instead. A pasted secret is accepted only as a
+  last resort — no request route works, or chat is the user's only option —
+  with a one-time warning to prefer short-lived or rotatable tokens
 
 ### Internal API and Web UI
 
