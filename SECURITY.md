@@ -69,9 +69,12 @@ When deploying Iris Core:
   plaintext by anyone
 - Rotate secrets regularly
 - Use separate secrets for preview and prod environments
-- Never ask a user to paste a secret into chat — it lands in the LLM's
+- Never *ask* a user to paste a secret into chat — it lands in the LLM's
   context and transcripts. Use the `set-secret` skill to mint a one-time drop
-  link instead (`docs/secrets.md`)
+  link instead (`docs/secrets.md`). If the drop link is unavailable, or the
+  user says chat is their only route, Iris accepts the pasted value, stores it
+  from stdin, and warns once that it is in the conversation history; prefer
+  short-lived or rotatable tokens for this
 
 ### Internal API and Web UI
 

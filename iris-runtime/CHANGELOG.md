@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `set-secret` skill: Iris accepts a secret pasted into chat when the drop link is unavailable or chat is the user's only route. She still offers a drop link first and never asks for a paste; a pasted value is stored from stdin, never echoed, with a one-time warning that it is in the conversation history.
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed
