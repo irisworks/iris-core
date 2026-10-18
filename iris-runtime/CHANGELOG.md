@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `github`, `spawn-agent`, and `self-extend` skills push with an
+  `x-access-token:` URL, fixing `could not read Username` on token-only pushes.
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed
