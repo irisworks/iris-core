@@ -97,10 +97,21 @@ source, flags) stays readable without decryption; values never are.
 Both files are 0600; paths are overridable via `IRIS_SECRET_KEY_FILE` /
 `IRIS_SECRET_STORE_FILE`.
 
-## Getting secrets in — never through chat
+## Getting secrets in — not through chat
 
 Pasting a credential into chat puts it in the LLM context, transcripts, and
-channel logs. Both routes below bypass all three.
+channel logs. Both routes below bypass all three, so Iris offers them first.
+
+If neither route is available (for example the web transport is off) or a user
+says chat is their only option, Iris still accepts a pasted secret: she stores
+it straight from stdin, never repeats it, and warns once that it remains in the
+conversation history. Use short-lived or rotatable tokens this way and revoke
+them if they were long-lived.
+
+Drop links are off until the web transport is on: set `IRIS_WEBUI_PORT` (and
+`IRIS_WEBUI_PASSWORD`), then expose it over HTTPS with `serve-public` and
+`IRIS_BASE_DOMAIN`. The transport binds to loopback by default, so without a
+public path the link isn't reachable.
 
 **Drop links (any user, no shell access).** Iris mints a one-time link
 (`set-secret request NAME --channel <id>`, or `POST /secret-drops` on the
