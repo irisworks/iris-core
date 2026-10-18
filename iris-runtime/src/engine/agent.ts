@@ -682,6 +682,20 @@ export function applySecretStoreApiKeyFallback(modelRuntime: ModelRuntime, works
 		}
 	})();
 
+	// Secret names to try for a provider: the models.json apiKey field first (a bare
+	// or $-prefixed env var name, stored by `iris-secret import-env` with "_" turned
+	// into "-"), so providers sharing one key or named differently from their env var
+	// (azure-foundry-responses -> AZURE_FOUNDRY_KEY) still resolve once it is scrubbed
+	// from process.env (#287); then the derived <PROVIDER-ID>-API-KEY name.
+	const secretNamesFor = (providerId: string): string[] => {
+		const names: string[] = [];
+		const configured = configuredApiKeysByProvider[providerId]?.replace(/^\$/, "");
+		if (configured && LEGACY_ENV_VAR_NAME_RE.test(configured)) names.push(configured.replace(/_/g, "-"));
+		const derived = `${providerId.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`;
+		if (!names.includes(derived)) names.push(derived);
+		return names;
+	};
+
 	type GetAuthResult = Awaited<ReturnType<ModelRuntime["getAuth"]>>;
 
 	const resolveApiKeyWithSecretFallback = async (
@@ -695,11 +709,12 @@ export function applySecretStoreApiKeyFallback(modelRuntime: ModelRuntime, works
 		// Secrets provider (store/broker in store/proxy modes; env-backed
 		// otherwise) — this is what keeps the LLM key working once it no longer
 		// lives in .env/process.env.
-		const brokered = await getSecretProvider().get(`${providerId.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`);
-		if (brokered) return brokered;
-		// Fallback env var: ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, etc. (models.json's
-		// per-provider "apiKey" field, handled above, is checked first — that's how
-		// providers with a non-standard env var name like AZURE_FOUNDRY_KEY work.)
+		const secretProvider = getSecretProvider();
+		for (const name of secretNamesFor(providerId)) {
+			const brokered = await secretProvider.get(name);
+			if (brokered) return brokered;
+		}
+		// Fallback env var: ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, etc.
 		return process.env[`${providerId.toUpperCase().replace(/-/g, "_")}_API_KEY`];
 	};
 
@@ -731,8 +746,8 @@ export function applySecretStoreApiKeyFallback(modelRuntime: ModelRuntime, works
 	modelRuntime.hasConfiguredAuth = (providerId: string) => {
 		if (originalHasConfiguredAuth(providerId)) return true;
 		if (secretsMode() === "store") {
-			const storeKey = `${providerId.toUpperCase().replace(/[_-]/g, "-")}-API-KEY`;
-			if (SecretStore.open()?.get(storeKey) !== undefined) return true;
+			const store = SecretStore.open();
+			if (secretNamesFor(providerId).some((name) => store?.get(name) !== undefined)) return true;
 		}
 		const envKey = `${providerId.toUpperCase().replace(/-/g, "_")}_API_KEY`;
 		return process.env[envKey] !== undefined;
