@@ -139,3 +139,51 @@ test("applySecretStoreApiKeyFallback passes through hasConfiguredAuth true untou
 
 	assert.equal(runtime.hasConfiguredAuth("custom"), true);
 });
+
+// Regression coverage for #287: in store mode the models.json apiKey env var is
+// scrubbed from process.env, and `iris-secret import-env` stores it under its
+// hyphenated name (AZURE_FOUNDRY_KEY -> AZURE-FOUNDRY-KEY). The fallback must
+// resolve through that configured name, not only <PROVIDER-ID>-API-KEY.
+
+function useStoreMode(t) {
+	const { keyFile, storeFile } = makeStoreDir();
+	process.env.IRIS_SECRETS_MODE = "store";
+	process.env.IRIS_SECRET_KEY_FILE = keyFile;
+	process.env.IRIS_SECRET_STORE_FILE = storeFile;
+	t.after(() => {
+		delete process.env.IRIS_SECRETS_MODE;
+		delete process.env.IRIS_SECRET_KEY_FILE;
+		delete process.env.IRIS_SECRET_STORE_FILE;
+	});
+	return SecretStore.open();
+}
+
+test("applySecretStoreApiKeyFallback resolves a scrubbed models.json apiKey from the store by its configured name", async (t) => {
+	useStoreMode(t).set("AZURE-FOUNDRY-KEY", "real-foundry-key");
+	delete process.env.AZURE_FOUNDRY_KEY;
+
+	const modelsJsonPath = makeModelsJson({
+		"azure-foundry": { apiKey: "AZURE_FOUNDRY_KEY" },
+		"azure-foundry-responses": { apiKey: "$AZURE_FOUNDRY_KEY" },
+	});
+	const runtime = fakeRuntime({ throws: 'Failed to resolve API key from environment variable: AZURE_FOUNDRY_KEY' });
+	applySecretStoreApiKeyFallback(runtime, modelsJsonPath);
+
+	for (const provider of ["azure-foundry", "azure-foundry-responses"]) {
+		const result = await runtime.getAuth({ provider, id: "gpt" });
+		assert.equal(result.auth.apiKey, "real-foundry-key");
+		assert.equal(runtime.hasConfiguredAuth(provider), true);
+	}
+});
+
+test("applySecretStoreApiKeyFallback still falls back to <PROVIDER-ID>-API-KEY when the configured name is not stored", async (t) => {
+	useStoreMode(t).set("AZURE-FOUNDRY-RESPONSES-API-KEY", "derived-key");
+	delete process.env.AZURE_FOUNDRY_KEY;
+
+	const modelsJsonPath = makeModelsJson({ "azure-foundry-responses": { apiKey: "AZURE_FOUNDRY_KEY" } });
+	const runtime = fakeRuntime({ auth: { auth: { apiKey: "AZURE_FOUNDRY_KEY" } } });
+	applySecretStoreApiKeyFallback(runtime, modelsJsonPath);
+
+	const result = await runtime.getAuth({ provider: "azure-foundry-responses", id: "gpt" });
+	assert.equal(result.auth.apiKey, "derived-key");
+});

@@ -141,6 +141,12 @@ known credential vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID
 the store and rewrites `.env` without them. Idempotent; unknown vars are left
 alone, and anything not yet migrated keeps resolving via the env fallback.
 
+Migrated vars are stored with `_` turned into `-` (`AZURE_FOUNDRY_KEY` becomes
+`AZURE-FOUNDRY-KEY`). A `models.json` provider's `apiKey` names the secret it
+uses: the runtime looks that name up in the store first, then
+`<PROVIDER-ID>-API-KEY`, then the `<PROVIDER_ID>_API_KEY` env var. Providers
+that share one key (`azure-foundry`, `azure-foundry-responses`) need no aliases.
+
 That built-in list isn't the full story on installs with secret names it
 doesn't know about (a custom API key, a storage connection string). Add
 `meta/secrets-config.json` (next to `agents.json`) with an

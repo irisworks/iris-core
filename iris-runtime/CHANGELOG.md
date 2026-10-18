@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Store mode: LLM provider keys now resolve from the store by the `models.json`
+  `apiKey` name (e.g. `AZURE_FOUNDRY_KEY`), so providers whose id differs from
+  their env var keep working after `iris-secret import-env` (#287).
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed
