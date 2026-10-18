@@ -184,6 +184,11 @@ export function secretMatches(presented: string, expected: string): boolean {
 	return timingSafeEqual(a, b) && presentedBuf.length === expectedBuf.length;
 }
 
+/** 503 body for writes in env mode — names the mode and the migration, so callers can relay it as-is. */
+const ENV_MODE_ERROR =
+	"this install is in legacy env mode (IRIS_SECRETS_MODE=env), which has no writable secrets backend — " +
+	"migrate to the encrypted store with `upgrade-iris --migrate-secrets` (or `bash bootstrap.sh --secrets-mode=store`), see docs/secrets.md";
+
 /**
  * Writable secrets backend for the iris-only management routes: the bundled
  * broker daemon / external broker when IRIS_SECRET_BROKER_URL is set, the
@@ -236,10 +241,7 @@ export async function secretsBackendRequest(
 		if (!store.delete(name ?? "")) return { status: 404, body: { error: "secret not found" } };
 		return { status: 200, body: { ok: true } };
 	}
-	return {
-		status: 503,
-		body: { error: "no writable secrets backend — set IRIS_SECRETS_MODE=store or IRIS_SECRET_BROKER_URL" },
-	};
+	return { status: 503, body: { error: ENV_MODE_ERROR } };
 }
 
 /** True when a gateway service is configured to inject this secret — the drop form defaults to proxy-only for those. */
@@ -478,9 +480,7 @@ export function startApiServer(
 					return;
 				}
 				if (!process.env.IRIS_SECRET_BROKER_URL && secretsMode() !== "store") {
-					json(res, 503, {
-						error: "secret drops need a writable secrets backend — enable IRIS_SECRETS_MODE=store or proxy",
-					});
+					json(res, 503, { error: ENV_MODE_ERROR });
 					return;
 				}
 				const webuiPort = parseInt(process.env.IRIS_WEBUI_PORT ?? "0", 10);

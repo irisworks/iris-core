@@ -18,7 +18,8 @@
 //   iris-secret rm NAME
 //   iris-secret import-env FILE [--prune] move known secret vars from an env
 //                                         file into the store; --prune rewrites
-//                                         the file without those lines
+//                                         the file without those lines;
+//                                         --dry-run only lists them
 // ============================================================================
 
 import { readFileSync, writeFileSync } from "fs";
@@ -41,7 +42,7 @@ function fail(message: string): never {
 
 function usage(): never {
 	console.error(
-		"Usage: iris-secret <init | set NAME [--proxy-only] | get NAME | list | rm NAME | import-env FILE [--prune]>",
+		"Usage: iris-secret <init | set NAME [--proxy-only] | get NAME | list | rm NAME | import-env FILE [--prune | --dry-run]>",
 	);
 	process.exit(1);
 }
@@ -210,9 +211,12 @@ switch (command) {
 	}
 
 	case "import-env": {
-		const file = rest[0] ?? fail("usage: iris-secret import-env FILE [--prune]");
+		const file = rest[0] ?? fail("usage: iris-secret import-env FILE [--prune | --dry-run]");
 		const prune = rest.includes("--prune");
-		const backend = getBackend();
+		// --dry-run only lists what would move; it never opens a backend, so it
+		// works on an env-mode install that has no store key yet.
+		const dryRun = rest.includes("--dry-run");
+		const backend = dryRun ? undefined : getBackend();
 		let content: string;
 		try {
 			content = readFileSync(file, "utf8");
@@ -233,7 +237,7 @@ switch (command) {
 					value = value.slice(1, -1);
 				}
 				if (value) {
-					await backend.set(varName.replace(/_/g, "-"), value, { source: "import" });
+					await backend?.set(varName.replace(/_/g, "-"), value, { source: "import" });
 					moved.push(varName);
 					continue; // pruned line — only dropped when --prune rewrites below
 				}
@@ -242,6 +246,10 @@ switch (command) {
 		}
 		if (moved.length === 0) {
 			console.log("nothing to import — no known secret vars with values found");
+			break;
+		}
+		if (!backend) {
+			console.log(`would import: ${moved.join(", ")}`);
 			break;
 		}
 		console.log(`imported into ${backend.label}: ${moved.join(", ")}`);

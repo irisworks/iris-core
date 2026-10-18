@@ -30,6 +30,11 @@ Requires a writable secrets backend (`IRIS_SECRETS_MODE=store` or `proxy`)
 and the web transport (`IRIS_WEBUI_PORT`); the API replies 503 with guidance
 otherwise. Only share drop links over HTTPS (serve-public) or an SSH tunnel.
 
+If `set-secret` fails with "legacy env mode", nothing can be stored on this
+install yet. Tell the user before they go to the trouble of fetching or
+exchanging a credential, and offer `upgrade-iris --migrate-secrets` (run
+`upgrade-iris --check` first to show what moves).
+
 ## Store a secret Iris already holds
 
 For secrets Iris provisions herself (e.g. a token she just created via `gh`):

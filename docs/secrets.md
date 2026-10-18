@@ -119,6 +119,7 @@ iris-secret set MYAPI-KEY --proxy-only
 iris-secret list                     # names + metadata, never values
 iris-secret rm MYAPI-KEY
 iris-secret import-env /iris/.env --prune   # migrate known secret vars out of .env
+iris-secret import-env /iris/.env --dry-run # list what would move, change nothing
 ```
 
 The CLI talks to the broker daemon in proxy mode and to the store file
@@ -140,6 +141,11 @@ known credential vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AWS_ACCESS_KEY_ID
 `AZURE_FOUNDRY_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`) into
 the store and rewrites `.env` without them. Idempotent; unknown vars are left
 alone, and anything not yet migrated keeps resolving via the env fallback.
+
+On a pinned-clone install, `upgrade-iris` does this as part of an upgrade:
+on an env-mode install it prints which vars would move, and
+`upgrade-iris --migrate-secrets` passes `IRIS_SECRETS_MODE=store` through to
+`bootstrap.sh`. Afterwards, `iris-secret list` shows the migrated names.
 
 That built-in list isn't the full story on installs with secret names it
 doesn't know about (a custom API key, a storage connection string). Add
