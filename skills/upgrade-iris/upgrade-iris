@@ -19,6 +19,8 @@
 #   upgrade-iris v1.4.1           # specific tag
 #   upgrade-iris --check          # preflight only, change nothing
 #   upgrade-iris --force          # upgrade despite pending work
+#   upgrade-iris --migrate-secrets  # also move a legacy env-mode install to
+#                                   # the encrypted secret store
 #
 # Env overrides: IRIS_DIR (default /iris), IRIS_OVERLAY_DIR (default cwd).
 # ============================================================
@@ -31,12 +33,14 @@ UNIT="iris-upgrade"
 TARGET_REF=""
 CHECK_ONLY=false
 FORCE=false
+MIGRATE_SECRETS=false
 
 for arg in "$@"; do
   case "$arg" in
     --check) CHECK_ONLY=true ;;
     --force) FORCE=true ;;
-    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --migrate-secrets) MIGRATE_SECRETS=true ;;
+    -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "upgrade-iris: unknown option '$arg'" >&2; exit 2 ;;
     *)  TARGET_REF="$arg" ;;
   esac
@@ -133,6 +137,35 @@ $RESTORE_HINT      Re-run with --force to upgrade anyway (the tag checkout moves
   fi
 fi
 
+# ── Legacy env-mode installs: offer the store migration ─────────────────
+# Env mode has no writable secrets backend, so set-secret always fails there.
+# bootstrap.sh never migrates on its own; --migrate-secrets opts in by
+# passing IRIS_SECRETS_MODE=store through to it (pinned clones only — the
+# overlay upgrade doesn't re-run bootstrap).
+SECRETS_MODE="$(grep -m1 '^IRIS_SECRETS_MODE=' "$IRIS_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
+if [[ "$SECRETS_MODE" != "store" && "$SECRETS_MODE" != "proxy" ]]; then
+  if [[ "$MIGRATE_SECRETS" == true && "$WORKDIR" != "$PINNED_REPO" ]]; then
+    fail "--migrate-secrets needs a pinned-clone install. On an overlay, run
+      bash core/bootstrap.sh --secrets-mode=store   (docs/secrets.md)"
+  fi
+  log "NOTE  secrets: legacy env mode — set-secret and drop links don't work here."
+  # Only a CLI that knows --dry-run is safe to call: older ones ignore the
+  # flag and would import for real.
+  CLI="$WORKDIR/iris-runtime/dist/cli/iris-secret.js"
+  if [[ -f "$CLI" ]] && grep -q -- '--dry-run' "$CLI" \
+     && DRY_RUN="$(IRIS_STORAGE_ROOT="$IRIS_DIR/data" node "$CLI" import-env "$IRIS_DIR/.env" --dry-run 2>/dev/null)"; then
+    echo "$DRY_RUN" | sed 's/^/        /'
+  fi
+  if [[ "$MIGRATE_SECRETS" == true ]]; then
+    log "--migrate-secrets given — the upgrade will move these into the encrypted store."
+  else
+    log "      Re-run with --migrate-secrets to move them into the encrypted store (docs/secrets.md)."
+  fi
+elif [[ "$MIGRATE_SECRETS" == true ]]; then
+  log "secrets already in $SECRETS_MODE mode — --migrate-secrets has nothing to do."
+  MIGRATE_SECRETS=false
+fi
+
 if [[ "$CHECK_ONLY" == true ]]; then
   log "--check given — stopping here, nothing changed."
   exit 0
@@ -152,6 +185,7 @@ fi
 [[ -f "$LOGFILE" ]] && mv -f "$LOGFILE" "$LOGFILE.prev"
 
 CMD="bash $UPGRADE_SH${TARGET_REF:+ $TARGET_REF}"
+[[ "$MIGRATE_SECRETS" == true ]] && CMD="IRIS_SECRETS_MODE=store $CMD"
 log "starting: $CMD"
 log "log:      $LOGFILE"
 
@@ -182,3 +216,6 @@ cat <<EOF
       systemctl is-active iris
       git -C ${GUARD_REPOS[0]} describe --tags
 EOF
+if [[ "$MIGRATE_SECRETS" == true ]]; then
+  echo "      iris-secret list   # migrated credentials are in the store"
+fi

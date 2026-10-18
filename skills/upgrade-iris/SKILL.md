@@ -18,6 +18,7 @@ upgrade-iris                  # upgrade to the latest release tag
 upgrade-iris v1.4.1           # upgrade to a specific tag
 upgrade-iris --check          # preflight only — report, change nothing
 upgrade-iris --force          # upgrade even though pending work was found
+upgrade-iris --migrate-secrets  # also move a legacy env-mode install to the encrypted store
 ```
 
 Run `--check` first when asked whether an upgrade is possible. It answers that
@@ -40,6 +41,16 @@ continues rather than blocking on a question it couldn't answer.
 
 `--force` proceeds anyway. The failure message prints the exact
 `git -C <repo> checkout <branch>` needed to get back afterwards.
+
+## Legacy env-mode installs
+
+On an install still in `IRIS_SECRETS_MODE=env`, `set-secret` and drop links
+cannot work. Every run (including `--check`) prints a note and the credential
+vars a migration would move into the encrypted store. Ask the user before
+passing `--migrate-secrets` — it re-runs `bootstrap.sh` with
+`IRIS_SECRETS_MODE=store`, which moves those vars out of `/iris/.env`. After
+the restart, `iris-secret list` should show them. Pinned clones only; on an
+overlay, run `bootstrap.sh --secrets-mode=store` from an operator shell.
 
 ## Why detached
 

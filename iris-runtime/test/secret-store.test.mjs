@@ -144,6 +144,28 @@ test("iris-secret import-env: recognizes vars from secrets-config.json alongside
 	assert.equal(store.get("CUSTOM-EXTRA-KEY"), "extra-value");
 });
 
+test("iris-secret import-env --dry-run: lists what would move, touches neither store nor file", async () => {
+	const { keyFile, storeFile } = makeStoreDir();
+	const workingDir = mkdtempSync(join(tmpdir(), "iris-secret-cli-test-"));
+	const envFile = join(workingDir, ".env");
+	const original = "ANTHROPIC_API_KEY=builtin-value\nUNRELATED_VAR=kept\n";
+	writeFileSync(envFile, original);
+
+	const stdout = await new Promise((resolve, reject) => {
+		const proc = spawn(process.execPath, [join(import.meta.dirname, "..", "dist", "cli", "iris-secret.js"), "import-env", envFile, "--prune", "--dry-run"], {
+			env: { ...process.env, IRIS_SECRET_KEY_FILE: keyFile, IRIS_SECRET_STORE_FILE: storeFile, IRIS_STORAGE_ROOT: workingDir },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let out = "";
+		proc.stdout.on("data", (c) => (out += c));
+		proc.on("exit", (code) => (code === 0 ? resolve(out) : reject(new Error(`exit ${code}: ${out}`))));
+	});
+
+	assert.match(stdout, /would import: ANTHROPIC_API_KEY/);
+	assert.equal(readFileSync(envFile, "utf8"), original);
+	assert.equal(SecretStore.open({ keyFile, storeFile }).has("ANTHROPIC-API-KEY"), false);
+});
+
 // ── Redaction ──────────────────────────────────────────────────────────────
 
 test("redact: registered values are masked, short values ignored", () => {
@@ -456,6 +478,15 @@ test("api: secret-drops requires a writable backend and a web transport port", a
 		body: JSON.stringify({ name: "SOME-KEY" }),
 	});
 	assert.equal(res.status, 503);
+	assert.match((await res.json()).error, /legacy env mode.*--migrate-secrets/);
+
+	const put = await fetch(`http://127.0.0.1:${apiPort}/secrets/SOME-KEY`, {
+		method: "PUT",
+		headers: { Authorization: "Bearer iris-shared-token-2", "Content-Type": "application/json" },
+		body: JSON.stringify({ value: "v" }),
+	});
+	assert.equal(put.status, 503);
+	assert.match((await put.json()).error, /legacy env mode.*--migrate-secrets/);
 });
 
 // ── Drop page on the web transport ─────────────────────────────────────────

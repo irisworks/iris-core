@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In legacy env mode, `set-secret` and the secrets API now say the install is
+  in env mode and how to migrate, instead of a generic failure.
+
+### Added
+
+- `upgrade-iris --migrate-secrets` moves a legacy env-mode install to the
+  encrypted store; without it, `upgrade-iris` lists what would move.
+  `iris-secret import-env --dry-run` lists without importing.
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed
