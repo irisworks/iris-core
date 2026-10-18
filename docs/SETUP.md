@@ -80,6 +80,9 @@ When the bootstrap pauses for Slack tokens:
    (Socket Mode delivers them). Without this step Slack rejects a typed `/stop`
    before it reaches Iris; the bare words `stop` / `compact` / `clear` work
    either way. See [Channel Modes](channel-modes.md#control-commands).
+7. *(Optional)* **Interactivity & Shortcuts** → On — leave the Request URL
+   blank. Lets Iris collect secrets through a private Slack form instead of a
+   drop link. See [Secrets](secrets.md#getting-secrets-in--not-through-chat).
 
 ---
 

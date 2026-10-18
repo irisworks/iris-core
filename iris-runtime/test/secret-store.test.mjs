@@ -13,7 +13,8 @@ import { existsSync, readdirSync, mkdirSync } from "node:fs";
 import { SecretStore, loadExtraSensitiveEnvVars, scrubProcessEnv, secretsConfigPath } from "../dist/engine/secret-store.js";
 import { startApiServer } from "../dist/engine/api.js";
 import { redactKnownSecrets, registerSecretValue } from "../dist/engine/redact.js";
-import { createDrop } from "../dist/engine/secret-drops.js";
+import { consumeDrop, createDrop, registerDropPrompter } from "../dist/engine/secret-drops.js";
+import { openDropTunnel } from "../dist/engine/secret-drop-tunnel.js";
 import { WebTransport } from "../dist/transports/web/web.js";
 
 function makeStoreDir() {
@@ -529,4 +530,87 @@ test("web: drop link renders pre-auth, stores once, burns, and notifies the chan
 	const expired = createDrop({ name: "EXPIRES-FAST" });
 	expired.expiresAt = Date.now() - 1;
 	assert.equal((await fetch(`${base}/secret-drop/${expired.token}`)).status, 404);
+});
+
+// ── Intake chain: in-app prompter, then tunnel ─────────────────────────────
+
+test("api: secret-drops prefers an in-app prompter over the web link, even without IRIS_WEBUI_PORT", async (t) => {
+	const { keyFile, storeFile } = makeStoreDir();
+	process.env.IRIS_SECRETS_MODE = "store";
+	process.env.IRIS_SECRET_KEY_FILE = keyFile;
+	process.env.IRIS_SECRET_STORE_FILE = storeFile;
+	process.env.IRIS_API_TOKEN = "iris-shared-token-3";
+	t.after(() => {
+		delete process.env.IRIS_SECRETS_MODE;
+		delete process.env.IRIS_SECRET_KEY_FILE;
+		delete process.env.IRIS_SECRET_STORE_FILE;
+		delete process.env.IRIS_API_TOKEN;
+	});
+	const prompted = [];
+	registerDropPrompter(async (drop) => {
+		if (drop.channelId !== "C-INAPP") return false;
+		prompted.push(drop);
+		return true;
+	});
+	const apiPort = API_PORT + 2;
+	const workingDir = mkdtempSync(join(tmpdir(), "iris-secrets-api-test-"));
+	writeFileSync(join(workingDir, "agents.json"), "{}");
+	servers.push(startApiServer(apiPort, workingDir, new Map(), () => []));
+	const request = (channelId) =>
+		fetch(`http://127.0.0.1:${apiPort}/secret-drops`, {
+			method: "POST",
+			headers: { Authorization: "Bearer iris-shared-token-3", "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "INAPP-KEY", channelId }),
+		});
+
+	const res = await request("C-INAPP");
+	assert.equal(res.status, 200);
+	const body = await res.json();
+	assert.equal(body.route, "in-app");
+	assert.equal(body.token, undefined); // the capability stays with the transport
+	assert.equal(prompted.length, 1);
+	assert.equal(prompted[0].name, "INAPP-KEY");
+
+	// A channel no prompter takes falls through to the web link — 503 without a port.
+	assert.equal((await request("C-OTHER")).status, 503);
+});
+
+test("tunnel: fronts only the drop path, reports the cloudflared URL, and tears down on consume", async (t) => {
+	const binDir = mkdtempSync(join(tmpdir(), "iris-fake-cloudflared-"));
+	const argsFile = join(binDir, "args");
+	writeFileSync(
+		join(binDir, "cloudflared"),
+		`#!/bin/sh\necho "$@" > "${argsFile}"\necho "INF |  https://fake-quick-tunnel.trycloudflare.com  |" >&2\nexec sleep 60\n`,
+		{ mode: 0o755 },
+	);
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${binDir}:${originalPath}`;
+	t.after(() => (process.env.PATH = originalPath));
+
+	const { createServer } = await import("node:http");
+	const upstream = createServer((req, res) => res.end(`upstream ${req.method} ${req.url}`));
+	await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+	t.after(() => upstream.close());
+
+	const drop = createDrop({ name: "TUNNELED" });
+	const tunnel = await openDropTunnel(upstream.address().port, drop.token);
+	assert.ok(tunnel);
+	assert.equal(tunnel.url, "https://fake-quick-tunnel.trycloudflare.com");
+	drop.teardown = tunnel.close;
+
+	const proxyPort = /--url http:\/\/127\.0\.0\.1:(\d+)/.exec(readFileSync(argsFile, "utf8"))[1];
+	const proxy = `http://127.0.0.1:${proxyPort}`;
+	assert.equal(await (await fetch(`${proxy}/secret-drop/${drop.token}`)).text(), `upstream GET /secret-drop/${drop.token}`);
+	assert.equal((await fetch(`${proxy}/`)).status, 404);
+	assert.equal((await fetch(`${proxy}/secret-drop/${"0".repeat(48)}`)).status, 404);
+
+	consumeDrop(drop.token);
+	await assert.rejects(fetch(`${proxy}/secret-drop/${drop.token}`));
+});
+
+test("tunnel: resolves undefined when cloudflared is not installed", async (t) => {
+	const originalPath = process.env.PATH;
+	process.env.PATH = mkdtempSync(join(tmpdir(), "iris-empty-path-"));
+	t.after(() => (process.env.PATH = originalPath));
+	assert.equal(await openDropTunnel(1, "0".repeat(48)), undefined);
 });
