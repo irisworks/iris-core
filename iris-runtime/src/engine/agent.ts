@@ -345,6 +345,9 @@ Scripts are in: {baseDir}/
 
 \`name\` and \`description\` are required. Use \`{baseDir}\` as placeholder for the skill's directory path.
 
+### Credentials
+Read secrets with \`get-secret NAME\` and save them with \`set-secret\` — never from your environment or \`/iris/.env\`. In store/proxy secrets mode secrets are deliberately absent from the environment, so an unset \`$FOO_TOKEN\` does not mean the credential is missing: check \`get-secret\` before reporting it missing. Never print a secret; show at most its last 4 characters.
+
 ### Available Skills
 ${skills.length > 0 ? formatSkillsForIrisPrompt(skills) : "(no skills installed yet)"}
 

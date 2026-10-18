@@ -39,13 +39,15 @@ wrapper needed.
 cd /iris/repo
 git add <path>
 git commit -m "<message describing what changed and why>"
-git push "https://${GITHUB_TOKEN}@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git" main
+git push "https://$(get-secret GITHUB-TOKEN)@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git" main
 ```
 
-`GITHUB_TOKEN`, `IRIS_GITHUB_ORG`, and `IRIS_GITHUB_REPO` are already set in
-`/iris/.env` on any bootstrapped install — read them from there rather than
-asking the operator to re-supply a PAT or set up SSH. If they're unset, say
-so and point at `/iris/.env`.
+The PAT is already configured on any bootstrapped install — fetch it with
+`get-secret GITHUB-TOKEN`, never from the `GITHUB_TOKEN` env var or `/iris/.env` (in
+store/proxy secrets mode it is not in the environment). `IRIS_GITHUB_ORG` and
+`IRIS_GITHUB_REPO` are plain config in the environment. Don't ask the operator
+to re-supply a PAT or set up SSH; if `get-secret GITHUB-TOKEN` fails, say so
+and ask them to store it with `set-secret`.
 
 Pushing the full remote URL with the token inline (rather than rewriting
 `origin`) avoids permanently mutating the repo's remote — `origin` on a fresh

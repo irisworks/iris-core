@@ -71,6 +71,17 @@ that the model recovers by falling back to the absolute path on a `command not
 found` error, but that's a wasted call on every single invocation. Name the
 symlink after the documented command, not the source filename, if they differ.
 
+## Credentials in skills
+
+Skills read secrets with `get-secret NAME` and store them with `set-secret` —
+never from the process environment (`$FOO_TOKEN`) or by reading `/iris/.env`,
+in scripts or in `SKILL.md` instructions. In `store` and `proxy` secrets
+modes the runtime removes migrated secrets from its environment, so a skill
+that reads them directly breaks after migration; `get-secret` resolves in
+every mode. Don't print a secret value — show at most its last 4 characters —
+and when a credential can't be resolved, say `get-secret NAME` failed rather
+than that an environment variable is unset. See [Secrets](secrets.md).
+
 ## Writing a skill
 
 Ask Iris. The `self-extend` skill lets her scaffold, test, and commit new skills
