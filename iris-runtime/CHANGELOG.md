@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- Bumped transitive `hono` 4.13.7 -> 4.13.13 (GHSA: `serveStatic` double path decoding).
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed
