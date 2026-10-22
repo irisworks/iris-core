@@ -969,7 +969,7 @@ export function createTelegramContext(event: TelegramEvent, bot: TelegramBot, st
 			text: event.text,
 			rawText: event.text,
 			user: event.user,
-			userName: event.identity?.userName,
+			userName: event.identity ? event.user : undefined,
 			channel: event.channel,
 			ts: event.ts,
 			attachments: (event.attachments || []).map((a) => ({ local: a.local })),

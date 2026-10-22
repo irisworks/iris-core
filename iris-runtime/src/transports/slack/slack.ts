@@ -1761,7 +1761,7 @@ export function createSlackContext(event: SlackEvent, slack: SlackBot, state: Ch
 			text: event.text,
 			rawText: event.text,
 			user: event.user,
-			userName: event.identity?.userName ?? user?.userName,
+			userName: event.identity ? event.user : user?.userName,
 			channel: event.channel,
 			ts: event.ts,
 			attachments: (event.attachments || []).map((a) => ({ local: a.local })),

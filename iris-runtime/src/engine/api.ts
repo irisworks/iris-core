@@ -313,7 +313,9 @@ export function parseSessionIdentity(
 	if (role !== undefined && (typeof role !== "string" || !role.trim() || role.length > 64)) {
 		return { error: "role must be a non-empty string of at most 64 chars" };
 	}
-	return { identity: { userId, userName: userName?.trim(), role: role?.trim() } };
+	// Collapsed so a newline can't break out of its line in the `## Current User` block.
+	const oneLine = (v: string | undefined) => v?.replace(/\s+/g, " ").trim();
+	return { identity: { userId, userName: oneLine(userName), role: oneLine(role) } };
 }
 
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
@@ -802,7 +804,7 @@ export function startApiServer(
 				try {
 					const responseText = await bot.injectSessionMessage(
 						sessionId,
-						identity?.userName ?? body.user ?? "api",
+						identity?.userName ?? body.user ?? identity?.userId ?? "api",
 						body.text,
 						validated.attachments,
 						identity,

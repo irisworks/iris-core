@@ -36,8 +36,8 @@ directory and `$HOME`). A session turn that carries a `userId` also gets that
 user's `users/<userId>/` directory writable for that turn only (see
 [Per-user memory](integration.md#per-user-memory)). Other channels' and users'
 directories, the rest of the workspace (`MEMORY.md`, `events/`), and the
-runtime's environment variables are not visible, and system packages cannot be installed. This is a
-filesystem/process boundary, not a kernel-exploit boundary — use
+runtime's environment variables are not visible, and system packages cannot
+be installed. This is a filesystem/process boundary, not a kernel-exploit boundary — use
 `firecracker-pool` where kernel-level isolation is required. Requires
 unprivileged user namespaces (on Ubuntu 24.04+, an AppArmor profile permitting
 them for `bwrap`). Set `IRIS_API_TOKEN` before starting Iris in this mode:

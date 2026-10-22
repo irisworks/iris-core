@@ -124,9 +124,9 @@ curl -X POST "$IRIS/sessions/$ID/message" \
 
 | Field | Rule |
 |---|---|
-| `userId` | 1–128 chars of `A-Z a-z 0-9 . _ @ + -`, not starting with `.`. Rejected with `400` otherwise; it is never rewritten, so two users can't end up sharing memory |
-| `userName` | Optional display name (≤128 chars). Labels the turn instead of `user` |
-| `role` | Optional free-form role (≤64 chars), shown to Iris as-is |
+| `userId` | 1–128 chars of `A-Z a-z 0-9 . _ @ + -`, not starting with `.`. Rejected with `400` otherwise; it is never rewritten, so two users can't end up sharing memory. Case-sensitive: `Ada` and `ada` are different users, and on a case-insensitive filesystem they would share one directory, so send ids in a single consistent case |
+| `userName` | Optional display name (≤128 chars, whitespace collapsed to single spaces). Labels the turn; without it the label is `user`, then `userId` |
+| `role` | Optional free-form role (≤64 chars, whitespace collapsed), shown to Iris |
 
 `userName` and `role` need a `userId`. All three are written to the session's
 `log.jsonl` entry for that message.
