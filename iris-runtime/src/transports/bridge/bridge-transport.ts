@@ -21,10 +21,12 @@ import { ChannelQueue } from "../../engine/channel-queue.js";
 import type { ChannelState } from "../../engine/index.js";
 import { resolveChannelDir } from "../../engine/store.js";
 import {
+	identityLogFields,
 	registerPromptProfile,
 	type ChannelInfo,
 	type ChannelTransport,
 	type MessageContext,
+	type SessionUserIdentity,
 	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
@@ -134,9 +136,11 @@ export class BridgeTransport implements ChannelTransport {
 				text: event.text,
 				rawText: event.text,
 				user: event.user,
+				userName: event.identity?.userName,
 				channel: event.channel,
 				ts: event.ts,
 				attachments: (event.attachments || []).map((a) => ({ local: a.local })),
+				identity: event.identity,
 			},
 			channels: [],
 			users: [],
@@ -176,6 +180,7 @@ export class BridgeTransport implements ChannelTransport {
 		user: string,
 		text: string,
 		attachments: Array<{ local: string }> = [],
+		identity?: SessionUserIdentity,
 	): Promise<string> {
 		const channelId = `SESSION-${sessionId}`;
 		// Same 5-message-per-channel convention as enqueueEvent above. Checked
@@ -197,13 +202,14 @@ export class BridgeTransport implements ChannelTransport {
 			date: new Date().toISOString(),
 			ts,
 			user,
+			...identityLogFields(identity),
 			text,
 			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
 			isBot: false,
 		});
 
 		const responsePromise = registerSessionRequest(sessionId, envMs("IRIS_SESSION_TIMEOUT_MS", 90_000));
-		const event = { channel: channelId, user, text, ts, attachments };
+		const event = { channel: channelId, user, text, ts, attachments, identity };
 		queue.enqueue(async () => {
 			await this.dispatch(event, this);
 		});

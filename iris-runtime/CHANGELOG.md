@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `POST /sessions/:id/message` accepts `userId`, `userName` and `role`. With a
+  `userId`, Iris also loads `users/<userId>/MEMORY.md` and `PREFERENCES.md` for
+  that turn and saves personal facts there.
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed

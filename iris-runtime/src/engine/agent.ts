@@ -38,6 +38,7 @@ import {
 	getPromptProfile,
 	type ChannelInfo,
 	type MessageContext,
+	type SessionUserIdentity,
 	type TransportPromptProfile,
 	type UserInfo,
 } from "../transport/types.js";
@@ -153,7 +154,13 @@ function loadConstitution(workspaceDir: string): string {
 	}
 }
 
-function getMemory(channelDir: string, workingDir: string): string {
+/** Per-user memory dir for a session API caller (issue #297). `userId` is
+ * path-safe by the time it gets here (api.ts checks SESSION_USER_ID_RE). */
+export function userMemoryRelPath(userId: string): string {
+	return `users/${userId}`;
+}
+
+export function getMemory(channelDir: string, workingDir: string, userId?: string): string {
 	const parts: string[] = [];
 
 	// Read workspace-level memory (shared across all channels)
@@ -179,6 +186,26 @@ function getMemory(channelDir: string, workingDir: string): string {
 			}
 		} catch (error) {
 			log.logWarning("Failed to read channel memory", `${channelMemoryPath}: ${error}`);
+		}
+	}
+
+	// Read the current user's memory and preferences (session API callers with a userId)
+	if (userId) {
+		const userDir = join(workingDir, userMemoryRelPath(userId));
+		for (const [file, heading] of [
+			["MEMORY.md", "User Memory"],
+			["PREFERENCES.md", "User Preferences"],
+		] as const) {
+			const path = join(userDir, file);
+			if (!existsSync(path)) continue;
+			try {
+				const content = readFileSync(path, "utf-8").trim();
+				if (content) {
+					parts.push(`### ${heading} (${userId})\n${content}`);
+				}
+			} catch (error) {
+				log.logWarning("Failed to read user memory", `${path}: ${error}`);
+			}
 		}
 	}
 
@@ -432,6 +459,7 @@ Maximum 5 events can be queued. Don't create excessive immediate or periodic eve
 Write to MEMORY.md files to persist context across conversations.
 - Global (${workspacePath}/MEMORY.md): skills, preferences, project info
 - Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
+- User (${workspacePath}/users/<userId>/MEMORY.md and PREFERENCES.md): only when the turn's dynamic context names a Current User — facts about that person and how they like to work. Put anything personal here, never in global or channel memory, which every user sees.
 Update when you learn something important or when asked to remember something.
 Current memory contents are included with each message below, since they can change between turns.
 
@@ -479,14 +507,29 @@ Each built-in tool requires a "label" parameter (shown to user). MCP tools (mcp_
  * on every turn. Prepended to the new user message instead, after the cached
  * history, where its churn doesn't cost anything.
  */
-function buildDynamicContext(memory: string, mcpStatus: McpStatusSummary | null, workspacePath: string): string {
+export function buildDynamicContext(
+	memory: string,
+	mcpStatus: McpStatusSummary | null,
+	workspacePath: string,
+	identity?: SessionUserIdentity,
+): string {
 	return `<dynamic_context>
-## Current Memory
+${identity ? `${formatCurrentUser(identity, workspacePath)}\n\n` : ""}## Current Memory
 ${memory}
 
 ## MCP Servers
 ${formatMcpSection(mcpStatus, workspacePath)}
 </dynamic_context>`;
+}
+
+function formatCurrentUser(identity: SessionUserIdentity, workspacePath: string): string {
+	const userPath = `${workspacePath}/${userMemoryRelPath(identity.userId)}`;
+	const lines = [`## Current User`, `- id: ${identity.userId}`];
+	if (identity.userName) lines.push(`- name: ${identity.userName}`);
+	if (identity.role) lines.push(`- role: ${identity.role}`);
+	lines.push(`- memory: ${userPath}/MEMORY.md (facts about this user)`);
+	lines.push(`- preferences: ${userPath}/PREFERENCES.md (how this user wants you to work)`);
+	return lines.join("\n");
 }
 
 function formatMcpSection(mcpStatus: McpStatusSummary | null, workspacePath: string): string {
@@ -1458,7 +1501,8 @@ Each built-in tool requires a "label" parameter (shown to user).
 			// invalidate the entire cached prefix (tools + system + full history) on
 			// every turn. They're prepended to the per-turn user message instead,
 			// after the cached prefix, where their churn is free (see buildDynamicContext).
-			const memory = getMemory(channelDir, workingDir);
+			const identity = ctx.message.identity;
+			const memory = getMemory(channelDir, workingDir, identity?.userId);
 			const constitution = loadConstitution(workspaceDir);
 			let skills = loadIrisSkills(channelDir, workspacePath, workingDir);
 			// SESSION- channels are non-admin (thread mode) — no agent spawning allowed
@@ -1514,7 +1558,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 				sessionId: langfuseSessionId(channelId),
 				channelId,
 				name: "iris-turn",
-				userId: ctx.message.userName,
+				userId: identity?.userId ?? ctx.message.userName,
 				input: ctx.message.text,
 				model: modelId,
 				provider,
@@ -1582,7 +1626,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 			log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
 			log.logInfo(`Channels: ${ctx.channels.length}, Users: ${ctx.users.length}`);
 
-			const dynamicContext = buildDynamicContext(memory, mcpManager.getStatus(), workspacePath);
+			const dynamicContext = buildDynamicContext(memory, mcpManager.getStatus(), workspacePath, identity);
 			const userInput = await buildUserInput(ctx.message, store, profile.attachmentsTagName);
 			const userMessage = `${dynamicContext}\n\n${userInput.text}`;
 			const imageAttachments = userInput.images;

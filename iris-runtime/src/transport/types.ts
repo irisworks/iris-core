@@ -27,6 +27,26 @@ export function byId(a: { id: string }, b: { id: string }): number {
 	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/**
+ * Who sent a session API message (issue #297), as asserted by the host app
+ * that authenticated them. `userId` keys the per-user memory layer
+ * (`<workspace>/users/<userId>/`), so it must already be path-safe — api.ts
+ * validates it against SESSION_USER_ID_RE before it reaches a transport.
+ */
+export interface SessionUserIdentity {
+	userId: string;
+	userName?: string;
+	role?: string;
+}
+
+/** Path-safe stable user id: no separators, no leading dot (so never `.`/`..`). */
+export const SESSION_USER_ID_RE = /^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]{0,127}$/;
+
+/** The identity fields a session message's log.jsonl entry carries (empty without one). */
+export function identityLogFields(identity?: SessionUserIdentity): Partial<SessionUserIdentity> {
+	return identity ? { userId: identity.userId, userName: identity.userName, role: identity.role } : {};
+}
+
 /** A normalized inbound message event, independent of the transport it came from. */
 export interface TransportEvent {
 	channel: string;
@@ -43,6 +63,8 @@ export interface TransportEvent {
 	 * turn that would grow the channel's own session history on every firing.
 	 */
 	runAsTask?: boolean;
+	/** Set only for session API messages that carried a `userId` (issue #297). */
+	identity?: SessionUserIdentity;
 }
 
 /**
@@ -61,6 +83,8 @@ export interface MessageContext {
 		channel: string;
 		ts: string;
 		attachments: Array<{ local: string }>;
+		/** Session API caller identity — drives the per-user memory layer (issue #297). */
+		identity?: SessionUserIdentity;
 	};
 	channelName?: string;
 	channels: ChannelInfo[];

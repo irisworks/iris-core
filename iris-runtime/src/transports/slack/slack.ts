@@ -22,10 +22,12 @@ import { resolveChannelDir, type Attachment, type ChannelStore } from "../../eng
 import type { ChannelState } from "../../engine/index.js";
 import {
 	byId,
+	identityLogFields,
 	registerPromptProfile,
 	type ChannelInfo,
 	type ChannelTransport,
 	type MessageContext,
+	type SessionUserIdentity,
 	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
@@ -121,6 +123,7 @@ export interface SlackEvent {
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
 	/** Processed attachments with local paths (populated after logUserMessageSync) */
 	attachments?: Attachment[];
+	identity?: SessionUserIdentity;
 }
 
 /** The fields we use from a Slack slash-command envelope (`slash_commands`). */
@@ -501,6 +504,7 @@ export class SlackBot implements ChannelTransport {
 		user: string,
 		text: string,
 		attachments: Array<{ local: string }> = [],
+		identity?: SessionUserIdentity,
 	): Promise<string> {
 		const channelId = `SESSION-${sessionId}`;
 		const queue = this.getQueue(channelId);
@@ -518,6 +522,7 @@ export class SlackBot implements ChannelTransport {
 			date: new Date().toISOString(),
 			ts,
 			user,
+			...identityLogFields(identity),
 			text,
 			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
 			isBot: false,
@@ -532,6 +537,7 @@ export class SlackBot implements ChannelTransport {
 			text,
 			ts,
 			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
+			identity,
 		};
 
 		queue.enqueue(() => this.handler.handleEvent(slackEvent, this));
@@ -1755,10 +1761,11 @@ export function createSlackContext(event: SlackEvent, slack: SlackBot, state: Ch
 			text: event.text,
 			rawText: event.text,
 			user: event.user,
-			userName: user?.userName,
+			userName: event.identity?.userName ?? user?.userName,
 			channel: event.channel,
 			ts: event.ts,
 			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
+			identity: event.identity,
 		},
 		channelName: slack.getChannel(event.channel)?.name,
 		store: state.store,
