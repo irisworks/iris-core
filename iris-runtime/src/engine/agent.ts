@@ -318,7 +318,7 @@ export function buildSystemPrompt(
 		: sandboxConfig.type === "bwrap"
 			? `You are running in a bubblewrap sandbox on the host machine.
 - Bash working directory: ${channelPath}
-- Only ${channelPath} is writable; system directories are read-only and other workspace paths are not visible
+- Only ${channelPath} and the Current User's memory dir (when one is named) are writable; system directories are read-only and other workspace paths are not visible
 - You cannot install system packages`
 			: `You are running directly on the host machine.
 - Bash working directory: ${process.cwd()}
@@ -1503,6 +1503,8 @@ Each built-in tool requires a "label" parameter (shown to user).
 			// after the cached prefix, where their churn is free (see buildDynamicContext).
 			const identity = ctx.message.identity;
 			const memory = getMemory(channelDir, workingDir, identity?.userId);
+			// Every turn, so a shared session never leaves the previous user's dir bound.
+			executor.setUserDir?.(identity ? join(workingDir, userMemoryRelPath(identity.userId)) : undefined);
 			const constitution = loadConstitution(workspaceDir);
 			let skills = loadIrisSkills(channelDir, workspacePath, workingDir);
 			// SESSION- channels are non-admin (thread mode) — no agent spawning allowed

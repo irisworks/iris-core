@@ -140,6 +140,8 @@ channel memory:
 Iris is told the current user's id, name, role and these two paths, and is
 instructed to save anything personal there instead of in global or channel
 memory, which every user sees. Turns without a `userId` load no per-user files.
+Under `--sandbox=bwrap`, only the current user's directory is mounted for the
+turn, so Iris can't read or write anyone else's.
 
 `IRIS_API_TOKEN` also authorizes secrets management and channel-addressed event
 injection, so it must stay server-side — never ship it to a browser. Your BFF

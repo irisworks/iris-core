@@ -193,6 +193,14 @@ export interface Executor {
 	 * Docker: returns /workspace
 	 */
 	getWorkspacePath(hostPath: string): string;
+
+	/**
+	 * Make the current turn's per-user memory dir (`users/<userId>/`, #297)
+	 * writable, or clear it with undefined. Set at the start of every turn.
+	 * Only bwrap implements it: the other executors already see the whole
+	 * workspace.
+	 */
+	setUserDir?(dir: string | undefined): void;
 }
 
 export interface ExecOptions {
@@ -302,6 +310,10 @@ class RedactingExecutor implements Executor {
 	getWorkspacePath(hostPath: string): string {
 		return this.inner.getWorkspacePath(hostPath);
 	}
+
+	setUserDir(dir: string | undefined): void {
+		this.inner.setUserDir?.(dir);
+	}
 }
 
 class DockerExecutor implements Executor {
@@ -322,19 +334,27 @@ class DockerExecutor implements Executor {
 
 /**
  * Runs each command under bubblewrap: fresh mount/pid/ipc/uts namespaces
- * (network shared), system dirs read-only, the channel dir as the only writable
- * path, and the workspace skills dir read-only. Other channels, the rest of the
- * workspace, and the runtime's env (tokens) are not visible. A filesystem/process
+ * (network shared), system dirs read-only, the channel dir writable, and the
+ * workspace skills dir read-only. The current turn's user memory dir (see
+ * setUserDir) is also writable; other users' dirs, other channels, the rest of
+ * the workspace, and the runtime's env (tokens) are not visible. A filesystem/process
  * boundary, not a kernel-exploit boundary — use firecracker-pool for that.
  */
 class BwrapExecutor implements Executor {
+	private userDir: string | undefined;
+
 	constructor(
 		private workspaceDir: string,
 		private channelDir: string,
 	) {}
 
+	setUserDir(dir: string | undefined): void {
+		this.userDir = dir;
+	}
+
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
 		mkdirSync(this.channelDir, { recursive: true });
+		if (this.userDir) mkdirSync(this.userDir, { recursive: true });
 		const args = [
 			"--unshare-all",
 			"--share-net",
@@ -363,6 +383,7 @@ class BwrapExecutor implements Executor {
 			"--bind",
 			this.channelDir,
 			this.channelDir,
+			...(this.userDir ? ["--bind", this.userDir, this.userDir] : []),
 			"--chdir",
 			this.channelDir,
 			"sh",

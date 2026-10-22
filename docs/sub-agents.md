@@ -31,10 +31,12 @@ rootfs destroyed with the VM.
 call for a channel in a fresh [bwrap](https://github.com/containers/bubblewrap)
 sandbox: new mount/pid/ipc/uts namespaces, network shared (outbound APIs still
 work), `/usr`, `/bin`, `/lib`, `/etc` read-only, the workspace `skills/` dir
-read-only, and the channel's own directory as the only writable path (also the
-working directory and `$HOME`). Other channels' directories, the rest of the
-workspace (`MEMORY.md`, `events/`), and the runtime's environment variables are
-not visible, and system packages cannot be installed. This is a
+read-only, and the channel's own directory writable (also the working
+directory and `$HOME`). A session turn that carries a `userId` also gets that
+user's `users/<userId>/` directory writable for that turn only (see
+[Per-user memory](integration.md#per-user-memory)). Other channels' and users'
+directories, the rest of the workspace (`MEMORY.md`, `events/`), and the
+runtime's environment variables are not visible, and system packages cannot be installed. This is a
 filesystem/process boundary, not a kernel-exploit boundary — use
 `firecracker-pool` where kernel-level isolation is required. Requires
 unprivileged user namespaces (on Ubuntu 24.04+, an AppArmor profile permitting
