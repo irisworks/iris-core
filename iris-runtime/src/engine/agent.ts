@@ -155,7 +155,9 @@ function loadConstitution(workspaceDir: string): string {
 }
 
 /** Per-user memory dir for a session API caller (issue #297). `userId` is
- * path-safe by the time it gets here (api.ts checks SESSION_USER_ID_RE). */
+ * path-safe by the time it gets here (api.ts checks SESSION_USER_ID_RE). Used
+ * verbatim, so ids differing only by case share a dir on a case-insensitive
+ * filesystem — docs/integration.md requires a case-sensitive workspace. */
 export function userMemoryRelPath(userId: string): string {
 	return `users/${userId}`;
 }

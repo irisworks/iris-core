@@ -124,7 +124,7 @@ curl -X POST "$IRIS/sessions/$ID/message" \
 
 | Field | Rule |
 |---|---|
-| `userId` | 1–128 chars of `A-Z a-z 0-9 . _ @ + -`, not starting with `.`. Rejected with `400` otherwise; it is never rewritten, so two users can't end up sharing memory. Case-sensitive: `Ada` and `ada` are different users, and on a case-insensitive filesystem they would share one directory, so send ids in a single consistent case |
+| `userId` | 1–128 chars of `A-Z a-z 0-9 . _ @ + -`, not starting with `.`. Rejected with `400` otherwise. Used as the directory name exactly as sent: `Ada` and `ada` are different users |
 | `userName` | Optional display name (≤128 chars, whitespace collapsed to single spaces). Labels the turn; without it the label is `user`, then `userId` |
 | `role` | Optional free-form role (≤64 chars, whitespace collapsed), shown to Iris |
 
@@ -140,10 +140,23 @@ channel memory:
 Iris is told the current user's id, name, role and these two paths, and is
 instructed to save anything personal there instead of in global or channel
 memory, which every user sees. Turns without a `userId` load no per-user files.
-Under `--sandbox=bwrap`, only the current user's directory is mounted for the
-turn, so Iris can't read or write anyone else's. A turn belongs to one user:
-a message from anyone else that arrives while it runs is queued for its own
-turn rather than folded into this one.
+A turn belongs to one user: a message from anyone else that arrives while it
+runs is queued for its own turn rather than folded into this one.
+
+How strongly users are kept apart depends on the sandbox:
+
+- `--sandbox=bwrap`: only the current user's directory is mounted for the
+  turn, so Iris can't read or write anyone else's.
+- `host`, `docker`, `firecracker`: every user's directory is reachable. Only
+  the current user's files are loaded into the turn, and Iris is told to use
+  only those, but nothing enforces it. Use `bwrap` if users must not be able
+  to reach each other's memory.
+
+The workspace must be on a **case-sensitive filesystem** (the Linux default).
+On a case-insensitive one (the macOS and Windows defaults), `Ada` and `ada`
+resolve to the same directory and share memory. If your ids can differ only by
+case, normalize them before sending, or keep the workspace on a case-sensitive
+volume.
 
 `IRIS_API_TOKEN` also authorizes secrets management and channel-addressed event
 injection, so it must stay server-side — never ship it to a browser. Your BFF
