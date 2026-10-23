@@ -77,3 +77,10 @@ Ask Iris. The `self-extend` skill lets her scaffold, test, and commit new skills
 herself — every skill she writes is committed to GitHub before use (constitution
 rule 2). To write one by hand: create the directory, write `SKILL.md` with
 frontmatter, drop in your script, done — no registration step.
+
+When a skill script fails mid-task (for example, a scraper whose target page
+changed), Iris diagnoses and fixes the script, then re-runs it, rather than
+stopping to ask (constitution rule 9). She asks only for operator-only inputs
+such as credentials, product decisions, or irreversible actions. Guarantees
+like "never publish on a missing value" belong in the script's own checks, not
+just in its `SKILL.md`.
