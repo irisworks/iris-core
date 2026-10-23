@@ -10,6 +10,12 @@
   user's directory is mounted, writable, for the turn. A message from a
   different user is queued for its own turn, not folded into the running one.
 
+### Changed
+
+- Default constitution: when one of Iris's own skill scripts fails mid-task,
+  she now diagnoses, fixes, and re-runs it instead of stopping to ask. Installs
+  with their own `CONSTITUTION.md` are unaffected.
+
 ## [1.12.1] - 2026-10-14
 
 ### Fixed
