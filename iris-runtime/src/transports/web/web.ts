@@ -36,10 +36,12 @@ import {
 } from "../../engine/channel-observers.js";
 import { resolveChannelDir, resolveChannelPath, safeJoin } from "../../engine/store.js";
 import {
+	identityLogFields,
 	registerPromptProfile,
 	type ChannelInfo,
 	type ChannelTransport,
 	type MessageContext,
+	type SessionUserIdentity,
 	type ToolEvent,
 	type TransportEvent,
 	type TransportPromptProfile,
@@ -314,9 +316,11 @@ export class WebTransport implements ChannelTransport {
 				text: event.text,
 				rawText: event.text,
 				user: event.user,
+				userName: event.identity ? event.user : undefined,
 				channel: event.channel,
 				ts: event.ts,
 				attachments: (event.attachments || []).map((a) => ({ local: a.local })),
+				identity: event.identity,
 			},
 			channels: [],
 			users: [],
@@ -370,6 +374,7 @@ export class WebTransport implements ChannelTransport {
 		user: string,
 		text: string,
 		attachments: Array<{ local: string }> = [],
+		identity?: SessionUserIdentity,
 	): Promise<string> {
 		const { registerSessionRequest, envMs } = await import("../../engine/sessions.js");
 		const channelId = `SESSION-${sessionId}`;
@@ -382,13 +387,14 @@ export class WebTransport implements ChannelTransport {
 			date: new Date().toISOString(),
 			ts,
 			user,
+			...identityLogFields(identity),
 			text,
 			attachments: attachments.map((a) => ({ original: basename(a.local), local: a.local })),
 			isBot: false,
 		});
 
 		const responsePromise = registerSessionRequest(sessionId, envMs("IRIS_SESSION_TIMEOUT_MS", 90_000));
-		this.dispatch({ channel: channelId, user, text, ts, attachments }, this);
+		this.dispatch({ channel: channelId, user, text, ts, attachments, identity }, this);
 		return responsePromise;
 	}
 

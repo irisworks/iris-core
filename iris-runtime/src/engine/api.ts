@@ -72,6 +72,7 @@ import { getSecretMeta, getSecretProvider } from "./secrets.js";
 import { SECRET_NAME_RE, SecretStore, secretsMode, type SecretSource } from "./secret-store.js";
 import { createDrop } from "./secret-drops.js";
 import { loadServices } from "../broker/services.js";
+import { SESSION_USER_ID_RE, type SessionUserIdentity } from "../transport/types.js";
 
 // Minimal interfaces so api.ts doesn't import transport classes directly (avoids circular deps)
 export interface SessionInjector {
@@ -80,6 +81,7 @@ export interface SessionInjector {
 		user: string,
 		text: string,
 		attachments?: Array<{ local: string }>,
+		identity?: SessionUserIdentity,
 	): Promise<string>;
 	postMessage(channel: string, text: string): Promise<string>;
 	resetSessionContext(sessionId: string): void;
@@ -285,6 +287,35 @@ export function validateSessionAttachments(
 		validated.push({ local });
 	}
 	return { attachments: validated };
+}
+
+/**
+ * The caller identity on POST /sessions/:id/message (issue #297). `userId` is
+ * optional (no identity → no per-user memory layer) but, when sent, must
+ * already be path-safe: it names `<workspace>/users/<userId>/`, and silently
+ * rewriting it could merge two users' memory. `userName`/`role` need a
+ * `userId` — without one there is no user for them to describe.
+ */
+export function parseSessionIdentity(
+	body: { userId?: unknown; userName?: unknown; role?: unknown },
+): { identity?: SessionUserIdentity } | { error: string } {
+	const { userId, userName, role } = body;
+	if (userId === undefined) {
+		if (userName !== undefined || role !== undefined) return { error: "userName and role require userId" };
+		return {};
+	}
+	if (typeof userId !== "string" || !SESSION_USER_ID_RE.test(userId)) {
+		return { error: "userId must be 1-128 chars of [A-Za-z0-9._@+-] and not start with '.'" };
+	}
+	if (userName !== undefined && (typeof userName !== "string" || !userName.trim() || userName.length > 128)) {
+		return { error: "userName must be a non-empty string of at most 128 chars" };
+	}
+	if (role !== undefined && (typeof role !== "string" || !role.trim() || role.length > 64)) {
+		return { error: "role must be a non-empty string of at most 64 chars" };
+	}
+	// Collapsed so a newline can't break out of its line in the `## Current User` block.
+	const oneLine = (v: string | undefined) => v?.replace(/\s+/g, " ").trim();
+	return { identity: { userId, userName: oneLine(userName), role: oneLine(role) } };
 }
 
 function writeEvent(eventsDir: string, channelId: string, user: string, text: string): string {
@@ -734,7 +765,14 @@ export function startApiServer(
 					json(res, 404, { error: "session not found" });
 					return;
 				}
-				let body: { text?: string; user?: string; attachments?: unknown };
+				let body: {
+					text?: string;
+					user?: string;
+					userId?: unknown;
+					userName?: unknown;
+					role?: unknown;
+					attachments?: unknown;
+				};
 				try {
 					body = JSON.parse(await readBody(req)) as typeof body;
 				} catch {
@@ -750,18 +788,26 @@ export function startApiServer(
 					json(res, 400, { error: validated.error });
 					return;
 				}
+				const parsedIdentity = parseSessionIdentity(body);
+				if ("error" in parsedIdentity) {
+					json(res, 400, { error: parsedIdentity.error });
+					return;
+				}
+				const { identity } = parsedIdentity;
 				const bot = sessionTransport();
 				if (!bot) {
 					json(res, 503, { error: "session injection not available (bot not started)" });
 					return;
 				}
-				log.logInfo(`[api] POST /sessions/${sessionId}/message: ${body.text.substring(0, 60)}`);
+				const who = identity ? ` [user ${identity.userId}]` : "";
+				log.logInfo(`[api] POST /sessions/${sessionId}/message${who}: ${body.text.substring(0, 60)}`);
 				try {
 					const responseText = await bot.injectSessionMessage(
 						sessionId,
-						body.user ?? "api",
+						identity?.userName ?? body.user ?? identity?.userId ?? "api",
 						body.text,
 						validated.attachments,
+						identity,
 					);
 					// sessionId is echoed so callers correlating a turn with its Langfuse
 					// trace (Pupil, IRIS-97) can read it off the turn response alone.

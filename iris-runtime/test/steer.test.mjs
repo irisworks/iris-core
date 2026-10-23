@@ -177,3 +177,19 @@ test("pi contract: steeringMode \"all\" delivers every message steered during a 
 	assert.deepEqual(contexts[1].slice(-2).map((m) => m.text), ["second", "third"]);
 	assert.equal(agent.hasQueuedMessages(), false);
 });
+
+// #297: a turn's memory and bwrap mount belong to one session user, so a
+// message from a different (or no) identity must queue instead of joining it.
+test("engine.steer: only folds in messages from the running turn's user", async () => {
+	const { engine, steered, seed } = await makeEngine();
+	seed("SESSION-s1", { runUserId: "ada" });
+	const msg = (identity) => ({ channel: "SESSION-s1", user: "api", text: "x", ts: "1", identity });
+	assert.equal(engine.steer(msg({ userId: "bob" })), false);
+	assert.equal(engine.steer(msg(undefined)), false);
+	assert.equal(engine.steer(msg({ userId: "ada" })), true);
+	assert.equal(steered.length, 1);
+
+	seed("C1");
+	assert.equal(engine.steer({ channel: "C1", user: "U1", text: "x", ts: "1", identity: { userId: "ada" } }), false);
+	assert.equal(engine.steer({ channel: "C1", user: "U1", text: "x", ts: "1" }), true);
+});

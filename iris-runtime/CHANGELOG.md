@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- `POST /sessions/:id/message` accepts `userId`, `userName` and `role`. With a
+  `userId`, Iris also loads `users/<userId>/MEMORY.md` and `PREFERENCES.md` for
+  that turn and saves personal facts there. Under `--sandbox=bwrap` only that
+  user's directory is mounted, writable, for the turn. A message from a
+  different user is queued for its own turn, not folded into the running one.
+
+### Changed
+
+- Default constitution: when one of Iris's own skill scripts fails mid-task,
+  she now diagnoses, fixes, and re-runs it instead of stopping to ask. Installs
+  with their own `CONSTITUTION.md` are unaffected.
+
 ### Security
 
 - Bumped transitive `hono` 4.13.7 -> 4.13.13 (GHSA: `serveStatic` double path decoding).

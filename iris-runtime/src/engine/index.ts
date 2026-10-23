@@ -22,6 +22,8 @@ export interface ChannelState {
 	store: ChannelStore;
 	stopRequested: boolean;
 	stopMessageTs?: string;
+	/** userId of the session caller whose turn is running (#297); steer() only folds in that user's messages. */
+	runUserId?: string;
 }
 
 /**
@@ -117,6 +119,9 @@ export async function createEngine(config: EngineConfig): Promise<Engine> {
 			if (process.env.IRIS_STEER_MESSAGES === "false") return false;
 			const state = channelStates.get(event.channel);
 			if (!state?.running || state.stopRequested) return false;
+			// The turn's memory and bwrap mount belong to one user (#297): a message
+			// from anyone else queues for its own turn instead of joining this one.
+			if (state.runUserId !== event.identity?.userId) return false;
 			return state.runner.steer({ text: event.text, userName, attachments: event.attachments });
 		},
 
@@ -178,6 +183,8 @@ export async function createEngine(config: EngineConfig): Promise<Engine> {
 
 		async handleEvent(event: TransportEvent, transport: EngineTransport, isEvent?: boolean): Promise<void> {
 			const state = getState(event.channel);
+			// handleEvent only runs between turns (the channel queue serializes them).
+			state.runUserId = event.identity?.userId;
 
 			// A scheduled event created with `--as-task` (skills/schedule) carries
 			// runAsTask through EventsWatcher (engine/events.ts). Route it through

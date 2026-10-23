@@ -99,3 +99,28 @@ test("bwrap executor isolates the channel dir", { skip: !bwrapWorks && "bwrap un
 		rmSync(workspaceDir, { recursive: true, force: true });
 	}
 });
+
+// #297: the current turn's users/<userId>/ dir is writable, only while set,
+// and never another user's.
+test("bwrap executor binds only the current user's memory dir", { skip: !bwrapWorks && "bwrap unavailable" }, async () => {
+	const { workspaceDir, executor } = setup();
+	const adaDir = join(workspaceDir, "users", "ada");
+	const bobDir = join(workspaceDir, "users", "bob");
+	mkdirSync(bobDir, { recursive: true });
+	writeFileSync(join(bobDir, "MEMORY.md"), "bob private");
+	try {
+		executor.setUserDir(adaDir);
+		const write = await executor.exec(`echo tea > ${join(adaDir, "MEMORY.md")}`);
+		assert.equal(write.code, 0, write.stderr);
+		assert.equal(readFileSync(join(adaDir, "MEMORY.md"), "utf8"), "tea\n");
+
+		const peek = await executor.exec(`cat ${join(bobDir, "MEMORY.md")}`);
+		assert.notEqual(peek.code, 0);
+
+		executor.setUserDir(undefined);
+		const after = await executor.exec(`cat ${join(adaDir, "MEMORY.md")}`);
+		assert.notEqual(after.code, 0);
+	} finally {
+		rmSync(workspaceDir, { recursive: true, force: true });
+	}
+});
