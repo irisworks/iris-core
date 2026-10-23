@@ -139,8 +139,8 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
  * Create an executor for the given sandbox config.
  * For firecracker-pool mode, sessionId (channelId) must be provided so the
  * VmManager can track which VM belongs to which session.
- * For bwrap mode, dirs must be provided: the channel dir is the only writable
- * path inside the sandbox.
+ * For bwrap mode, dirs must be provided: the channel dir is writable inside the
+ * sandbox, plus the current turn's user memory dir when setUserDir() sets one.
  */
 export function createExecutor(
 	config: SandboxConfig,

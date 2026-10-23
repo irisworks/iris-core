@@ -1927,6 +1927,8 @@ Each built-in tool requires a "label" parameter (shown to user).
 		},
 
 		async runTask(prompt: string, label = "task"): Promise<TaskResult> {
+			// Scheduled tasks carry no session user: unbind the last turn's users/<id>/ dir.
+			executor.setUserDir?.(undefined);
 			const abortController = new AbortController();
 			currentTaskAbortController = abortController;
 			try {
