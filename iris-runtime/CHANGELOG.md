@@ -24,10 +24,12 @@
 ### Security
 
 - Bumped transitive `hono` 4.13.7 -> 4.13.13 (GHSA: `serveStatic` double path decoding).
+- Removed unused dependency `@anthropic-ai/sandbox-runtime` (and its
+  `shell-quote` override); it was the last consumer pinning `zod` to 3.x.
 - Bumped transitive `undici` 8.10.2 -> 8.12.3, `zod` 3.25.76 -> 4.6.7,
   `body-parser` 2.3.0 -> 2.4.0, `fast-uri` 3.1.8 -> 3.1.9 and `ip-address`
-  10.7.3 -> 10.7.4 (DoS, SRI bypass and URI-parsing GHSAs). `undici` and `zod`
-  are pinned via `overrides` since no upstream release ships the fixed versions yet.
+  10.7.3 -> 10.7.4 (DoS, SRI bypass and URI-parsing GHSAs). `undici` is pinned
+  via `overrides` since `pi-coding-agent` locks 8.10.2 exactly.
 
 ## [1.12.1] - 2026-10-14
 
