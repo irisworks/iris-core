@@ -10,10 +10,12 @@ import { TelegramClaimManager } from "./telegram-claim.js";
 import type { ChannelState } from "../../engine/index.js";
 import {
 	byId,
+	identityLogFields,
 	registerPromptProfile,
 	type ChannelInfo,
 	type ChannelTransport,
 	type MessageContext,
+	type SessionUserIdentity,
 	type TransportEvent,
 	type TransportPromptProfile,
 	type UserInfo,
@@ -112,6 +114,7 @@ export interface TelegramEvent {
 	threadId?: number;
 	files?: Array<{ fileId: string; name: string; mimeType?: string }>;
 	attachments?: Attachment[];
+	identity?: SessionUserIdentity;
 }
 
 // Shared transport types — moved to transport/types.ts; re-exported for compat
@@ -653,6 +656,7 @@ export class TelegramBot implements ChannelTransport {
 		user: string,
 		text: string,
 		attachments: Array<{ local: string }> = [],
+		identity?: SessionUserIdentity,
 	): Promise<string> {
 		const channelId = `SESSION-${sessionId}`;
 		const queue = this.getQueue(channelId);
@@ -667,6 +671,7 @@ export class TelegramBot implements ChannelTransport {
 			date: new Date().toISOString(),
 			ts,
 			user,
+			...identityLogFields(identity),
 			text,
 			attachments: logged,
 			isBot: false,
@@ -681,6 +686,7 @@ export class TelegramBot implements ChannelTransport {
 			text,
 			chatId: 0,
 			attachments: logged,
+			identity,
 		};
 		queue.enqueue(() => this.handler.handleEvent(event, this));
 		return responsePromise;
@@ -963,9 +969,11 @@ export function createTelegramContext(event: TelegramEvent, bot: TelegramBot, st
 			text: event.text,
 			rawText: event.text,
 			user: event.user,
+			userName: event.identity ? event.user : undefined,
 			channel: event.channel,
 			ts: event.ts,
 			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
+			identity: event.identity,
 		},
 		channelName: bot.getChatName(event.channel),
 		store: state.store,

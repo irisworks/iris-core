@@ -39,7 +39,7 @@ wrapper needed.
 cd /iris/repo
 git add <path>
 git commit -m "<message describing what changed and why>"
-git push "https://$(get-secret GITHUB-TOKEN)@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git" main
+git push "https://x-access-token:$(get-secret GITHUB-TOKEN)@github.com/${IRIS_GITHUB_ORG}/${IRIS_GITHUB_REPO}.git" main
 ```
 
 The PAT is already configured on any bootstrapped install — fetch it with
@@ -52,7 +52,9 @@ and ask them to store it with `set-secret`.
 Pushing the full remote URL with the token inline (rather than rewriting
 `origin`) avoids permanently mutating the repo's remote — `origin` on a fresh
 clone points at the public upstream it was cloned from, not this install's
-private overlay, so leave it alone.
+private overlay, so leave it alone. Keep the `x-access-token:` username —
+a token-only URL (`https://<token>@…`) can fail with
+`could not read Username` after GitHub redirects the push.
 
 ## Common operations
 
