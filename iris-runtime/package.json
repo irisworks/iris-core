@@ -43,11 +43,13 @@
 		"@earendil-works/pi-coding-agent": {
 			"minimatch": {
 				"brace-expansion": "5.0.12"
-			}
+			},
+			"undici": "^8.12.2"
 		},
 		"form-data": "^4.0.6",
 		"proxy-addr": "^2.0.8",
-		"shell-quote": "^1.11.0"
+		"shell-quote": "^1.11.0",
+		"zod": "^4.6.6"
 	},
 	"devDependencies": {
 		"@types/diff": "^7.0.2",
