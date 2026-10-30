@@ -1,6 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Executor } from "../sandbox.js";
-import { attachTool } from "./attach.js";
+import { createAttachTool, type UploadFn } from "./attach.js";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createReadFullTool } from "./read-full.js";
@@ -8,9 +8,9 @@ import { createReadTool } from "./read.js";
 import { createTaskTool, isTasksEnabled, type TaskRunnerOptions } from "./task.js";
 import { createWriteTool } from "./write.js";
 
-export { setUploadFunction } from "./attach.js";
 export { getTaskMaxMs, isTasksEnabled, runIsolatedTask } from "./task.js";
 export type { TaskRunnerOptions } from "./task.js";
+export type { UploadFn } from "./attach.js";
 
 export interface IrisToolsOptions {
 	/** Whether the active model's provider accepts image input. When false, the
@@ -34,6 +34,10 @@ export interface IrisToolsOptions {
 		 * `agent.state.tools = [...tools, ...mcpManager.getTools()]` merge. */
 		getMcpTools?: () => AgentTool<any>[];
 	};
+	/** Returns the calling runner's current upload function (null before its first turn).
+	 * Per-runner on purpose: a module-level singleton let overlapping runs on different
+	 * channels upload through each other's chat. */
+	getUpload: () => UploadFn | null;
 }
 
 function createBaseTools(executor: Executor, options: IrisToolsOptions, inTask: boolean): AgentTool<any>[] {
@@ -51,7 +55,7 @@ function createBaseTools(executor: Executor, options: IrisToolsOptions, inTask: 
 		createBashTool(executor, bashPolicy, options.channelDir),
 		createEditTool(executor),
 		createWriteTool(executor),
-		attachTool,
+		createAttachTool(options.getUpload),
 		createReadFullTool({ channelDir: options.channelDir }),
 	];
 }

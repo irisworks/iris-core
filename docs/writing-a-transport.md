@@ -117,6 +117,13 @@ chunking/threading helper in the engine to call into — each transport owns
 this because platform message-length limits and thread semantics are
 genuinely platform-specific; don't try to hoist it up.
 
+`uploadFile` is how the `attach` tool delivers a file. The engine binds it to
+the context of the run that called `attach`, per channel: when two channels'
+runs overlap, each run's `attach` goes through its own `MessageContext`, so a
+transport can rely on `uploadFile` posting into the conversation that
+produced the file. Don't cache the function across runs — each turn gets a
+fresh context.
+
 `onToolEvent` is optional and additive: transports that can render
 live-updating structure (the web UI's tool cards) implement it to get the
 raw `ToolEvent` instead of the flattened markdown string `respond(...)`

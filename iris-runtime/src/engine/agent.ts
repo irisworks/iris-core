@@ -43,7 +43,7 @@ import {
 	type UserInfo,
 } from "../transport/types.js";
 import { resolveChannelPath, type ChannelStore } from "./store.js";
-import { createIrisTools, createTaskToolsGetter, getTaskMaxMs, setUploadFunction } from "./tools/index.js";
+import { createIrisTools, createTaskToolsGetter, getTaskMaxMs, type UploadFn } from "./tools/index.js";
 import { formatTaskTrail, runIsolatedTask, splitTaskTrail, type TaskResult, type TaskRunnerOptions } from "./tools/task.js";
 
 // Model is now configurable via getOrCreateRunner() — no longer hardcoded here.
@@ -905,12 +905,17 @@ Each built-in tool requires a "label" parameter (shown to user).
 		// MCP server ever connected.
 		getMcpTools: () => getMcpManager(workingDir).getTools(),
 	};
+	// Per-runner upload function: written at the start of each of this channel's turns and
+	// read only by this runner's attach tool (main tools, task inner agent, scheduled
+	// --as-task runs), so overlapping runs on other channels can't redirect it.
+	let uploadFn: UploadFn | null = null;
 	const toolsOptions = {
 		supportsImageInput,
 		workspaceDir: workingDir,
 		channelId,
 		channelDir,
 		task: taskOptions,
+		getUpload: () => uploadFn,
 	};
 	const tools = createIrisTools(executor, toolsOptions);
 	// Scheduled `--as-task` events (runTask below) use the same inner tool
@@ -1534,10 +1539,10 @@ Each built-in tool requires a "label" parameter (shown to user).
 			session.setActiveToolsByName(session.getActiveToolNames());
 
 			// Set up file upload function
-			setUploadFunction(async (filePath: string, title?: string) => {
+			uploadFn = async (filePath: string, title?: string) => {
 				const hostPath = translateToHostPath(filePath, channelDir, workspacePath, channelId, workingDir);
 				await ctx.uploadFile(hostPath, title);
-			});
+			};
 
 			// Reset per-run state
 			runState.ctx = ctx;

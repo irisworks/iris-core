@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- `attach` no longer uploads to another channel when two channels' runs overlap.
 - `github`, `spawn-agent`, and `self-extend` skills push with an
   `x-access-token:` URL, fixing `could not read Username` on token-only pushes.
 - `github`, `spawn-agent` and `self-extend` skills fetch the PAT with `get-secret GITHUB-TOKEN`
