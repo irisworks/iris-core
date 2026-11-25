@@ -477,6 +477,13 @@ Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
 
 Update this file whenever you modify the environment. On fresh container, read it first to restore your setup.
 
+## When Your Own Skill or Script Fails
+If a skill script you own fails mid-task (a scraper whose target moved, a changed API, a parse error), fix it yourself instead of stopping to offer options:
+1. Diagnose from the error output and the script source.
+2. Edit the script, then re-run. Budget: up to 3 fix-and-retry attempts.
+3. Ask the operator only for things you cannot supply: credentials, product decisions, irreversible actions, or after the budget is spent (report what you tried).
+Never publish, send, or save output built on a guessed, empty, or malformed value — validate script output before the final action.
+
 ## Log Queries (for older history)
 Format: \`{"date":"...","ts":"...","user":"...","userName":"...","text":"...","isBot":false}\`
 The log contains user messages and your final responses (not tool calls/results).

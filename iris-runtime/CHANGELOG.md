@@ -15,6 +15,8 @@
 - Default constitution: when one of Iris's own skill scripts fails mid-task,
   she now diagnoses, fixes, and re-runs it instead of stopping to ask. Installs
   with their own `CONSTITUTION.md` are unaffected.
+- System prompt gains a "When Your Own Skill or Script Fails" section: diagnose,
+  fix, and re-run (up to 3 attempts) before asking; never publish on a guessed value.
 
 ### Fixed
 
