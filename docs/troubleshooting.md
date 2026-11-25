@@ -54,6 +54,14 @@ sudo systemctl start iris
 | `build-firecracker-rootfs.sh` fails with `tar: ... Cannot write: No space left on device` | Old script version hardcoded the rootfs image at 2048MiB, smaller than the `iris-runtime:local` export | Pull the latest `scripts/build-firecracker-rootfs.sh` — it now sizes the image from the actual export plus headroom — and re-run |
 | `serve-public` exposed URL (`https://<name>.<IRIS_BASE_DOMAIN>`) times out (or `curl: No route to host`) from outside the VM, even though `nginx`/`certbot` succeeded | On Oracle Cloud, default Ubuntu images ship `iptables` rules blocking inbound traffic except SSH *at the OS level*, on top of the cloud-level Security List — `bootstrap.sh`'s NSG automation is Azure-only, so neither layer is opened automatically on Oracle | Open 80/443 in the VM's Oracle Cloud Security List (or NSG), **and** allow them in the VM's own `iptables`/`ufw` rules — e.g. `sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT` and the same for `443` (persist with `iptables-persistent`), or `sudo ufw allow 80,443/tcp` if you manage the OS firewall with `ufw` instead. Use `-I` (insert at the top of the chain), not `-A` (append) — Oracle's default `INPUT` chain has a catch-all `REJECT` later on, so an appended rule never gets reached. Verify with `sudo iptables -L -n \| grep dpt:`. If using `ufw`, allow SSH (`sudo ufw allow OpenSSH`) before enabling it, or you'll lock yourself out |
 
+### Empty replies after switching models
+
+Chat-completions models such as Kimi-K2.6 can return blank turns on a thread
+whose history was written by a different model. Iris rewrites the old tool-call
+ids to `functions.<tool>:<n>` in memory when loading history, and retries a
+blank turn once before posting an error. If a thread still answers blank, start
+a new thread.
+
 ## Inspecting the last prompt
 
 Each channel directory in the workspace (`<workspace>/slack/<channel>`, `<workspace>/telegram/<channel>`, or `<workspace>/SESSION-...` for virtual channels) contains a `last_prompt.jsonl` with the exact context of the most recent run — system prompt, message history, the new user message, and the image attachment count. It is written asynchronously on a best-effort basis (a failed write logs a warning and never fails the run) and is stored as compact JSON, so pretty-print it when reading:

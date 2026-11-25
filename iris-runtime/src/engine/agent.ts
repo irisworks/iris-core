@@ -23,6 +23,8 @@ import { getLangfuseClient, langfuseSessionId, type LangfuseTrace } from "./lang
 import {
 	createIrisSettingsManager,
 	readResetWatermark,
+	isEmptyAssistantTurn,
+	normalizeForeignToolCallIds,
 	stripDynamicContextFromMessages,
 	syncLogToSessionManager,
 	writeResetWatermark,
@@ -964,7 +966,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 	const loadedSession = sessionManager.buildSessionContext();
 	if (loadedSession.messages.length > 0) {
 		stripDynamicContextFromMessages(loadedSession.messages);
-		agent.state.messages = loadedSession.messages;
+		agent.state.messages = normalizeForeignToolCallIds(loadedSession.messages, model);
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
 	}
 
@@ -1253,7 +1255,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 			const reloaded = sessionManager.buildSessionContext();
 			if (reloaded.messages.length > 0) {
 				stripDynamicContextFromMessages(reloaded.messages);
-				agent.state.messages = reloaded.messages;
+				agent.state.messages = normalizeForeignToolCallIds(reloaded.messages, model);
 			}
 			return result ? { tokensBefore: result.tokensBefore } : null;
 		} catch (err) {
@@ -1486,7 +1488,7 @@ Each built-in tool requires a "label" parameter (shown to user).
 			// Assign even when empty: AgentSession seeds an unpersisted tool declaration
 			// that would otherwise make the first request of a new session go out toolless.
 			stripDynamicContextFromMessages(reloadedSession.messages);
-			agent.state.messages = reloadedSession.messages;
+			agent.state.messages = normalizeForeignToolCallIds(reloadedSession.messages, model);
 			if (reloadedSession.messages.length > 0) {
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}
@@ -1785,6 +1787,24 @@ Each built-in tool requires a "label" parameter (shown to user).
 			}
 			if (!runEndedCleanly()) session.agent.clearAllQueues();
 
+			// A run ending in a blank assistant turn (no text, no tool call) would show the
+			// user nothing. Drop it and re-ask once; if it's still blank, say so (#308).
+			let emptyTurn = false;
+			if (runEndedCleanly() && isEmptyAssistantTurn(session.messages[session.messages.length - 1] as any)) {
+				log.logWarning(`[${channelId}] Empty assistant turn (no text, no tool call); retrying once`);
+				session.agent.state.messages = session.messages.slice(0, -1);
+				const emptyRetryHandle = setTimeout(() => session.agent.abort(), LLM_TIMEOUT_MS);
+				try {
+					await session.agent.continue();
+				} catch (err) {
+					log.logWarning(`[${channelId}] Empty-turn retry failed`, err instanceof Error ? err.message : String(err));
+				} finally {
+					clearTimeout(emptyRetryHandle);
+				}
+				emptyTurn =
+					runEndedCleanly() && isEmptyAssistantTurn(session.messages[session.messages.length - 1] as any);
+			}
+
 			// Wait for queued messages
 			await queueChain;
 
@@ -1806,6 +1826,13 @@ Each built-in tool requires a "label" parameter (shown to user).
 				} catch (err) {
 					const errMsg = err instanceof Error ? err.message : String(err);
 					log.logWarning("Failed to post error message", errMsg);
+				}
+			} else if (emptyTurn) {
+				try {
+					await ctx.replaceMessage("_Sorry, the model returned an empty response. Please try again._");
+				} catch (err) {
+					const errMsg = err instanceof Error ? err.message : String(err);
+					log.logWarning("Failed to post empty-response notice", errMsg);
 				}
 			} else {
 				// Check for [SILENT] marker - delete message and thread instead of posting
