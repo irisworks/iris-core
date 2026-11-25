@@ -59,6 +59,14 @@ Domain and business skills — cost dashboards, finance trackers, CRM integratio
 belong in your install's [overlay](overlay.md). The test: *does this skill help
 Iris run the platform, or is it a task capability an operator happens to want?*
 
+## When a skill fails
+
+If one of Iris's own skill scripts fails mid-task, she diagnoses the error, edits
+the script, and re-runs it (up to 3 attempts) rather than stopping to ask. She
+asks only for operator-only input (credentials, product decisions, irreversible
+actions) or once the attempts are spent. Validate script output before any
+publish step so a guessed or empty value is never sent.
+
 ## Bare-command usage
 
 If a `SKILL.md` documents its executable as a bare command (`send-email ...`
