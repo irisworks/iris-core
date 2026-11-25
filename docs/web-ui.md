@@ -126,6 +126,11 @@ Outbound (server → browser), one frame per JSON message over the socket:
 | `{"type": "delete", "id"}` | The message should be removed (`[SILENT]`) |
 | `{"type": "error", "message"}` | Request-level error (e.g. unknown `agent`/`command`) |
 
+A `file` frame always goes to the thread whose run attached the file, even when
+other threads (or other transports such as Slack) have runs in flight at the
+same time. Each thread's runs deliver their own attachments, so a long-running
+turn in one thread never has its files appear in another.
+
 ## Reference page (IRIS-113)
 
 `GET /` serves a self-contained HTML/CSS/JS page implementing this protocol —
