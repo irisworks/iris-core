@@ -18,6 +18,10 @@
 
 ### Fixed
 
+- Switching a thread to a chat-completions model (e.g. Kimi-K2.6) after another
+  model wrote its history no longer yields empty replies: foreign tool-call ids
+  are rewritten to `functions.<tool>:<n>` in memory on load. A run that ends with
+  no text and no tool call is retried once, then posts a visible error.
 - `attach` no longer uploads to another channel when two channels' runs overlap.
 - `github`, `spawn-agent`, and `self-extend` skills push with an
   `x-access-token:` URL, fixing `could not read Username` on token-only pushes.

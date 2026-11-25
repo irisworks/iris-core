@@ -69,6 +69,54 @@ export function stripDynamicContextFromMessages(messages: Array<{ role: string; 
 	}
 }
 
+type AnyMessage = { role: string; [k: string]: any };
+
+/**
+ * Rewrite tool-call ids on assistant messages written by a different model/API to
+ * `functions.<toolName>:<n>` (the shape Kimi and other chat-completions models emit
+ * natively), and update the matching `toolCallId` on tool results (#308).
+ *
+ * pi-ai rewrites foreign ids (e.g. OpenAI Responses `call_…|fc_…`) on replay into
+ * an opaque `call_<hash>` that carries no tool name, and models that rely on the
+ * id shape then emit wrong tool names / empty turns. In-memory only: returns a new
+ * array, leaving persisted entries untouched. No-op unless the target model uses
+ * the chat-completions API.
+ */
+export function normalizeForeignToolCallIds<T extends AnyMessage>(
+	messages: T[],
+	model: { api: string; id: string },
+): T[] {
+	if (model.api !== "openai-completions") return messages;
+	const idMap = new Map<string, string>();
+	let counter = 0;
+	const out = messages.map((m) => {
+		if (m.role !== "assistant" || !Array.isArray(m.content)) return m;
+		if (m.api === model.api && m.model === model.id) return m;
+		if (!m.content.some((c: any) => c?.type === "toolCall")) return m;
+		return {
+			...m,
+			content: m.content.map((c: any) => {
+				if (c?.type !== "toolCall" || typeof c.id !== "string") return c;
+				const next = `functions.${c.name}:${counter++}`;
+				idMap.set(c.id, next);
+				return { ...c, id: next };
+			}),
+		};
+	});
+	if (idMap.size === 0) return messages;
+	return out.map((m) =>
+		m.role === "toolResult" && idMap.has(m.toolCallId) ? { ...m, toolCallId: idMap.get(m.toolCallId) } : m,
+	);
+}
+
+/** True for a finished assistant turn with no text and no tool call (reasoning-only / blank). */
+export function isEmptyAssistantTurn(m: AnyMessage | undefined): boolean {
+	if (!m || m.role !== "assistant" || m.stopReason !== "stop" || !Array.isArray(m.content)) return false;
+	return !m.content.some(
+		(c: any) => c?.type === "toolCall" || (c?.type === "text" && typeof c.text === "string" && c.text.trim()),
+	);
+}
+
 /**
  * Sync user messages from log.jsonl to SessionManager.
  *
